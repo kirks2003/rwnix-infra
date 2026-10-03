@@ -15,6 +15,11 @@ const state = {
   silenceStartedAt: 0,
   sessionId: crypto.randomUUID(),
   pipelineRunId: 0,
+  wakeRunId: 0,
+  wakeRestartTimer: null,
+  pendingWakeTimer: null,
+  pendingWakeCommand: "",
+  busy: false,
 };
 
 const el = {
@@ -109,6 +114,9 @@ async function armJarvis() {
 
 function stopJarvis() {
   state.armed = false;
+  state.busy = false;
+  clearWakeRestart();
+  clearPendingWake();
   stopWakeRecognition();
   stopRecording();
   resetPipeline();
@@ -124,6 +132,7 @@ async function unlockAudio() {
 }
 
 function startWakeRecognition() {
+  if (!state.armed || state.busy) return;
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     fail("Wake listener unavailable", new Error("Chrome webkitSpeechRecognition is required for this first version."));
@@ -131,6 +140,9 @@ function startWakeRecognition() {
   }
 
   stopWakeRecognition();
+  clearPendingWake();
+  clearWakeRestart();
+  const wakeRunId = ++state.wakeRunId;
   const recognition = new SpeechRecognition();
   recognition.lang = "en-US";
   recognition.continuous = true;
@@ -154,34 +166,47 @@ function startWakeRecognition() {
     const wakePhrase = String(state.config.wakePhrase || "hey jarvis").toLowerCase();
     const wakeIndex = transcript.indexOf(wakePhrase);
     if (wakeIndex >= 0) {
-      log("wake", "Wake phrase detected");
+      if (!state.pendingWakeTimer) log("wake", "Wake phrase detected; waiting briefly for command tail");
       markStep("wake", "done");
-      stopWakeRecognition();
       const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
-      if (inlineCommand) {
-        markStep("record", "skipped");
-        markStep("vad", "skipped");
-        markStep("whisper", "skipped");
-        log("wake", `Using command spoken with wake phrase: ${inlineCommand}`);
-        processPrompt(inlineCommand, { source: "wake-inline" });
-      } else {
-        startCommandRecording();
-      }
+      if (inlineCommand) state.pendingWakeCommand = inlineCommand;
+      window.clearTimeout(state.pendingWakeTimer);
+      state.pendingWakeTimer = window.setTimeout(() => {
+        state.pendingWakeTimer = null;
+        stopWakeRecognition();
+        if (state.pendingWakeCommand) {
+          const command = state.pendingWakeCommand;
+          state.pendingWakeCommand = "";
+          state.busy = true;
+          log("wake", `Using command spoken with wake phrase: ${command}`);
+          markStep("record", "skipped");
+          markStep("vad", "skipped");
+          markStep("whisper", "skipped");
+          processPrompt(command, { source: "wake-inline" });
+        } else {
+          startCommandRecording();
+        }
+      }, 650);
     }
   };
 
   recognition.onerror = (event) => {
     log("wake", `Wake recognition error: ${event.error}`, event);
-    if (state.armed && !state.recording) window.setTimeout(startWakeRecognition, 1200);
+    if (wakeRunId === state.wakeRunId && state.armed && !state.recording && !state.busy) restartWakeRecognition(1200);
   };
 
   recognition.onend = () => {
     log("wake", "Wake recognition ended");
-    if (state.armed && !state.recording) window.setTimeout(startWakeRecognition, 500);
+    if (wakeRunId === state.wakeRunId && state.armed && !state.recording && !state.busy) restartWakeRecognition(500);
   };
 
   state.wakeRecognition = recognition;
-  recognition.start();
+  try {
+    recognition.start();
+  } catch (error) {
+    log("wake", "Wake recognition start failed; retrying", normalizeError(error));
+    if (state.armed && !state.busy) restartWakeRecognition(1200);
+  }
 }
 
 function stopWakeRecognition() {
@@ -197,8 +222,29 @@ function stopWakeRecognition() {
   }
 }
 
+function restartWakeRecognition(delayMs = 500) {
+  clearWakeRestart();
+  if (!state.armed || state.busy) return;
+  state.wakeRestartTimer = window.setTimeout(() => {
+    state.wakeRestartTimer = null;
+    startWakeRecognition();
+  }, delayMs);
+}
+
+function clearWakeRestart() {
+  if (state.wakeRestartTimer) window.clearTimeout(state.wakeRestartTimer);
+  state.wakeRestartTimer = null;
+}
+
+function clearPendingWake() {
+  if (state.pendingWakeTimer) window.clearTimeout(state.pendingWakeTimer);
+  state.pendingWakeTimer = null;
+  state.pendingWakeCommand = "";
+}
+
 async function startCommandRecording() {
   try {
+    state.busy = true;
     state.recording = true;
     state.chunks = [];
     setPipelineStage("recording", "Recording", `Speak now. Recording stops after ${state.config.silenceMs} ms of silence.`, "record");
@@ -228,8 +274,9 @@ async function startCommandRecording() {
     monitorVoiceActivity();
   } catch (error) {
     state.recording = false;
+    state.busy = false;
     fail("Could not start microphone recording", error);
-    if (state.armed) startWakeRecognition();
+    if (state.armed) restartWakeRecognition(1000);
   }
 }
 
@@ -284,7 +331,8 @@ async function onRecordingStopped() {
   state.chunks = [];
   if (blob.size < 1200) {
     log("record", `Recording too small (${blob.size} bytes); returning to wake mode`);
-    if (state.armed) startWakeRecognition();
+    state.busy = false;
+    if (state.armed) restartWakeRecognition(500);
     return;
   }
 
@@ -298,8 +346,9 @@ async function onRecordingStopped() {
     markStep("whisper", "done");
     await processPrompt(transcribed.text, { source: "voice" });
   } catch (error) {
+    state.busy = false;
     fail("Whisper transcription failed or no speech was detected", error);
-    if (state.armed) startWakeRecognition();
+    if (state.armed) restartWakeRecognition(1000);
   }
 }
 
@@ -315,7 +364,9 @@ function cleanupAudio() {
 }
 
 async function processPrompt(prompt, meta = {}) {
+  state.busy = true;
   if (meta.source === "manual") {
+    stopWakeRecognition();
     startPipelineRun();
     markStep("wake", "skipped");
     markStep("record", "skipped");
@@ -333,8 +384,9 @@ async function processPrompt(prompt, meta = {}) {
     el.answerText.textContent = result.answer || "No answer returned.";
     speak(result.answer || "No answer returned.");
   } catch (error) {
+    state.busy = false;
     fail("Brain request failed", error);
-    if (state.armed) startWakeRecognition();
+    if (state.armed) restartWakeRecognition(1000);
   }
 }
 
@@ -348,13 +400,15 @@ async function speak(text) {
   utterance.onend = () => {
     log("tts", "Speech finished");
     markStep("tts", "done");
+    state.busy = false;
     finishPipelineSoon();
-    if (state.armed) startWakeRecognition();
+    if (state.armed) restartWakeRecognition(450);
     else setPipelineStage("standby", "Standby", "Jarvis is disarmed.");
   };
   utterance.onerror = (event) => {
+    state.busy = false;
     fail("Speech synthesis failed", event.error || event);
-    if (state.armed) startWakeRecognition();
+    if (state.armed) restartWakeRecognition(1000);
   };
   speechSynthesis.cancel();
   speechSynthesis.resume();
