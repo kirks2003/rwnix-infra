@@ -181,6 +181,37 @@ button:disabled {
   color: var(--muted);
 }
 
+.wake-settings {
+  margin: 18px 0;
+  padding: 18px;
+  border: 1px solid rgba(66, 217, 255, 0.18);
+  border-radius: 18px;
+  background: var(--panel);
+}
+
+.wake-word-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+#wakeWordInput {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(66, 217, 255, 0.4);
+  border-radius: 12px;
+  color: var(--text);
+  background: #02050b;
+  font: inherit;
+}
+
+#wakeWordHelp, #wakeWordStatus {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 progress {
   width: 100%;
   accent-color: var(--cyan);

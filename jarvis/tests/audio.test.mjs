@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AudioBufferWindow, delay, wakeCommand } from "../public/audio.js";
+import { AudioBufferWindow, delay, wakeCommand, normalizeWakePhrase } from "../public/audio.js";
 
 test("Whisper punctuation and case do not prevent wake detection", () => {
   assert.equal(wakeCommand("Hey, Jarvis! What's the time?", "hey jarvis"), "What's the time?");
@@ -15,6 +15,18 @@ test("Rocky supports wake-only and inline commands without matching longer words
   assert.equal(wakeCommand("rocky. Wie viel Uhr ist es?", "Rocky"), "Wie viel Uhr ist es?");
   assert.equal(wakeCommand("Rockyard", "Rocky"), null);
   assert.equal(wakeCommand("Hey Jarvis", "Rocky"), null);
+});
+
+test("personal wake phrases are normalized and validated", () => {
+  assert.equal(normalizeWakePhrase("  Hey   Nova "), "Hey Nova");
+  assert.equal(normalizeWakePhrase("R2-D2"), "R2-D2");
+  for (const invalid of ["", "  ", "!", "<script>", "a".repeat(61)]) {
+    assert.throws(() => normalizeWakePhrase(invalid), /1-60/);
+  }
+  const phrase = "\u00c9cho";
+  assert.equal(normalizeWakePhrase(phrase), phrase);
+  assert.equal(wakeCommand("\u00e9cho, hello", phrase), "hello");
+  assert.equal(wakeCommand("super\u00e9cho, hello", phrase), null);
 });
 
 test("every overlapping audio snapshot has a complete WAV header and correct PCM", async () => {

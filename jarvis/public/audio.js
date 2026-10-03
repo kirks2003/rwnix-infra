@@ -147,6 +147,14 @@ export class Microphone {
 
 export function wakeCommand(text, phrase) {
   const words = phrase.trim().split(/\s+/).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const match = new RegExp(`\\b${words.join("[\\s,;:.!?-]+")}\\b[\\s,;:.!?-]*`, "i").exec(text);
+  const match = new RegExp(`(?:^|[^\\p{L}\\p{N}_])${words.join("[\\s,;:.!?-]+")}(?![\\p{L}\\p{N}_])[\\s,;:.!?-]*`, "iu").exec(text);
   return match ? text.slice(match.index + match[0].length).trim() : null;
+}
+
+export function normalizeWakePhrase(value) {
+  const phrase = value.trim().replace(/\s+/g, " ");
+  if (phrase.length > 60 || !/^[\p{L}\p{N}]+(?:[ '-][\p{L}\p{N}]+)*$/u.test(phrase)) {
+    throw new Error("Use 1-60 characters: words or numbers separated by spaces, hyphens or apostrophes.");
+  }
+  return phrase;
 }

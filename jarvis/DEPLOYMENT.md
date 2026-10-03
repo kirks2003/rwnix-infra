@@ -47,6 +47,7 @@ Findings while exposing the service:
 ## Runtime behavior
 
 - Wake word: `Rocky` (changed from `hey jarvis` on 2026-10-03 at the user's request; matching is case-insensitive)
+- Personal wake override: the UI's **Your wake word** field persists locally per browser/origin. Apply aborts the active session; re-arm to use the new word. It does not change `.env` or other users' defaults.
 - Wake engine: vm103 Whisper probes from continuous browser AudioWorklet PCM capture
 - Command recording: complete mono WAV snapshots; capture continues during Whisper latency
 - Auto-stop: `1500 ms` continuous silence
@@ -54,6 +55,7 @@ Findings while exposing the service:
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
 - Output: browser `speechSynthesis` plus prompt/result text in the UI
 - Observability: browser live log and backend JSON logs via `docker logs jarvis`
+- Recognized speech: the browser live log explicitly prints every wake/command transcript (or no-speech result), followed by endpoint/request metadata. Full transcripts are not newly persisted in Docker logs.
 
 The frontend exposes progress at each small step:
 

@@ -1,12 +1,14 @@
-import { Microphone, abortError, delay, wakeCommand } from "./audio.js";
+import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase } from "./audio.js";
 
 const el = Object.fromEntries([
   "core", "stageTitle", "stageDetail", "armButton", "stopButton", "testButton",
   "clearLogButton", "micLevel", "silenceLevel", "promptText", "answerText",
   "log", "steps", "promptDialog", "manualPrompt", "whisperStatus",
+  "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
 ].map((id) => [id, document.getElementById(id)]));
 const steps = ["wake", "record", "vad", "whisper", "brain", "tts"];
 const sessionId = crypto.randomUUID();
+const wakeWordStorageKey = "jarvis.wakePhrase";
 let config;
 let current = null;
 let sequence = 0;
@@ -88,7 +90,9 @@ async function transcribe(session, start, purpose) {
     method: "POST", headers: { "content-type": blob.type }, body: blob,
   });
   el.whisperStatus.textContent = `Last ${purpose}: ${result.endpoint} | request ${result.requestId}`;
-  log("whisper", purpose, result);
+  const { text, ...details } = result;
+  log("whisper", `${purpose === "wake" ? "Wake probe" : "Command"} recognized: ${text ? JSON.stringify(text) : "(no speech recognized)"}`);
+  log("whisper", "Response details", details);
   return result.text || "";
 }
 
@@ -273,6 +277,31 @@ el.promptDialog.addEventListener("close", async () => {
   }
 });
 el.clearLogButton.addEventListener("click", () => { el.log.textContent = ""; });
+el.wakeWordInput.addEventListener("input", () => el.wakeWordInput.setCustomValidity(""));
+el.wakeWordForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!config) return;
+  let phrase;
+  try {
+    phrase = normalizeWakePhrase(el.wakeWordInput.value);
+  } catch (error) {
+    el.wakeWordInput.setCustomValidity(error.message);
+    el.wakeWordInput.reportValidity();
+    el.wakeWordStatus.textContent = `Wake word unchanged. ${error.message}`;
+    return;
+  }
+  stop(`Wake word changed to "${phrase}". Click Arm Jarvis to listen.`);
+  config.wakePhrase = phrase;
+  el.wakeWordInput.value = phrase;
+  try {
+    localStorage.setItem(wakeWordStorageKey, phrase);
+    el.wakeWordStatus.textContent = `Saved for this browser: "${phrase}". Click Arm Jarvis to use it.`;
+  } catch (error) {
+    el.wakeWordStatus.textContent = `Using "${phrase}" for this tab only; browser storage is unavailable.`;
+    log("settings", "Could not save wake word", { message: error.message });
+  }
+  log("settings", `Active wake word: ${JSON.stringify(phrase)}. Previous session stopped.`);
+});
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && current) stop("Tab hidden; microphone and pending requests stopped. Re-arm when ready.");
 });
@@ -287,6 +316,19 @@ fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) })
       throw new Error("Invalid Whisper/wake configuration");
     }
     config = value;
+    el.wakeWordStatus.textContent = `Server default: "${config.wakePhrase}". Apply a personal wake word for this browser.`;
+    try {
+      const saved = localStorage.getItem(wakeWordStorageKey);
+      if (saved !== null) {
+        config.wakePhrase = normalizeWakePhrase(saved);
+        el.wakeWordStatus.textContent = `Personal wake word loaded for this browser: "${config.wakePhrase}".`;
+      }
+    } catch (error) {
+      el.wakeWordStatus.textContent = `Could not load a saved wake word; using server default "${config.wakePhrase}".`;
+      log("settings", "Could not load wake word", { message: error.message });
+    }
+    el.wakeWordInput.value = config.wakePhrase;
+    el.wakeWordInput.disabled = el.saveWakeWordButton.disabled = false;
     el.silenceLevel.max = config.silenceMs;
     el.whisperStatus.textContent = `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`;
     el.armButton.disabled = el.testButton.disabled = false;

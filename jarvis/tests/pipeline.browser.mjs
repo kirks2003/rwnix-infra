@@ -196,6 +196,60 @@ test("permission granted after Stop cannot resurrect the old session", async (t)
   assert.equal(calls.audio.length, 0);
 });
 
+test("personal wake word is saved, restored after reload and used by the pipeline", { timeout: 25000 }, async (t) => {
+  const { page, calls } = await setup(t, async () => ({ text: "Nova, hello there" }));
+  await page.fill("#wakeWordInput", "  Nova  ");
+  assert.equal(await page.inputValue("#wakeWordInput"), "  Nova  ");
+  await page.click("#saveWakeWordButton");
+  assert.equal(await page.textContent("#stageTitle"), "Stopped");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.wakePhrase")), "Nova");
+  assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "ended")));
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.inputValue("#wakeWordInput"), "Nova");
+  await page.click("#armButton");
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 15000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["hello there"]);
+});
+
+test("invalid personal wake words do not stop or change the active session", async (t) => {
+  const { page } = await setup(t, async () => ({ text: "" }));
+  await page.fill("#wakeWordInput", "!!!");
+  await page.click("#saveWakeWordButton");
+  assert.match(await page.textContent("#wakeWordStatus"), /Wake word unchanged/);
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.wakePhrase")), null);
+  assert.equal(await page.isDisabled("#stopButton"), false);
+  await page.fill("#wakeWordInput", "Echo");
+  await page.click("#saveWakeWordButton");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.wakePhrase")), "Echo");
+});
+
+test("Whisper log shows readable wake and command text, including empty results", { timeout: 25000 }, async (t) => {
+  const { page } = await setup(t, async (n) => ({
+    text: n === 1 ? "" : n === 2 ? "background conversation" : "Rocky, hello",
+    noSpeech: n === 1,
+  }));
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  await page.click("#stopButton");
+  const log = await page.textContent("#log");
+  assert.match(log, /Wake probe recognized: \(no speech recognized\)/);
+  assert.match(log, /Wake probe recognized: "background conversation"/);
+  assert.match(log, /Command recognized: "Rocky, hello"/);
+  assert.match(log, /Response details.*stt-/);
+});
+
+test("blocked local storage is reported without falsely claiming persistence", async (t) => {
+  const { page } = await setup(t, async () => ({ text: "" }));
+  await page.evaluate(() => {
+    Storage.prototype.setItem = () => { throw new DOMException("Storage blocked", "SecurityError"); };
+  });
+  await page.fill("#wakeWordInput", "Echo");
+  await page.click("#saveWakeWordButton");
+  assert.match(await page.textContent("#wakeWordStatus"), /this tab only/);
+  assert.match(await page.textContent("#stageDetail"), /Echo/);
+});
+
 test("actual vm103 transcription of browser-captured speech", {
   skip: !process.env.JARVIS_LIVE_STT_ENDPOINT || !process.env.JARVIS_SPEECH_FIXTURE, timeout: 60000,
 }, async (t) => {

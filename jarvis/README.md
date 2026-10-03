@@ -20,6 +20,10 @@ Keep the HTTPS page in the foreground. Hiding it explicitly stops the microphone
 
 The reactor and active pipeline step follow the actual operation, not independent display timers. The STT status distinguishes configured endpoints from the last response's endpoint and request ID. Only one pipeline runs per tab. **Stop** invalidates all callbacks, aborts requests, releases tracks and cancels TTS; **Manual prompt** is available only when disarmed.
 
+Set **Your wake word** and click **Apply wake word** to override the server default (`Rocky`) for your browser. Applying stops any active session; click **Arm Jarvis** again. The setting is saved in local storage per browser profile and website origin (the NBG and VIE URLs have separate settings), not shared with other users. Use 1-60 characters: words/numbers, spaces, hyphens or apostrophes. If storage is blocked, the UI explicitly reports that the change applies only until reload.
+
+The **Live log** prints `Wake probe recognized: "..."` and `Command recognized: "..."` for Whisper responses, including non-wake speech. Empty responses show `(no speech recognized)`. Endpoint, request ID and attempt metadata follow separately. These readable transcripts are displayed in this tab, not added to persistent Docker logs; Clear removes the visible log.
+
 Commands end after `SILENCE_MS` silence, with a 10-second wait for initial speech and a 15-second command limit. Whisper upstream requests time out after 20 seconds per endpoint and brain requests after 45 seconds. TTS has a bounded watchdog that cancels speech and reports an error rather than pretending playback finished.
 
 ## Runtime configuration

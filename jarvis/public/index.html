@@ -32,6 +32,17 @@
         </div>
       </section>
 
+      <form id="wakeWordForm" class="wake-settings">
+        <label for="wakeWordInput">Your wake word</label>
+        <div class="wake-word-controls">
+          <input id="wakeWordInput" type="text" maxlength="60" required autocomplete="off"
+                 placeholder="Rocky" aria-describedby="wakeWordHelp wakeWordStatus" disabled>
+          <button id="saveWakeWordButton" type="submit" disabled>Apply wake word</button>
+        </div>
+        <p id="wakeWordHelp">Saved in this browser only. Applying stops the current session; click Arm Jarvis again.</p>
+        <p id="wakeWordStatus" role="status">Loading wake-word settings.</p>
+      </form>
+
       <section class="transcript">
         <div>
           <h2>Prompt</h2>
