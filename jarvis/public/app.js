@@ -115,11 +115,22 @@ async function waitForCommandEnd(session, start, needsSpeech) {
   if (needsSpeech) session.mic.beep();
   const speechAfter = start + (needsSpeech ? buffer.sampleRate * 0.3 : 0);
   let heard = !needsSpeech;
+  let shown = 0;
   while (performance.now() - started < 15000) {
     await tick(session);
     if (buffer.lastVoice > speechAfter) heard = true;
     const silentMs = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000;
     el.silenceLevel.value = heard ? Math.min(config.silenceMs, silentMs) : 0;
+    // This stage can hold for up to 15 s on a noisy microphone that never goes
+    // quiet, so count down in place rather than looking frozen. Updated without
+    // stage() so the live log is not flooded.
+    const elapsed = performance.now() - started;
+    if (elapsed - shown >= 500) {
+      shown = elapsed;
+      el.stageDetail.textContent = heard
+        ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(config.silenceMs - silentMs))} ms more silence, or at the 15 s limit.`
+        : `Waiting for speech: ${(elapsed / 1000).toFixed(1)} s of 10 s. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
+    }
     if (heard) {
       mark("vad", "active");
       if (silentMs >= config.silenceMs) {

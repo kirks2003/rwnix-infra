@@ -31,7 +31,7 @@ before(async () => {
     } else if (req.url.endsWith("chat/completions")) {
       res.end('{"choices":[{"message":{"content":"Hello"}}]}');
     } else {
-      res.end(JSON.stringify({ text: mode === "silence" ? "" : mode === "hallucination" ? "Untertitelung des ZDF, 2020" : "Hey, Jarvis. What time is it?" }));
+      res.end(JSON.stringify({ text: mode === "silence" ? "" : mode === "hallucination" ? "Untertitelung des ZDF, 2020" : mode === "thanks" ? "Thank you." : "Hey, Jarvis. What time is it?" }));
     }
   });
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
@@ -92,7 +92,7 @@ test("backend forwards a valid WAV and reports the actual endpoint and request I
 });
 
 test("valid silence and hallucinations are no-speech, not transport success with fake words", async () => {
-  for (const value of ["silence", "hallucination"]) {
+  for (const value of ["silence", "hallucination", "thanks"]) {
     mode = value;
     const response = await transcribe();
     assert.equal(response.status, 200);

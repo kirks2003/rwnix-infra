@@ -359,7 +359,11 @@ test("HAL 9000 finishes the answer with the browser voice when self-hosted TTS f
   await page.click("#stopButton");
   assert.deepEqual(calls.speak, ["It is 14:05.", "I am completely operational."]);
   assert.equal(await page.evaluate(() => savedUtterances[0].text), "I am completely operational.");
-  assert.ok(await page.evaluate(() => savedUtterances[0].rate < 0.7));
+  // The HAL fallback keeps its own cadence rather than the browser default.
+  // The API stores these as 32-bit floats, so compare with a tolerance.
+  const [rate, pitch] = await page.evaluate(() => [savedUtterances[0].rate, savedUtterances[0].pitch]);
+  assert.ok(Math.abs(rate - 0.88) < 1e-6, `rate ${rate}`);
+  assert.ok(Math.abs(pitch - 0.5) < 1e-6, `pitch ${pitch}`);
   assert.match(await page.textContent("#log"), /finishing the answer with the browser voice/);
 });
 

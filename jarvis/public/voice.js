@@ -17,12 +17,14 @@ export const voiceProfiles = {
     label: "HAL 9000",
     neural: true,
     // speechSynthesis fallback: slow and flat, the only HAL traits it can reproduce.
-    rate: 0.68,
+    rate: 0.88,
     pitch: 0.5,
-    pauseMs: 420,
+    pauseMs: 300,
     chunkChars: 240,
-    // Neural backend: ask the engine for slow speech, then detune slightly on playback.
-    speed: 0.8,
+    // Neural backend: 1.04 against the 0.96 playback rate lands near natural speed,
+    // about 30% quicker than the original 0.8, while the detune keeps HAL's pitch.
+    // The clause pause shrinks with it so the whole delivery scales together.
+    speed: 1.04,
     playbackRate: 0.96,
     voiceHints: ["george", "lewis", "daniel", "arthur", "fable", "ryan", "alex", "david"],
     langHints: ["en-GB", "en-US", "en"],

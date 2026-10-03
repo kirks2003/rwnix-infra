@@ -326,7 +326,10 @@ function isLikelyWhisperHallucination(text) {
     "subtitles by the amara.org community",
     "thanks for watching",
   ];
-  return hallucinations.some((phrase) => normalized.includes(phrase));
+  if (hallucinations.some((phrase) => normalized.includes(phrase))) return true;
+  // large-v3 emits these for near-silence even with the VAD filter on. Treating
+  // them as speech would send a phantom prompt to the brain.
+  return ["thank you.", "thank you", "you", "bye.", "okay.", "."].includes(normalized);
 }
 
 async function chat(prompt, sessionId, requestId, signal) {
