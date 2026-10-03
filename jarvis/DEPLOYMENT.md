@@ -273,7 +273,10 @@ Rolled out to vm104 from this branch using the same file-copy + `docker compose 
 - `jarvis-code.bak-20261003_221924.tgz` — before character voices, language switch and full-width bottom log
 - `jarvis-code.bak-20261003_222222.tgz` — before the Kokoro voice-ID fix (wizard/newscaster)
 - `jarvis-code.bak-20261003_223240.tgz` — before the language switch UI (first pass)
-- `jarvis-code.bak-20261003_223857.tgz` — before the language toggle switch (current state)
+- `jarvis-code.bak-20261003_223857.tgz` — before the language toggle switch
+- `jarvis-code.bak-20261003_230701.tgz` — before the realtime level ring, LEVEL % readout and faster stage animations
+- `jarvis-code.bak-20261003_231630.tgz` — before the longer bar break-out and the ~30% smaller animation panel
+- `jarvis-code.bak-20261003_232149.tgz` — before the `Hey Rocky` default wake word and English default language (current state)
 
 Features shipped:
 
@@ -290,11 +293,21 @@ Features shipped:
   non-English as a backstop.
 - Layout: Prompt/Answer above the mic-level controls; Live log is a full-width panel at the
   bottom; STT endpoint/request-ID detail appears only in the Live log.
+- Realtime level: a circular VU ring around the reactor plus a numeric `LEVEL %` readout
+  under the core, driven at 60 fps by the analyser RMS (mic while armed, shaped TTS output
+  while speaking, ambient input during transcribing/thinking).
+- More dynamic core: faster ring spins in every stage, standby pulses and slowly rotates,
+  reactor glow/scale/brightness react harder to level; waveform bars break out further at
+  high level on a 360 canvas while the animation panel shrank ~30% (core 320px → 224px) to
+  give Prompt/Answer more room.
+- Defaults: wake word is `Hey Rocky` when no per-browser value is saved (server default,
+  live `.env`, `.env.example`); the UI language defaults to English for browsers without a
+  saved choice.
 
 Verified against the running container:
 
-- Unit suite 35/35, including per-profile voice mapping, per-request Whisper language, brain
-  override, TTS guard, German voice picker and waveform math.
+- Unit suite 36/36, including per-profile voice mapping, per-request Whisper language, brain
+  override, TTS guard, German voice picker, waveform math and the time-domain level meter.
 - All five voice profiles returned valid RIFF WAVs from the live Kokoro engine
   (`hal9000/commander/android/wizard/newscaster` → `bm_george/bm_daniel/bm_lewis/bm_fable/am_michael`).
 - The engine's supported-voice list was probed through its 422 detail dump: en-GB males are
@@ -303,4 +316,6 @@ Verified against the running container:
 - Live brain through the deployed backend: German request → `"Ich bin bereit."`, English
   request → `"I am ready."`.
 - `/api/transcribe?language=de` and `=en` both returned 200 from gpu-1.
-- Container reported `healthy` after the final rebuild.
+- `/api/config` on the live instance reports `wakePhrase: "Hey Rocky"` and
+  `whisperLanguage: "en"` after the final rollout.
+- Container reported `healthy` after every rebuild, including the last one.
