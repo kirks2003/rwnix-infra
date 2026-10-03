@@ -39,19 +39,27 @@ body {
 }
 
 .hero {
-  grid-template-columns: minmax(180px, 260px) 1fr;
+  grid-template-columns: minmax(180px, 240px) 1fr;
   align-items: center;
   min-height: 280px;
+}
+
+.core-wrap {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  margin: auto;
 }
 
 .core {
   --stage-color: var(--cyan);
   position: relative;
-  width: 220px;
-  height: 220px;
-  margin: auto;
+  width: 224px;
+  height: 224px;
+  margin: 0;
   border-radius: 50%;
-  transition: filter 200ms ease;
+  filter: brightness(calc(1 + var(--audio-level, 0) * 0.35));
+  transition: filter 120ms ease;
 }
 
 .ring, .reactor {
@@ -66,16 +74,16 @@ body {
 }
 
 .ring-b {
-  inset: 28px;
+  inset: 12.5%;
   border: 2px dashed rgba(216, 243, 255, 0.5);
-  animation: spin-reverse 45s linear infinite;
+  animation: spin-reverse 26s linear infinite;
 }
 
 .reactor {
-  inset: 72px;
+  inset: 32.5%;
   background: radial-gradient(circle, #eaffff, var(--stage-color) 34%, transparent 70%);
-  box-shadow: 0 0 calc(42px + var(--audio-level, 0) * 46px) var(--stage-color);
-  transform: scale(calc(1 + var(--audio-level, 0) * 0.3));
+  box-shadow: 0 0 calc(48px + var(--audio-level, 0) * 140px) var(--stage-color);
+  transform: scale(calc(1 + var(--audio-level, 0) * 0.55));
 }
 
 .waveform {
@@ -88,10 +96,28 @@ body {
 
 .waveform line {
   stroke: var(--stage-color);
-  stroke-width: 2;
+  stroke-width: 3;
   stroke-linecap: round;
-  opacity: 0.85;
+  opacity: 0.95;
   transition: stroke 200ms ease;
+}
+
+.waveform .level-ring {
+  fill: none;
+  stroke: var(--stage-color);
+  stroke-width: 6;
+  stroke-linecap: round;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 8px var(--stage-color));
+  transition: stroke 200ms ease;
+}
+
+.level-readout {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  letter-spacing: 0.22em;
+  font-variant-numeric: tabular-nums;
 }
 
 .core.prompting, .core.recording { --stage-color: var(--green); }
@@ -101,41 +127,41 @@ body {
 .core.error { --stage-color: var(--red); }
 
 .standby .ring-a {
-  animation: pulse 3s ease-in-out infinite;
+  animation: pulse 2.2s ease-in-out infinite, spin 30s linear infinite;
 }
 
 .wake .ring-a, .listening .ring-a {
-  animation: spin 8s linear infinite;
+  animation: spin 5s linear infinite;
 }
 
 .prompting .ring-a {
   border-color: var(--green);
   box-shadow: 0 0 48px rgba(45, 255, 191, 0.75), inset 0 0 26px rgba(45, 255, 191, 0.25);
-  animation: pulse 0.55s ease-in-out infinite;
+  animation: pulse 0.45s ease-in-out infinite;
 }
 
 .recording .ring-a {
   border-color: var(--green);
   box-shadow: 0 0 40px rgba(45, 255, 191, 0.6), inset 0 0 22px rgba(45, 255, 191, 0.2);
-  animation: spin 2.2s linear infinite;
+  animation: spin 1.3s linear infinite;
 }
 
 .transcribing .ring-a {
   border-color: var(--blue);
   box-shadow: 0 0 42px rgba(77, 141, 255, 0.65), inset 0 0 22px rgba(77, 141, 255, 0.2);
-  animation: spin 1.1s linear infinite, flicker 0.35s steps(2) infinite;
+  animation: spin 0.7s linear infinite, flicker 0.25s steps(2) infinite;
 }
 
 .thinking .ring-a, .computing .ring-a {
   border-color: var(--amber);
   box-shadow: 0 0 42px rgba(255, 192, 77, 0.65), inset 0 0 22px rgba(255, 192, 77, 0.2);
-  animation: spin 0.75s linear infinite, flicker 0.18s steps(2) infinite;
+  animation: spin 0.45s linear infinite, flicker 0.14s steps(2) infinite;
 }
 
 .speaking .ring-a {
   border-color: var(--purple);
   box-shadow: 0 0 42px rgba(176, 136, 255, 0.65), inset 0 0 22px rgba(176, 136, 255, 0.2);
-  animation: pulse 1s ease-in-out infinite;
+  animation: pulse 0.65s ease-in-out infinite, spin 14s linear infinite;
 }
 
 .error .ring-a {
@@ -465,7 +491,7 @@ menu {
   }
 
   .core {
-    width: 180px;
-    height: 180px;
+    width: 175px;
+    height: 175px;
   }
 }

@@ -48,7 +48,7 @@ Findings while exposing the service:
 
 - Language: English end to end. `WHISPER_LANGUAGE`, the brain system prompt and the HAL 9000 TTS voice all default to English as of 2026-10-03. The deployed vm103 `.env` still carries `WHISPER_LANGUAGE=de` until it is updated on the host.
 - Voice services: deployed on `gpu-1` 2026-10-03 (see "gpu-1 voice services" below). STT and TTS both run there now, reached at `https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`; the vm103 Whisper endpoint is no longer used. vm104 was updated in the same step, because the new endpoint requires `WHISPER_API_KEY` and the previous build could not send it.
-- Wake word: `Rocky` (changed from `hey jarvis` on 2026-10-03 at the user's request; matching is case-insensitive)
+- Wake word: `Hey Rocky` (changed from `Rocky` on 2026-10-03 at the user's request, earlier from `hey jarvis`; matching is case-insensitive)
 - Personal wake override: the UI's **Your wake word** field persists locally per browser/origin. Apply aborts the active session; re-arm to use the new word. It does not change `.env` or other users' defaults.
 - Wake engine: self-hosted Whisper probes from continuous browser AudioWorklet PCM capture, triggered on the trailing edge of speech (~350 ms after the talker stops, 3 s speech cap). Measured against the gpu-1 service with four isolated "Rocky" utterances: the old fixed-interval trigger cut two of eight probe windows mid-word and returned empty for them; the trailing-edge trigger recognized all six of its probes and detected the phrase about 0.9 s sooner.
 - Command recording: complete mono WAV snapshots; capture continues during Whisper latency

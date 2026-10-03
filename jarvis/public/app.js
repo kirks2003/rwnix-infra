@@ -4,7 +4,7 @@ import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, split
 import { CoreVisualizer } from "./visualizer.js";
 
 const el = Object.fromEntries([
-  "core", "waveform", "stageTitle", "stageDetail", "armButton", "stopButton", "testButton",
+  "core", "waveform", "levelReadout", "stageTitle", "stageDetail", "armButton", "stopButton", "testButton",
   "clearLogButton", "micLevel", "silenceLevel", "promptText", "answerText",
   "log", "steps", "promptDialog", "manualPrompt",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
@@ -31,6 +31,10 @@ visualizer.pickAnalyser = () => {
   // Speaking shows the agent's own voice when it is tappable; the microphone
   // drives every other armed stage.
   return visualizer.stage === "speaking" ? session.voice?.analyser ?? null : session.mic?.analyser ?? null;
+};
+// Numeric readout under the core; the visualizer throttles to ~10 updates/s.
+visualizer.onLevel = (level) => {
+  el.levelReadout.textContent = `LEVEL ${Math.round(level * 100)}%`;
 };
 visualizer.start();
 
@@ -123,6 +127,8 @@ function stop(message = "Jarvis is disarmed.") {
   for (const button of previewButtons) button.disabled = !config;
   el.micLevel.value = 0;
   el.silenceLevel.value = 0;
+  visualizer.resetLevel();
+  el.levelReadout.textContent = "LEVEL 0%";
   stage("standby", "Stopped", message);
 }
 
@@ -551,8 +557,8 @@ fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) })
     } catch (error) {
       log("settings", "Could not load language", { message: error.message });
     }
-    // The saved choice wins; otherwise the server default (WHISPER_LANGUAGE).
-    setLanguage(savedLanguage || config.whisperLanguage || "en", false);
+    // The saved choice wins; otherwise English is the default.
+    setLanguage(savedLanguage || "en", false);
     el.languageSwitch.disabled = false;
     el.silenceLevel.max = config.silenceMs;
     log("stt", `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`);

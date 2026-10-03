@@ -6,10 +6,10 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 
 - Shows every stage in the web UI: boot, wake listening, wake detected, recording, 1.5 s silence stop, Whisper upload, LLM prompt, TTS speaking, errors, and backend request details.
 - **Animation preview** buttons switch the core and waveform between every pipeline animation (Standby, Wake, Recording, Transcribing, Thinking, Speaking, Error) without arming; they are disabled while a session runs, so the live pipeline always owns the core.
-- Uses self-hosted Whisper wake probes for the word `Rocky`; browser speech recognition is not used for wake or prompt STT.
+- Uses self-hosted Whisper wake probes for the phrase `Hey Rocky`; browser speech recognition is not used for wake or prompt STT.
 - Captures mono PCM continuously with an `AudioWorklet` while armed. Overlapping voice probes are encoded as complete WAV files, without gaps while Whisper responds.
 - Probes fire on the trailing edge of speech, about 350 ms after the talker stops, rather than on a fixed interval. A window that ends mid-word comes back from Whisper empty, which used to cost a whole probe cycle before the wake phrase was heard. If speech runs on without pausing, a probe is sent anyway once the burst reaches 3 s; that cap counts speech, not wall time, so leading silence cannot trip it mid-word.
-- After wake detection, waits for the utterance to finish and sends its complete audio to Whisper. This preserves commands spoken immediately after "Rocky". A wake word alone opens a separate command window with an audible beep.
+- After wake detection, waits for the utterance to finish and sends its complete audio to Whisper. This preserves commands spoken immediately after "Hey Rocky". A wake word alone opens a separate command window with an audible beep.
 - Sends audio to one or more self-hosted Whisper endpoints through the backend, so the browser never needs cross-origin access to Whisper.
 - Sends the recognized prompt to an OpenAI-compatible self-hosted brain through the backend, so API keys never reach the browser.
 - Speaks the answer with the selected voice and writes both prompt and answer on the page. **Browser voice** uses `speechSynthesis`; **HAL 9000** uses a self-hosted neural TTS backend through the server proxy.
@@ -25,7 +25,7 @@ The reactor and active pipeline step follow the actual operation, not independen
 
 Layout: the **Prompt/Answer** panel sits above the mic-level controls, and the **Live log** is a full-width panel at the very bottom of the page.
 
-Set **Your wake word** and click **Apply wake word** to override the server default (`Rocky`) for your browser. Applying stops any active session; click **Arm Jarvis** again. The setting is saved in local storage per browser profile and website origin (the NBG and VIE URLs have separate settings), not shared with other users. Use 1-60 characters: words/numbers, spaces, hyphens or apostrophes. If storage is blocked, the UI explicitly reports that the change applies only until reload.
+Set **Your wake word** and click **Apply wake word** to override the server default (`Hey Rocky`) for your browser. Applying stops any active session; click **Arm Jarvis** again. The setting is saved in local storage per browser profile and website origin (the NBG and VIE URLs have separate settings), not shared with other users. Use 1-60 characters: words/numbers, spaces, hyphens or apostrophes. If storage is blocked, the UI explicitly reports that the change applies only until reload.
 
 The **Live log** prints `Wake probe recognized: "..."` and `Command recognized: "..."` for Whisper responses, including non-wake speech. Empty responses show `(no speech recognized)`. Endpoint, request ID and attempt metadata follow separately. These readable transcripts are displayed in this tab, not added to persistent Docker logs; Clear removes the visible log.
 
@@ -51,7 +51,7 @@ With `TTS_ENDPOINTS` empty, HAL 9000 is still selectable but degrades to `speech
 
 ## Language switch (English / Deutsch)
 
-The **Language** toggle in the top controls row (a single sliding switch next to Arm Jarvis / Stop / Manual prompt) sets the spoken language for the whole pipeline at once, per browser (saved in local storage, like the wake word):
+The **Language** toggle in the top controls row (a single sliding switch next to Arm Jarvis / Stop / Manual prompt) sets the spoken language for the whole pipeline at once, per browser (saved in local storage, like the wake word). **English is the default** when a browser has not saved a choice, regardless of the server's `WHISPER_LANGUAGE`:
 
 - **Whisper** — each probe and command request sends the language to the STT endpoint (`/api/transcribe?language=de`); the server default is `WHISPER_LANGUAGE`.
 - **Brain** — each `/api/chat` request carries the language and the backend appends a `Language override: answer in …` directive to the system prompt, which wins over a hardcoded language in `BRAIN_SYSTEM_PROMPT`.
@@ -97,7 +97,7 @@ Copy `.env.example` to `.env` on the Docker host and set:
 ```env
 PORT=8094
 PUBLIC_BASE_PATH=/
-WAKE_PHRASE=Rocky
+WAKE_PHRASE=Hey Rocky
 SILENCE_MS=1500
 WHISPER_ENDPOINTS=https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions
 WHISPER_MODEL=Systran/faster-whisper-large-v3
