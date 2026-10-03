@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Jarvis</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div id="core" class="core standby" aria-hidden="true">
+          <div class="ring ring-a"></div>
+          <div class="ring ring-b"></div>
+          <div class="reactor"></div>
+        </div>
+        <div class="state">
+          <p class="eyebrow">Jarvis web assistant</p>
+          <h1 id="stageTitle">Standby</h1>
+          <p id="stageDetail">Click Arm Jarvis to unlock audio and start wake listening.</p>
+        </div>
+      </section>
+
+      <section class="controls">
+        <button id="armButton" type="button">Arm Jarvis</button>
+        <button id="stopButton" type="button" disabled>Stop</button>
+        <button id="testButton" type="button">Manual prompt</button>
+        <div class="meters">
+          <label>Mic level <progress id="micLevel" max="100" value="0"></progress></label>
+          <label>Silence <progress id="silenceLevel" max="1500" value="0"></progress></label>
+        </div>
+      </section>
+
+      <section class="transcript">
+        <div>
+          <h2>Prompt</h2>
+          <p id="promptText">—</p>
+        </div>
+        <div>
+          <h2>Answer</h2>
+          <p id="answerText">—</p>
+        </div>
+      </section>
+
+      <section class="panels">
+        <div class="panel">
+          <h2>Pipeline</h2>
+          <ol id="steps">
+            <li data-step="wake">Wake word</li>
+            <li data-step="record">Record command</li>
+            <li data-step="vad">Stop after 1.5 s silence</li>
+            <li data-step="whisper">Whisper transcription</li>
+            <li data-step="brain">a1-deepseekv4flash brain</li>
+            <li data-step="tts">Browser speech output</li>
+          </ol>
+        </div>
+        <div class="panel log-panel">
+          <div class="log-title">
+            <h2>Live log</h2>
+            <button id="clearLogButton" type="button">Clear</button>
+          </div>
+          <pre id="log"></pre>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="promptDialog">
+      <form method="dialog">
+        <label for="manualPrompt">Ask Jarvis</label>
+        <textarea id="manualPrompt" rows="4" placeholder="Type a prompt..."></textarea>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button id="sendManualButton" value="send">Send</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
