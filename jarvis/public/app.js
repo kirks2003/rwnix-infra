@@ -53,6 +53,25 @@ async function init() {
   }
 }
 
+function waitForVoices() {
+  return new Promise((resolve) => {
+    const voices = speechSynthesis.getVoices();
+    if (voices.length) {
+      resolve(voices);
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      speechSynthesis.onvoiceschanged = null;
+      resolve(speechSynthesis.getVoices());
+    }, 800);
+    speechSynthesis.onvoiceschanged = () => {
+      window.clearTimeout(timeout);
+      speechSynthesis.onvoiceschanged = null;
+      resolve(speechSynthesis.getVoices());
+    };
+  });
+}
+
 function bindEvents() {
   el.armButton.addEventListener("click", armJarvis);
   el.stopButton.addEventListener("click", stopJarvis);
@@ -122,11 +141,19 @@ function startWakeRecognition() {
       .trim()
       .toLowerCase();
     if (transcript) log("wake", `Heard: ${transcript}`);
-    if (transcript.includes(String(state.config.wakePhrase || "hey jarvis").toLowerCase())) {
+    const wakePhrase = String(state.config.wakePhrase || "hey jarvis").toLowerCase();
+    const wakeIndex = transcript.indexOf(wakePhrase);
+    if (wakeIndex >= 0) {
       log("wake", "Wake phrase detected");
       markStep("wake", "done");
       stopWakeRecognition();
-      startCommandRecording();
+      const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
+      if (inlineCommand) {
+        log("wake", `Using command spoken with wake phrase: ${inlineCommand}`);
+        processPrompt(inlineCommand, { source: "wake-inline" });
+      } else {
+        startCommandRecording();
+      }
     }
   };
 
@@ -257,7 +284,7 @@ async function onRecordingStopped() {
     markStep("whisper", "done");
     await processPrompt(transcribed.text, { source: "voice" });
   } catch (error) {
-    fail("Whisper transcription failed", error);
+    fail("Whisper transcription failed or no speech was detected", error);
     if (state.armed) startWakeRecognition();
   }
 }
@@ -291,11 +318,11 @@ async function processPrompt(prompt, meta = {}) {
   }
 }
 
-function speak(text) {
+async function speak(text) {
   setStage("speaking", "Speaking", "Browser text-to-speech is reading the answer.");
   markStep("tts", "active");
   const utterance = new SpeechSynthesisUtterance(text);
-  const voices = speechSynthesis.getVoices();
+  const voices = await waitForVoices();
   utterance.voice = voices.find((voice) => /british|uk|english/i.test(`${voice.name} ${voice.lang}`)) || voices[0] || null;
   utterance.rate = 0.96;
   utterance.pitch = 0.92;
@@ -311,7 +338,9 @@ function speak(text) {
     if (state.armed) startWakeRecognition();
   };
   speechSynthesis.cancel();
+  speechSynthesis.resume();
   speechSynthesis.speak(utterance);
+  window.setTimeout(() => speechSynthesis.resume(), 250);
 }
 
 function setStage(kind, title, detail) {

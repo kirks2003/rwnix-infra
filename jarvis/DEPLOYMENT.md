@@ -67,6 +67,20 @@ The frontend exposes progress at each small step:
 
 The backend intentionally proxies Whisper and brain requests so browser clients never receive service keys and do not need direct CORS access to internal endpoints.
 
+## Whisper and pipeline finding: ZDF subtitle hallucination
+
+Live config uses vm104's local faster-whisper container through `http://host.docker.internal:8001/v1/audio/transcriptions` with model `deepdml/faster-whisper-large-v3-turbo-ct2`, language `de`, and `WHISPER_VAD_FILTER=true`. The underlying container is `whisper` (`fedirz/faster-whisper-server:latest-cpu`) published on `192.168.54.111:8001`.
+
+When the user said `hey jarvis, what's the time`, the original browser flow detected only the wake phrase, then started a new recording after the command had already been spoken. That second recording mostly contained silence/background audio, and faster-whisper hallucinated `Untertitelung des ZDF, 2020`, a common no-speech/subtitle artifact. The bad transcript was then sent to the brain, whose response had `content: null` because `max_tokens` was too low and the model spent the budget on reasoning, so the browser had no answer to speak.
+
+Fixes applied:
+
+- If Chrome wake recognition hears words after `hey jarvis` in the same utterance, those words are used directly as the command instead of starting a second recording.
+- Whisper requests now send `vad_filter=true` and `temperature=0`.
+- Known no-speech hallucinations such as `Untertitelung des ZDF` and Amara subtitle phrases are rejected and shown as no-speech errors instead of prompting the brain.
+- Brain requests now include the current server timestamp, use a larger token budget, and answer time/date questions from that timestamp.
+- Browser TTS now waits briefly for voices and resumes `speechSynthesis` before speaking to improve Chrome/Android reliability.
+
 ## Brain configuration finding
 
 The `deepseek-v4-flash` endpoint requires bearer authentication. Leaving `BRAIN_API_KEY` empty makes the backend support no-auth self-hosted endpoints, but this live deployment needed the `a1-dsv4f` provider key from the existing kandev104 opencode configuration. The key was written only to `/home/ubuntu/docker/jarvis/.env` on vm104 and is not committed.

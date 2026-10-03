@@ -14,6 +14,7 @@ const config = {
   whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "http://host.docker.internal:8001/v1/audio/transcriptions"),
   whisperModel: process.env.WHISPER_MODEL || "whisper-1",
   whisperLanguage: process.env.WHISPER_LANGUAGE || "de",
+  whisperVadFilter: parseBoolean(process.env.WHISPER_VAD_FILTER || "true"),
   brainBaseUrl: trimSlash(process.env.BRAIN_BASE_URL || "https://ds4-flash.gpu-2-de-fra-1-exo.csdc-nm.at/v1"),
   brainModel: process.env.BRAIN_MODEL || "deepseek-v4-flash",
   brainApiKey: process.env.BRAIN_API_KEY || "",
@@ -55,6 +56,7 @@ const server = http.createServer(async (req, res) => {
         silenceMs: config.silenceMs,
         whisperEndpoints: config.whisperEndpoints.map(redactUrl),
         whisperLanguage: config.whisperLanguage,
+        whisperVadFilter: config.whisperVadFilter,
         brainBaseUrl: redactUrl(config.brainBaseUrl),
         brainModel: config.brainModel,
         brainConfigured: isBrainConfigured(),
@@ -96,6 +98,10 @@ server.listen(port, "0.0.0.0", () => {
 
 function splitCsv(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function parseBoolean(value) {
+  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
 function trimSlash(value) {
@@ -185,12 +191,17 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId) {
       form.append("model", config.whisperModel);
       form.append("language", config.whisperLanguage);
       form.append("response_format", "json");
+      form.append("vad_filter", String(config.whisperVadFilter));
+      form.append("temperature", "0");
 
       const response = await fetch(endpoint, { method: "POST", body: form });
       const text = await response.text();
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 400)}`);
       const data = parseJsonOrText(text);
       const transcript = extractTranscript(data);
+      if (isLikelyWhisperHallucination(transcript)) {
+        throw new Error(`Whisper hallucination/no-speech result: ${transcript}`);
+      }
       if (!transcript) throw new Error("Whisper returned no transcript");
       return {
         requestId,
@@ -221,6 +232,18 @@ function extractTranscript(data) {
   return "";
 }
 
+function isLikelyWhisperHallucination(text) {
+  const normalized = String(text || "").trim().toLowerCase();
+  if (!normalized) return false;
+  const hallucinations = [
+    "untertitelung des zdf",
+    "untertitel der amara.org-community",
+    "subtitles by the amara.org community",
+    "thanks for watching",
+  ];
+  return hallucinations.some((phrase) => normalized.includes(phrase));
+}
+
 async function chat(prompt, sessionId, requestId) {
   if (!isBrainConfigured()) {
     return {
@@ -231,8 +254,12 @@ async function chat(prompt, sessionId, requestId) {
   }
 
   const history = conversations.get(sessionId) || [];
+  const now = new Date();
   const messages = [
-    { role: "system", content: config.brainSystemPrompt },
+    {
+      role: "system",
+      content: `${config.brainSystemPrompt}\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
+    },
     ...history,
     { role: "user", content: prompt },
   ];
@@ -246,17 +273,31 @@ async function chat(prompt, sessionId, requestId) {
     body: JSON.stringify({
       model: config.brainModel,
       messages,
-      temperature: 0.4,
-      max_tokens: 700,
+      temperature: 0.2,
+      max_tokens: 1200,
     }),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`Brain HTTP ${response.status}: ${text.slice(0, 500)}`);
   const data = JSON.parse(text);
-  const answer = data.choices?.[0]?.message?.content?.trim();
+  const answer = extractAnswer(data);
   if (!answer) throw new Error("Brain returned no answer text");
 
   const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-10);
   conversations.set(sessionId, nextHistory);
   return { requestId, answer, configured: true, model: config.brainModel };
+}
+
+function extractAnswer(data) {
+  const message = data?.choices?.[0]?.message;
+  if (!message) return "";
+  if (typeof message.content === "string" && message.content.trim()) return message.content.trim();
+  if (Array.isArray(message.content)) {
+    const text = message.content
+      .map((part) => typeof part === "string" ? part : part?.text || part?.content || "")
+      .join("")
+      .trim();
+    if (text) return text;
+  }
+  return "";
 }
