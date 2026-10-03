@@ -10,14 +10,15 @@
 - Health endpoint: `http://192.168.54.111:8094/api/health`
 - Browser UI: served directly by the Node backend from `jarvis/public/`
 
-The host already had Docker and an existing faster-whisper container:
+vm104 hosts Jarvis. vm103 hosts the active Whisper STT service. vm104 still has a legacy/local Whisper container, but Jarvis no longer uses it:
 
-| Container | Image | Published endpoint |
-|---|---|---|
-| `whisper` | `fedirz/faster-whisper-server:latest-cpu` | `http://192.168.54.111:8001` |
-| `jarvis` | locally built from `jarvis/Dockerfile` | `http://192.168.54.111:8094` |
+| Host | Container | Image | Published endpoint | Jarvis use |
+|---|---|---|---|---|
+| vm103 | `voice-gpu` | `python:3.12-slim` | `http://192.168.53.111:8003` | active STT |
+| vm104 | `jarvis` | locally built from `jarvis/Dockerfile` | `http://192.168.54.111:8094` | web app/backend |
+| vm104 | `whisper` | `fedirz/faster-whisper-server:latest-cpu` | `http://192.168.54.111:8001` | legacy/not active |
 
-The Jarvis container uses `host.docker.internal` through Docker's `host-gateway` mapping so it can call the host-published Whisper endpoint from inside the container.
+Jarvis calls the vm103 Whisper service directly across the internal network at `192.168.53.111:8003`; the prior vm104-local `host.docker.internal:8001` endpoint is not the active Jarvis STT target.
 
 ## Public routes
 
@@ -69,7 +70,7 @@ The backend intentionally proxies Whisper and brain requests so browser clients 
 
 ## Whisper and pipeline finding: ZDF subtitle hallucination
 
-Live config uses vm104's local faster-whisper container through `http://host.docker.internal:8001/v1/audio/transcriptions` with model `deepdml/faster-whisper-large-v3-turbo-ct2`, language `de`, and `WHISPER_VAD_FILTER=true`. The underlying container is `whisper` (`fedirz/faster-whisper-server:latest-cpu`) published on `192.168.54.111:8001`.
+Live config uses vm103's `voice-gpu` Whisper service through `http://192.168.53.111:8003/v1/audio/transcriptions` with model `deepdml/faster-whisper-large-v3-turbo-ct2`, language `de`, and `WHISPER_VAD_FILTER=true`. The underlying container is `voice-gpu` (`python:3.12-slim`) published on `192.168.53.111:8003` and serving `/v1/audio/transcriptions` plus `/health`.
 
 When the user said `hey jarvis, what's the time`, the original browser flow detected only the wake phrase, then started a new recording after the command had already been spoken. That second recording mostly contained silence/background audio, and faster-whisper hallucinated `Untertitelung des ZDF, 2020`, a common no-speech/subtitle artifact. The bad transcript was then sent to the brain, whose response had `content: null` because `max_tokens` was too low and the model spent the budget on reasoning, so the browser had no answer to speak.
 
@@ -117,6 +118,7 @@ Expected public route result without credentials is `401 Unauthorized` with `WWW
 
 Observed successful checks:
 
+- `/api/transcribe` route test returned endpoint `http://192.168.53.111:8003/v1/audio/transcriptions`, and vm103 `voice-gpu` logged the POST
 - `node --check jarvis/server.js`
 - `node --check jarvis/public/app.js`
 - `docker ps --filter name=jarvis` reported `Up ... (healthy)`
