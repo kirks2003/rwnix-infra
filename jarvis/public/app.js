@@ -14,6 +14,7 @@ const state = {
   chunks: [],
   silenceStartedAt: 0,
   sessionId: crypto.randomUUID(),
+  pipelineRunId: 0,
 };
 
 const el = {
@@ -36,18 +37,26 @@ const el = {
 };
 
 const stepOrder = ["wake", "record", "vad", "whisper", "brain", "tts"];
+const stepLabels = {
+  wake: "Wake word",
+  record: "Record command",
+  vad: "Stop after 1.5 s silence",
+  whisper: "Whisper transcription",
+  brain: "a1-deepseekv4flash brain",
+  tts: "Browser speech output",
+};
 
 init();
 
 async function init() {
   bindEvents();
-  setStage("standby", "Standby", "Loading runtime configuration.");
+  setPipelineStage("standby", "Standby", "Loading runtime configuration.");
   try {
     const config = await getJson("/api/config");
     state.config = { ...state.config, ...config };
     el.silenceLevel.max = String(state.config.silenceMs || 1500);
     log("config", "Runtime loaded", config);
-    setStage("standby", "Standby", `Click Arm Jarvis, then say "${state.config.wakePhrase}".`);
+    setPipelineStage("standby", "Standby", `Click Arm Jarvis, then say "${state.config.wakePhrase}".`);
   } catch (error) {
     fail("Could not load backend config", error);
   }
@@ -102,7 +111,8 @@ function stopJarvis() {
   state.armed = false;
   stopWakeRecognition();
   stopRecording();
-  setStage("standby", "Stopped", "Jarvis is disarmed.");
+  resetPipeline();
+  setPipelineStage("standby", "Stopped", "Jarvis is disarmed.");
   el.armButton.disabled = false;
   el.stopButton.disabled = true;
 }
@@ -128,8 +138,8 @@ function startWakeRecognition() {
   recognition.maxAlternatives = 1;
 
   recognition.onstart = () => {
-    setStage("wake", "Wake listening", `Say "${state.config.wakePhrase}" to activate Jarvis.`);
-    markStep("wake", "active");
+    startPipelineRun();
+    setPipelineStage("wake", "Wake listening", `Say "${state.config.wakePhrase}" to activate Jarvis.`, "wake");
     log("wake", "Wake recognition started");
   };
 
@@ -149,6 +159,9 @@ function startWakeRecognition() {
       stopWakeRecognition();
       const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
       if (inlineCommand) {
+        markStep("record", "skipped");
+        markStep("vad", "skipped");
+        markStep("whisper", "skipped");
         log("wake", `Using command spoken with wake phrase: ${inlineCommand}`);
         processPrompt(inlineCommand, { source: "wake-inline" });
       } else {
@@ -188,8 +201,7 @@ async function startCommandRecording() {
   try {
     state.recording = true;
     state.chunks = [];
-    setStage("recording", "Listening", `Speak now. Recording stops after ${state.config.silenceMs} ms of silence.`);
-    markStep("record", "active");
+    setPipelineStage("recording", "Recording", `Speak now. Recording stops after ${state.config.silenceMs} ms of silence.`, "record");
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -236,10 +248,13 @@ function monitorVoiceActivity() {
       state.silenceStartedAt = 0;
       el.silenceLevel.value = 0;
       markStep("vad", "active");
+      updateStepText("vad", "Voice detected; waiting for silence.");
     } else {
       if (!state.silenceStartedAt) state.silenceStartedAt = performance.now();
       const silentFor = performance.now() - state.silenceStartedAt;
       el.silenceLevel.value = Math.min(state.config.silenceMs, silentFor);
+      markStep("vad", "active");
+      updateStepText("vad", `Silence ${Math.round(silentFor)} / ${state.config.silenceMs} ms.`);
       if (silentFor >= state.config.silenceMs) {
         log("vad", `${Math.round(silentFor)} ms silence detected; stopping recorder`);
         markStep("vad", "done");
@@ -274,8 +289,7 @@ async function onRecordingStopped() {
   }
 
   try {
-    setStage("computing", "Transcribing", "Sending command audio to Whisper.");
-    markStep("whisper", "active");
+    setPipelineStage("transcribing", "Transcribing", "Sending command audio to the vm103 Whisper server.", "whisper");
     log("whisper", `Uploading ${blob.size} bytes to backend`);
     const transcribed = await postBlob("/api/transcribe", blob);
     log("whisper", "Whisper result", transcribed);
@@ -301,9 +315,15 @@ function cleanupAudio() {
 }
 
 async function processPrompt(prompt, meta = {}) {
+  if (meta.source === "manual") {
+    startPipelineRun();
+    markStep("wake", "skipped");
+    markStep("record", "skipped");
+    markStep("vad", "skipped");
+    markStep("whisper", "skipped");
+  }
   el.promptText.textContent = prompt;
-  setStage("computing", "Thinking", "Prompting the self-hosted a1-deepseekv4flash brain.");
-  markStep("brain", "active");
+  setPipelineStage("thinking", "Thinking", "Prompting the self-hosted a1-deepseekv4flash brain.", "brain");
   log("brain", `Prompt from ${meta.source || "unknown"}: ${prompt}`);
 
   try {
@@ -319,8 +339,7 @@ async function processPrompt(prompt, meta = {}) {
 }
 
 async function speak(text) {
-  setStage("speaking", "Speaking", "Browser text-to-speech is reading the answer.");
-  markStep("tts", "active");
+  setPipelineStage("speaking", "Speaking", "Browser text-to-speech is reading the answer.", "tts");
   const utterance = new SpeechSynthesisUtterance(text);
   const voices = await waitForVoices();
   utterance.voice = voices.find((voice) => /british|uk|english/i.test(`${voice.name} ${voice.lang}`)) || voices[0] || null;
@@ -329,9 +348,9 @@ async function speak(text) {
   utterance.onend = () => {
     log("tts", "Speech finished");
     markStep("tts", "done");
-    resetStepsSoon();
+    finishPipelineSoon();
     if (state.armed) startWakeRecognition();
-    else setStage("standby", "Standby", "Jarvis is disarmed.");
+    else setPipelineStage("standby", "Standby", "Jarvis is disarmed.");
   };
   utterance.onerror = (event) => {
     fail("Speech synthesis failed", event.error || event);
@@ -350,23 +369,48 @@ function setStage(kind, title, detail) {
   log("stage", `${title}: ${detail}`);
 }
 
+function setPipelineStage(kind, title, detail, activeStep = null) {
+  setStage(kind, title, detail);
+  if (activeStep) markStep(activeStep, "active");
+}
+
+function startPipelineRun() {
+  state.pipelineRunId += 1;
+  resetPipeline();
+}
+
+function resetPipeline() {
+  for (const step of stepOrder) {
+    markStep(step, "");
+    updateStepText(step, stepLabels[step]);
+  }
+}
+
 function markStep(name, status) {
   const item = el.steps.querySelector(`[data-step="${name}"]`);
   if (!item) return;
-  item.classList.remove("active", "done");
+  item.classList.remove("active", "done", "skipped", "error");
   if (status) item.classList.add(status);
 }
 
-function resetStepsSoon() {
+function updateStepText(name, text) {
+  const item = el.steps.querySelector(`[data-step="${name}"]`);
+  if (item) item.textContent = text;
+}
+
+function finishPipelineSoon() {
   window.setTimeout(() => {
-    for (const step of stepOrder) markStep(step, "");
-    setStage("wake", "Wake listening", `Say "${state.config.wakePhrase}" to activate Jarvis.`);
+    if (state.armed) {
+      setPipelineStage("wake", "Wake listening", `Say "${state.config.wakePhrase}" to activate Jarvis.`, "wake");
+    }
   }, 1000);
 }
 
 function fail(message, error) {
   console.error(error);
-  setStage("error", "Error", message);
+  const active = el.steps.querySelector("li.active");
+  if (active) active.classList.add("error");
+  setPipelineStage("error", "Error", message);
   log("error", message, normalizeError(error));
 }
 
