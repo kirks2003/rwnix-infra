@@ -50,13 +50,13 @@ Findings while exposing the service:
 - Voice services: deployed on `gpu-1` 2026-10-03 (see "gpu-1 voice services" below). STT and TTS both run there now, reached at `https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`; the vm103 Whisper endpoint is no longer used. vm104 was updated in the same step, because the new endpoint requires `WHISPER_API_KEY` and the previous build could not send it.
 - Wake word: `Rocky` (changed from `hey jarvis` on 2026-10-03 at the user's request; matching is case-insensitive)
 - Personal wake override: the UI's **Your wake word** field persists locally per browser/origin. Apply aborts the active session; re-arm to use the new word. It does not change `.env` or other users' defaults.
-- Wake engine: vm103 Whisper probes from continuous browser AudioWorklet PCM capture
+- Wake engine: self-hosted Whisper probes from continuous browser AudioWorklet PCM capture, triggered on the trailing edge of speech (~350 ms after the talker stops, 3 s speech cap). Measured against the gpu-1 service with four isolated "Rocky" utterances: the old fixed-interval trigger cut two of eight probe windows mid-word and returned empty for them; the trailing-edge trigger recognized all six of its probes and detected the phrase about 0.9 s sooner.
 - Command recording: complete mono WAV snapshots; capture continues during Whisper latency
 - Auto-stop: `1500 ms` continuous silence
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
 - Output: the selected answer voice plus prompt/result text in the UI
-- Answer voice: the UI's **Answer voice** field persists locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** proxies clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shapes them in Web Audio. `TTS_ENDPOINTS` is unset in this deployment, so HAL 9000 currently falls back to `speechSynthesis` with HAL cadence only.
+- Answer voice: the UI's **Answer voice** select and **Speaking speed** slider (0.60x-1.60x, a multiplier on the voice's own pace) persist locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** proxies clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shapes them in Web Audio. `TTS_ENDPOINTS` is unset in this deployment, so HAL 9000 currently falls back to `speechSynthesis` with HAL cadence only.
 - Observability: browser live log and backend JSON logs via `docker logs jarvis`
 - Recognized speech: the browser live log explicitly prints every wake/command transcript (or no-speech result), followed by endpoint/request metadata. Full transcripts are not newly persisted in Docker logs.
 

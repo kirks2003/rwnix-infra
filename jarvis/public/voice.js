@@ -39,6 +39,24 @@ export function normalizeVoiceId(value) {
   return id;
 }
 
+export const voiceSpeedRange = { min: 0.6, max: 1.6, step: 0.05, default: 1 };
+
+// The slider is a multiplier on the profile's own speed, so "1.00" always means
+// the profile as designed and the HAL character is preserved across the range.
+export function normalizeVoiceSpeed(value) {
+  // Blank or unparseable (missing storage key, empty input) means "as designed",
+  // not the slider's slowest setting.
+  const speed = Number(String(value ?? "").trim() || NaN);
+  if (!Number.isFinite(speed)) return voiceSpeedRange.default;
+  return Math.min(voiceSpeedRange.max, Math.max(voiceSpeedRange.min, Math.round(speed * 100) / 100));
+}
+
+// Keeps the engine request and the utterance rate inside what both ends accept:
+// /api/speak clamps to 0.5-2 and SpeechSynthesisUtterance.rate is 0.1-10.
+export function scaledRate(base, factor) {
+  return Math.min(2, Math.max(0.5, Math.round(base * factor * 1000) / 1000));
+}
+
 // HAL speaks one measured clause at a time, so split on sentence punctuation and
 // keep every chunk short enough for a single request/utterance.
 export function splitForSpeech(text, maxChars = 240) {
@@ -118,11 +136,11 @@ export class NeuralVoice {
     return highpass;
   }
 
-  async speak(text, { onChunk } = {}) {
+  async speak(text, { onChunk, speed = this.profile.speed } = {}) {
     const chunks = splitForSpeech(text, this.profile.chunkChars);
     this.signal.throwIfAborted();
     await this.context.resume();
-    let pending = chunks.length ? this.request(chunks[0]) : null;
+    let pending = chunks.length ? this.request(chunks[0], speed) : null;
     for (let i = 0; i < chunks.length; i += 1) {
       const { buffer, error } = await pending;
       if (error) {
@@ -131,7 +149,7 @@ export class NeuralVoice {
       }
       const next = chunks[i + 1];
       // Fetch the next clause while this one plays; the pause hides the latency.
-      pending = next ? this.request(next) : null;
+      pending = next ? this.request(next, speed) : null;
       onChunk?.(chunks[i], i, chunks.length);
       await this.play(buffer);
       if (next) await this.pause();
@@ -140,16 +158,16 @@ export class NeuralVoice {
 
   // Settles into a result object so a prefetch that fails or is stopped mid-playback
   // never becomes an unhandled rejection.
-  request(text) {
-    return this.fetchChunk(text).then((buffer) => ({ buffer }), (error) => ({ error }));
+  request(text, speed) {
+    return this.fetchChunk(text, speed).then((buffer) => ({ buffer }), (error) => ({ error }));
   }
 
-  async fetchChunk(text) {
+  async fetchChunk(text, speed = this.profile.speed) {
     this.signal.throwIfAborted();
     const response = await fetch(this.endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text, profile: this.profile.id, speed: this.profile.speed }),
+      body: JSON.stringify({ text, profile: this.profile.id, speed }),
       signal: AbortSignal.any([this.signal, AbortSignal.timeout(this.timeoutMs)]),
       cache: "no-store",
     });

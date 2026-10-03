@@ -5,8 +5,9 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 ## What it does
 
 - Shows every stage in the web UI: boot, wake listening, wake detected, recording, 1.5 s silence stop, Whisper upload, LLM prompt, TTS speaking, errors, and backend request details.
-- Uses vm103 Whisper wake probes for the word `Rocky`; browser speech recognition is not used for wake or prompt STT.
+- Uses self-hosted Whisper wake probes for the word `Rocky`; browser speech recognition is not used for wake or prompt STT.
 - Captures mono PCM continuously with an `AudioWorklet` while armed. Overlapping voice probes are encoded as complete WAV files, without gaps while Whisper responds.
+- Probes fire on the trailing edge of speech, about 350 ms after the talker stops, rather than on a fixed interval. A window that ends mid-word comes back from Whisper empty, which used to cost a whole probe cycle before the wake phrase was heard. If speech runs on without pausing, a probe is sent anyway once the burst reaches 3 s; that cap counts speech, not wall time, so leading silence cannot trip it mid-word.
 - After wake detection, waits for the utterance to finish and sends its complete audio to Whisper. This preserves commands spoken immediately after "Rocky". A wake word alone opens a separate command window with an audible beep.
 - Sends audio to one or more self-hosted Whisper endpoints through the backend, so the browser never needs cross-origin access to Whisper.
 - Sends the recognized prompt to an OpenAI-compatible self-hosted brain through the backend, so API keys never reach the browser.
@@ -29,6 +30,8 @@ Commands end after `SILENCE_MS` silence, with a 10-second wait for initial speec
 ## Answer voice
 
 Pick **Answer voice** in the UI; the choice is saved in local storage per browser profile and origin, like the wake word, and applies to the next answer. An answer that is already being spoken finishes in the old voice.
+
+**Speaking speed** is a slider from 0.60x to 1.60x, also saved per browser. It is a multiplier on the chosen voice's own pace, so 1.00x is the voice as designed; it scales the `speed` sent to the TTS engine and the `speechSynthesis` rate alike, clamped to the 0.5-2.0 both accept.
 
 - **Browser voice** — unchanged `speechSynthesis` behaviour, one utterance per answer, no backend needed.
 - **HAL 9000** — the answer is split into clauses on sentence punctuation. Each clause is synthesized by the TTS endpoints in `TTS_ENDPOINTS` (requested at `speed` 0.8), then played through a Web Audio chain that band-limits it to roughly 95-3800 Hz, lifts 220 Hz, compresses it flat and adds a short room tail, with a 420 ms pause between clauses. The next clause is fetched while the current one plays.

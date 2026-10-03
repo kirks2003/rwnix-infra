@@ -380,3 +380,57 @@ test("HAL 9000 without a TTS backend keeps its cadence on the browser voice", { 
   assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.voice")), "hal9000");
   assert.match(await page.textContent("#voiceStatus"), /No TTS backend configured/);
 });
+
+// Guards the trailing-edge probe trigger: a window that ends mid-word comes back
+// from Whisper empty, so the wake phrase is only heard a probe cycle later.
+function tailLevel(body) {
+  const rate = body.readUInt32LE(24);
+  const samples = body.readUInt32LE(40) / 2;
+  const tail = Math.min(samples, Math.round(rate * 0.2));
+  let energy = 0;
+  for (let i = samples - tail; i < samples; i += 1) energy += (body.readInt16LE(44 + i * 2) / 32768) ** 2;
+  return Math.sqrt(energy / tail);
+}
+
+test("wake probes end in silence rather than cutting a word in half", { timeout: 40000 }, async (t) => {
+  const tails = [];
+  const { page } = await setup(t, async (n, body) => {
+    tails.push(tailLevel(body));
+    return { text: "unrelated conversation" };
+  });
+  await page.waitForFunction(() => document.getElementById("log").textContent.split("Wake probe recognized").length > 3,
+    null, { timeout: 35000 });
+  await page.click("#stopButton");
+  assert.ok(tails.length >= 2, `probes: ${tails.length}`);
+  // 0.012 is the capture voice threshold in audio.js.
+  for (const level of tails) assert.ok(level < 0.012, `probe tail level ${level.toFixed(4)} should be silence`);
+});
+
+test("the speed slider scales the request and persists per browser", { timeout: 30000 }, async (t) => {
+  const speeds = [];
+  const { page } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+    voice: "hal9000",
+    config: { ttsConfigured: true },
+    answer: "It is 14:05.",
+    speak: async (_, payload) => { speeds.push(payload.speed); return { status: 200 }; },
+  });
+  await page.evaluate(() => {
+    const slider = document.getElementById("voiceSpeed");
+    slider.value = "1.5";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  assert.equal(await page.textContent("#voiceSpeedValue"), "1.50x");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.voiceSpeed")), "1.5");
+  await page.waitForFunction(() => document.getElementById("steps").querySelector('[data-step="tts"]').className === "done",
+    null, { timeout: 25000 });
+  // Stop overwrites the stage detail, so read the speaking stage from the log.
+  assert.match(await page.textContent("#log"), /Speaking: HAL 9000 is reading the answer at 1\.50x/);
+  await page.click("#stopButton");
+  // 1.04 profile speed scaled by 1.5, within the 0.5-2.0 the backend accepts.
+  assert.deepEqual(speeds, [1.56]);
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.inputValue("#voiceSpeed"), "1.5");
+  assert.match(await page.textContent("#voiceStatus"), /1\.50x/);
+});

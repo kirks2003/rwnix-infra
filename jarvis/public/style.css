@@ -218,6 +218,17 @@ button:disabled {
   font: inherit;
 }
 
+#voiceSpeed {
+  flex: 1 1 220px;
+  min-width: 0;
+  accent-color: var(--cyan);
+}
+
+#voiceSpeedValue {
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
 #wakeWordHelp, #wakeWordStatus, #voiceHelp, #voiceStatus {
   color: var(--muted);
   overflow-wrap: anywhere;

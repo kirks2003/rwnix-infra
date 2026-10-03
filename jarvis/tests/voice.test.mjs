@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, splitForSpeech, pickSynthesisVoice, NeuralVoice } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, NeuralVoice } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -32,6 +32,19 @@ test("the HAL profile prefers a deep English voice over a default female one", (
   assert.equal(pickSynthesisVoice(voices, voiceProfiles.hal9000).name, "Daniel");
   assert.equal(pickSynthesisVoice(voices.slice(0, 2), voiceProfiles.hal9000), null);
   assert.equal(pickSynthesisVoice(voices, voiceProfiles.browser), null);
+});
+
+test("the speed slider is clamped and applied as a multiplier", () => {
+  assert.equal(normalizeVoiceSpeed("1.25"), 1.25);
+  assert.equal(normalizeVoiceSpeed(9), 1.6);
+  assert.equal(normalizeVoiceSpeed(0.1), 0.6);
+  for (const invalid of ["", null, "fast", NaN]) assert.equal(normalizeVoiceSpeed(invalid), 1);
+  // 1.00x must leave the profile exactly as designed.
+  assert.equal(scaledRate(voiceProfiles.hal9000.speed, 1), voiceProfiles.hal9000.speed);
+  assert.equal(scaledRate(1.04, 1.5), 1.56);
+  // Stays inside what /api/speak and SpeechSynthesisUtterance accept.
+  assert.equal(scaledRate(1.6, 1.6), 2);
+  assert.equal(scaledRate(0.6, 0.6), 0.5);
 });
 
 // Chromium covers actual playback (tests/pipeline.browser.mjs). These stubs cover the
@@ -81,9 +94,13 @@ test("HAL playback speaks every clause in order and prefetches the next one", as
   const played = [];
   installWebAudioStubs(played);
   const requests = stubSpeakFetch(() => 200);
+  const speeds = [];
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = (url, options) => { speeds.push(JSON.parse(options.body).speed); return fetchOriginal(url, options); };
   const voice = new NeuralVoice(new AbortController().signal, voiceProfiles.hal9000);
   const spoken = [];
   await voice.speak("It is 14:05. I am completely operational. Shall I continue?", {
+    speed: 1.3,
     onChunk: (chunk, index, total) => spoken.push(`${index + 1}/${total} ${chunk}`),
   });
   assert.deepEqual(requests, ["It is 14:05.", "I am completely operational.", "Shall I continue?"]);
@@ -91,6 +108,7 @@ test("HAL playback speaks every clause in order and prefetches the next one", as
   assert.deepEqual(spoken, [
     "1/3 It is 14:05.", "2/3 I am completely operational.", "3/3 Shall I continue?",
   ]);
+  assert.deepEqual(speeds, [1.3, 1.3, 1.3], "every clause carries the requested speed");
 });
 
 test("a failing clause surfaces the unspoken remainder for the browser voice", async () => {

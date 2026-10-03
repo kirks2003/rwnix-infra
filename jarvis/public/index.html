@@ -50,7 +50,13 @@
           <button id="saveVoiceButton" type="submit" disabled>Apply voice</button>
         </div>
         <p id="voiceHelp">Saved in this browser only. HAL 9000 uses the self-hosted TTS backend when one is
-          configured and falls back to the browser voice otherwise. A change applies to the next answer.</p>
+          configured and falls back to the browser voice otherwise. Speed is a multiplier on the voice's own
+          pace, so 1.00x is the voice as designed. Changes apply to the next answer.</p>
+        <label for="voiceSpeed">Speaking speed <output id="voiceSpeedValue">1.00x</output></label>
+        <div class="wake-word-controls">
+          <input id="voiceSpeed" type="range" min="0.6" max="1.6" step="0.05" value="1"
+                 aria-describedby="voiceHelp voiceStatus" disabled>
+        </div>
         <p id="voiceStatus" role="status">Loading voice settings.</p>
       </form>
 
