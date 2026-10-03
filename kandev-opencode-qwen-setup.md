@@ -11,6 +11,8 @@
 | UI port | `192.168.54.111:38431` (proxied by both hub NPMs as `kandev104.<FQDN>`) |
 | Container SSH | `127.0.0.1:2222` (key-only, accessed via `ssh -J vm104 -p 2222 …@127.0.0.1`) |
 | opencode version | 1.18.34 (`/data/.npm-global/bin/opencode`) |
+| Compose env | `SHELL=/bin/bash`, `KANDEV_RESTART_ADAPTER=supervisor`, and others (see below) |
+| `extra_hosts` | 41 hostname→IP mappings (VIE-1 hub tunnel IPs) |
 
 ## Access paths
 

@@ -94,6 +94,8 @@ fi
 | `.profile` format | bash-version guard | bash-version guard |
 | Root `.bashrc` | empty (entrypoint copy) | standalone (EUID conditional) |
 | `SHELL` env var | `/bin/bash` | `/bin/bash` |
+| SSH aliases | 212-line config, all hosts | 212-line config, all hosts |
+| `/etc/hosts` entries | 41 extra_hosts in compose | 41 extra_hosts in compose |
 
 ## What was done (2026-10-03)
 
@@ -116,15 +118,63 @@ fi
    showed only `$`. Added `SHELL: /bin/bash` to the compose environment and
    recreated the container. Now both root and `kandev` users have
    `SHELL=/bin/bash` and the terminal shows the coloured prompt.
+9. **Deployed SSH aliases:** copied the full `~/.ssh/config` (212 lines)
+   from the NBG sandbox to both `/data/home/.ssh/config` and
+   `/root/.ssh/config` — all 27+ host aliases with numeric endpoints,
+   shared `kandev` identity key, and strict host key checking.
+10. **Added `extra_hosts` to compose:** added 41 hostname→IP mappings
+    to the docker-compose `extra_hosts` section (matching the VIE-1
+    sandbox pattern with `10.2.1.x` tunnel IPs) and recreated the
+    container. Host entries are available to all container processes.
+
+## SSH aliases and host entries
+
+### `~/.ssh/config`
+
+The full SSH config (212 lines) from the NBG sandbox is deployed to both
+`/data/home/.ssh/config` and `/root/.ssh/config`. It provides short aliases
+for all 27+ mesh hosts with direct numeric endpoints:
+
+| Alias | Target | User |
+|---|---|---|
+| `nbg`, `nbg-1` | `152.53.118.212` | `ubuntu` |
+| `vie-1` | `152.53.35.177` | `ubuntu` |
+| `owrt002` – `owrt033` | `10.2.1.2` – `10.2.1.9` | `root` |
+| `pve103`, `pve104` | `192.168.15.7`, `.6` | `root` |
+| `vm103`, `vm104` | `192.168.53.111`, `.54.111` | `ubuntu` |
+| `gpu-1`, `gpu-2` | `194.182.188.115`, `92.39.59.7` | `ubuntu` |
+| `ber-1`, `ber-2` | `217.154.145.10`, `85.215.213.123` | `ubuntu` |
+| `fsn-1` – `waw-1` | public Proxmox IPs | `root` |
+| `pve1070` | `192.168.141.1` | `root` |
+| `pve101`, `pve102` | `192.168.101.2`, `.102.2` | `root` |
+| `owrt-pve101` – `owrt-pve104` | OpenWrt gateway VM IPs | `root` |
+| `owrt-fsn-1` – `owrt-waw-1` | `10.2.1.10` – `10.2.1.15` | `root` |
+| `wg_vie-1`, `wg_nbg-1` | hub tunnel IPs | `ubuntu` |
+
+The config uses `IdentityFile ~/.ssh/kandev` globally with
+`StrictHostKeyChecking yes` and `UpdateHostKeys no`.
+
+### `/etc/hosts` (via Compose `extra_hosts`)
+
+The same 41 hostname→IP mappings are added to the container via the
+docker-compose `extra_hosts` section, making them available to all
+processes in the container (not just SSH). Entries use the VIE-1 hub
+tunnel IPs for mesh peers (`10.2.1.x`).
 
 ## Verification
-
-The SSH key is correctly installed:
 
 ```
 $ ssh -J vm104 -p 2222 kandev@127.0.0.1
 kandev@kandev104:~ $ ssh-keygen -lf ~/.ssh/id_ed25519
 256 SHA256:/1xfmrDI0Y4EjdD+PZOPIYnruP0BHiDCQ3ZC7vVBc9Y kandev (ED25519)
+
+kandev@kandev104:~ $ ssh -G nbg | grep -E "^hostname |^user "
+hostname 152.53.118.212
+user ubuntu
+
+kandev@kandev104:~ $ ssh -G owrt002 | grep -E "^hostname |^user "
+hostname 10.2.1.2
+user root
 ```
 
 ## Caveats
@@ -132,7 +182,10 @@ kandev@kandev104:~ $ ssh-keygen -lf ~/.ssh/id_ed25519
 - The SSH key is copied only to the `kandev` user's `.ssh/` directory. Root's
   access comes from the entrypoint script which copies `/data/home/.ssh/`
   contents to `/root/.ssh/` at container start.
-- If the container is recreated without preserving `/data`, the SSH keys need
-  to be re-deployed (they live in the bind-mounted `./data` directory).
+- If the container is recreated without preserving `/data`, the SSH keys and
+  config need to be re-deployed (they live in the bind-mounted `./data`
+  directory).
+- The `extra_hosts` entries in the compose file survive container recreates
+  as long as the compose file is not overwritten.
 - The PS1 uses a static `kandev104` label rather than the dynamic `\h` or
   `\H` hostname escape, matching the NBG/VIE-1 sandbox convention.
