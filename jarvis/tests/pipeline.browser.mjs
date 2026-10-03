@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AudioBufferWindow } from "../public/audio.js";
 
-let browser, server, origin, temp, fixture;
+let browser, server, origin, temp, fixture, speechAudio;
 before(async () => {
   temp = await mkdtemp(join(tmpdir(), "jarvis-browser-"));
   fixture = join(temp, "microphone.wav");
@@ -19,6 +19,11 @@ before(async () => {
   }
   audio.push(samples);
   await writeFile(fixture, Buffer.from(await audio.wav(0).arrayBuffer()));
+  const speech = new AudioBufferWindow(rate, 1);
+  const spoken = new Float32Array(Math.round(rate * 0.25));
+  for (let i = 0; i < spoken.length; i++) spoken[i] = 0.25 * Math.sin(i * Math.PI * 2 * 180 / rate);
+  speech.push(spoken);
+  speechAudio = Buffer.from(await speech.wav(0).arrayBuffer());
   server = createServer(async (req, res) => {
     try {
       const file = req.url === "/" ? "index.html" : req.url.slice(1);
@@ -49,7 +54,7 @@ async function setup(t, transcribe, options = {}) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
-  const calls = { audio: [], prompts: [] };
+  const calls = { audio: [], prompts: [], speak: [] };
   await page.addInitScript(() => {
     window.testTracks = [];
     window.ttsEvents = [];
@@ -76,7 +81,18 @@ async function setup(t, transcribe, options = {}) {
     wakePhrase: "Rocky", silenceMs: process.env.JARVIS_LIVE_STT_ENDPOINT ? 1500 : 250,
     whisperLanguage: process.env.JARVIS_TEST_LANGUAGE || "en",
     whisperEndpoints: [process.env.JARVIS_LIVE_STT_ENDPOINT || "http://vm103.test/v1/audio/transcriptions"],
+    ...options.config,
   } }));
+  await page.route("**/api/speak", async (route) => {
+    const payload = route.request().postDataJSON();
+    calls.speak.push(payload.text);
+    const result = options.speak ? await options.speak(calls.speak.length, payload) : { status: 503 };
+    await route.fulfill(result.status && result.status !== 200
+      ? { status: result.status, json: { error: "tts_unavailable" } }
+      : { status: 200, contentType: "audio/wav", body: speechAudio }).catch((error) => {
+      if (!page.isClosed()) throw error;
+    });
+  });
   await page.route("**/api/transcribe", async (route) => {
     const body = route.request().postDataBuffer();
     assert.equal(body.toString("ascii", 0, 4), "RIFF");
@@ -94,16 +110,20 @@ async function setup(t, transcribe, options = {}) {
   });
   await page.route("**/api/chat", async (route) => {
     calls.prompts.push(route.request().postDataJSON().prompt);
-    await route.fulfill({ json: { answer: "Done.", requestId: "brain-test" } });
+    await route.fulfill({ json: { answer: options.answer || "Done.", requestId: "brain-test" } });
   });
   await page.goto(origin);
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  if (options.voice) {
+    await page.selectOption("#voiceSelect", options.voice);
+    await page.click("#saveVoiceButton");
+  }
   if (options.hangTTS) await page.evaluate(() => { window.hangTTS = true; });
   await page.evaluate((value) => {
     window.silentInput = value.silent;
     window.denyMicrophone = value.denied;
     window.delayPermission = value.delayedPermission;
-  }, options);
+  }, { silent: options.silent, denied: options.denied, delayedPermission: options.delayedPermission });
   await page.click("#armButton");
   return { page, calls };
 }
@@ -310,4 +330,49 @@ test("candidate backend completes two real vm103 and brain cycles", {
   assert.ok(stt.every((result) => result.status === 200 && result.data.endpoint === "http://192.168.53.111:8003/v1/audio/transcriptions"));
   assert.equal(chats.length, 2);
   assert.ok(chats.every((result) => result.status === 200 && result.data.answer));
+});
+
+test("HAL 9000 plays self-hosted TTS clauses instead of the browser voice", { timeout: 30000 }, async (t) => {
+  const { page, calls } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+    voice: "hal9000",
+    config: { ttsConfigured: true, ttsModel: "kokoro", ttsVoice: "bm_george" },
+    answer: "It is 14:05. I am completely operational.",
+    speak: async () => ({ status: 200 }),
+  });
+  await page.waitForFunction(() => document.getElementById("steps").querySelector('[data-step="tts"]').className === "done",
+    null, { timeout: 25000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.speak, ["It is 14:05.", "I am completely operational."]);
+  assert.equal(await page.evaluate(() => window.savedUtterances.length), 0);
+  assert.match(await page.textContent("#log"), /HAL 9000 clause 2\/2/);
+  assert.match(await page.textContent("#voiceStatus"), /kokoro \/ bm_george/);
+});
+
+test("HAL 9000 finishes the answer with the browser voice when self-hosted TTS fails", { timeout: 30000 }, async (t) => {
+  const { page, calls } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+    voice: "hal9000",
+    config: { ttsConfigured: true },
+    answer: "It is 14:05. I am completely operational.",
+    speak: async (n) => ({ status: n === 1 ? 200 : 502 }),
+  });
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 25000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.speak, ["It is 14:05.", "I am completely operational."]);
+  assert.equal(await page.evaluate(() => savedUtterances[0].text), "I am completely operational.");
+  assert.ok(await page.evaluate(() => savedUtterances[0].rate < 0.7));
+  assert.match(await page.textContent("#log"), /finishing the answer with the browser voice/);
+});
+
+test("HAL 9000 without a TTS backend keeps its cadence on the browser voice", { timeout: 30000 }, async (t) => {
+  const { page, calls } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+    voice: "hal9000",
+    answer: "It is 14:05. I am completely operational.",
+  });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 25000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.speak, []);
+  assert.deepEqual(await page.evaluate(() => savedUtterances.map((utterance) => utterance.text)),
+    ["It is 14:05.", "I am completely operational."]);
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.voice")), "hal9000");
+  assert.match(await page.textContent("#voiceStatus"), /No TTS backend configured/);
 });

@@ -46,6 +46,8 @@ Findings while exposing the service:
 
 ## Runtime behavior
 
+- Language: English end to end. `WHISPER_LANGUAGE`, the brain system prompt and the HAL 9000 TTS voice all default to English as of 2026-10-03. The deployed vm103 `.env` still carries `WHISPER_LANGUAGE=de` until it is updated on the host.
+- Voice services: deployed on `gpu-1` 2026-10-03 (see "gpu-1 voice services" below). The app defaults now point at `https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`, replacing the vm103 Whisper endpoint. **The vm104 `.env` and container still run the old code against vm103; update both together, because the new endpoint requires `WHISPER_API_KEY` and the old build cannot send it.**
 - Wake word: `Rocky` (changed from `hey jarvis` on 2026-10-03 at the user's request; matching is case-insensitive)
 - Personal wake override: the UI's **Your wake word** field persists locally per browser/origin. Apply aborts the active session; re-arm to use the new word. It does not change `.env` or other users' defaults.
 - Wake engine: vm103 Whisper probes from continuous browser AudioWorklet PCM capture
@@ -53,7 +55,8 @@ Findings while exposing the service:
 - Auto-stop: `1500 ms` continuous silence
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
-- Output: browser `speechSynthesis` plus prompt/result text in the UI
+- Output: the selected answer voice plus prompt/result text in the UI
+- Answer voice: the UI's **Answer voice** field persists locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** proxies clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shapes them in Web Audio. `TTS_ENDPOINTS` is unset in this deployment, so HAL 9000 currently falls back to `speechSynthesis` with HAL cadence only.
 - Observability: browser live log and backend JSON logs via `docker logs jarvis`
 - Recognized speech: the browser live log explicitly prints every wake/command transcript (or no-speech result), followed by endpoint/request metadata. Full transcripts are not newly persisted in Docker logs.
 
@@ -65,7 +68,7 @@ The frontend exposes progress at each small step:
 4. Voice activity / silence tracking
 5. Whisper upload and transcription
 6. Brain request
-7. Browser speech output
+7. Speech output in the selected voice
 8. Error states and backend request IDs
 
 The backend intentionally proxies Whisper and brain requests so browser clients never receive service keys and do not need direct CORS access to internal endpoints.
@@ -152,3 +155,34 @@ Observed successful checks:
 - `/api/health` returned `brainConfigured: true`
 - `/api/chat` with `Say only: Jarvis online` returned `Jarvis online`
 - Both public routes returned the expected Basic Auth challenge before credentials
+
+## gpu-1 voice services
+
+Deployed 2026-10-03 on `gpu-1` (`194.182.188.115`): one `speaches` container serving both
+Whisper STT and Kokoro TTS over the OpenAI audio API.
+
+- Compose: `/home/ubuntu/docker/speaches/docker-compose.yaml`, image `ghcr.io/speaches-ai/speaches:latest-cuda`, published on `8003:8000`, model cache bind-mounted at `./hf-cache` (2.9 GB).
+- STT: `Systran/faster-whisper-large-v3` on the GPU (`float16`), about 4.4 GB VRAM, leaving the llama.cpp allocation untouched. `WHISPER__TTL=-1` keeps the model resident: the default 300 s TTL costs a ~27 s reload on the first wake probe after idle.
+- TTS: `speaches-ai/Kokoro-82M-v1.0-ONNX`, voice `bm_george`, on CPU.
+- Auth: the container's `API_KEY` (in the compose file, as with llama.cpp's `--api-key`) guards every route including `/health`, so the compose healthcheck authenticates too. Unauthenticated requests get `403`. Jarvis sends it as `WHISPER_API_KEY` and `TTS_API_KEY`.
+- Kokoro-FastAPI (`~/docker/kokoro-tts`) was deployed first, measured, then retired once speaches proved it covers both tasks; the compose file is left in place but the stack is down.
+
+### Exposure
+
+`gpu-1` ufw allows only 22/80/443 publicly, so the service is published through the
+on-host nginx-proxy-manager as `voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`
+(wildcard DNS for the zone already resolves to the host).
+
+- This proxy host is **not** in NPM's database. It is an additive custom include at `/data/nginx/custom/http.conf` (`nginx.conf` includes `/data/nginx/custom/http[.]conf`), so NPM's rendered configs and database are untouched. NPM runs with `network_mode: host`, so the block proxies to `127.0.0.1:8003`.
+- Certificate: `certbot certonly --webroot --webroot-path=/data/letsencrypt-acme-challenge --cert-name npm-voice` run inside `npm-ui`, stored at `/etc/letsencrypt/live/npm-voice/`, expires 2027-01-01. NPM's existing renewal cron covers it because the renewal config is in the shared `/etc/letsencrypt`.
+- `client_max_body_size 25m` and 120 s proxy timeouts match Jarvis's own upload cap and request timeouts.
+- Rollback: delete `/data/nginx/custom/http.conf` and `docker exec npm-ui nginx -s reload`. A database backup was taken first as `database.sqlite.bak-voice-20261003_204446` even though the database was never modified.
+
+### Verified
+
+`nginx -t` passed before each reload, and the live llama.cpp endpoint kept returning
+`200` throughout. Over the public HTTPS path, with the Jarvis backend itself as the client:
+`/api/speak` returned a 104 KB WAV in 0.54 s, and `/api/transcribe` of that same audio
+returned `"Rocky, what time is it?"` in 1.02 s. Direct service timings: 0.80 s warm for a
+1.2 s command, 1.19 s for 3.3 s of audio, 27 s cold (model load). Unauthenticated requests
+return `403`.

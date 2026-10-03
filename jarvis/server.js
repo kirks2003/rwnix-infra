@@ -11,17 +11,25 @@ const config = {
   publicBasePath: normalizeBasePath(process.env.PUBLIC_BASE_PATH || "/"),
   wakePhrase: process.env.WAKE_PHRASE || "Rocky",
   silenceMs: Number(process.env.SILENCE_MS || 1500),
-  whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "http://192.168.53.111:8003/v1/audio/transcriptions"),
-  whisperModel: process.env.WHISPER_MODEL || "whisper-1",
-  whisperLanguage: process.env.WHISPER_LANGUAGE || "de",
+  whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions"),
+  whisperModel: process.env.WHISPER_MODEL || "Systran/faster-whisper-large-v3",
+  whisperLanguage: process.env.WHISPER_LANGUAGE || "en",
   whisperVadFilter: parseBoolean(process.env.WHISPER_VAD_FILTER || "true"),
+  whisperApiKey: process.env.WHISPER_API_KEY || "",
   brainBaseUrl: trimSlash(process.env.BRAIN_BASE_URL || "https://ds4-flash.gpu-2-de-fra-1-exo.csdc-nm.at/v1"),
   brainModel: process.env.BRAIN_MODEL || "deepseek-v4-flash",
   brainApiKey: process.env.BRAIN_API_KEY || "",
-  brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are Jarvis, a concise voice assistant. Answer in the user's language, be helpful, and keep spoken answers short.",
+  brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are Jarvis, a concise voice assistant. Answer in English, be helpful, and keep spoken answers short.",
+  // `??`, not `||`: an explicitly empty TTS_ENDPOINTS must disable self-hosted TTS
+  // and leave HAL 9000 on its speechSynthesis fallback.
+  ttsEndpoints: splitCsv(process.env.TTS_ENDPOINTS ?? "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/speech"),
+  ttsModel: process.env.TTS_MODEL || "speaches-ai/Kokoro-82M-v1.0-ONNX",
+  ttsVoice: process.env.TTS_VOICE || "bm_george",
+  ttsApiKey: process.env.TTS_API_KEY || "",
 };
 
 let whisperCursor = 0;
+let ttsCursor = 0;
 const conversations = new Map();
 
 const mimeTypes = {
@@ -51,6 +59,7 @@ const server = http.createServer(async (req, res) => {
         uptimeSec: Math.round(process.uptime()),
         whisperEndpoints: config.whisperEndpoints.length,
         brainConfigured: isBrainConfigured(),
+        ttsEndpoints: config.ttsEndpoints.length,
       });
     }
 
@@ -64,6 +73,10 @@ const server = http.createServer(async (req, res) => {
         brainBaseUrl: redactUrl(config.brainBaseUrl),
         brainModel: config.brainModel,
         brainConfigured: isBrainConfigured(),
+        ttsEndpoints: config.ttsEndpoints.map(redactUrl),
+        ttsConfigured: config.ttsEndpoints.length > 0,
+        ttsModel: config.ttsModel,
+        ttsVoice: config.ttsVoice,
       });
     }
 
@@ -81,6 +94,15 @@ const server = http.createServer(async (req, res) => {
       if (!prompt) return json(res, 400, { error: "missing_prompt", requestId });
       const result = await chat(prompt, sessionId, requestId, controller.signal);
       return json(res, 200, result);
+    }
+
+    if (req.method === "POST" && pathname === "/api/speak") {
+      const payload = JSON.parse((await readBody(req, 64 * 1024)).toString("utf8") || "{}");
+      const text = String(payload.text || "").trim().slice(0, 2000);
+      const speed = clampSpeed(payload.speed);
+      if (!text) return json(res, 400, { error: "missing_text", requestId });
+      if (!config.ttsEndpoints.length) return json(res, 503, { error: "tts_not_configured", requestId });
+      return synthesizeWithFailover(text, speed, String(payload.profile || "default").slice(0, 32), requestId, res, controller.signal);
     }
 
     if (req.method === "GET") {
@@ -200,8 +222,10 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId, signal) 
       form.append("vad_filter", String(config.whisperVadFilter));
       form.append("temperature", "0");
 
+      const headers = {};
+      if (config.whisperApiKey) headers.authorization = `Bearer ${config.whisperApiKey}`;
       const response = await fetch(endpoint, {
-        method: "POST", body: form,
+        method: "POST", body: form, headers,
         signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
       });
       const text = await response.text();
@@ -225,6 +249,57 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId, signal) 
   }
 
   return { requestId, text: "", error: "all_whisper_endpoints_failed", attempts };
+}
+
+function clampSpeed(value) {
+  const speed = Number(value);
+  return Number.isFinite(speed) ? Math.min(2, Math.max(0.5, speed)) : 1;
+}
+
+// Proxies an OpenAI-compatible /v1/audio/speech endpoint (Kokoro-FastAPI,
+// openedai-speech, Piper wrappers) so the browser never holds the TTS key.
+async function synthesizeWithFailover(text, speed, profile, requestId, res, signal) {
+  const attempts = [];
+
+  for (let i = 0; i < config.ttsEndpoints.length; i += 1) {
+    const index = ttsCursor % config.ttsEndpoints.length;
+    ttsCursor = (ttsCursor + 1) % config.ttsEndpoints.length;
+    const endpoint = config.ttsEndpoints[index];
+    const started = Date.now();
+    try {
+      const headers = { "content-type": "application/json" };
+      if (config.ttsApiKey) headers.authorization = `Bearer ${config.ttsApiKey}`;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: config.ttsModel,
+          voice: config.ttsVoice,
+          input: text,
+          response_format: "wav",
+          speed,
+        }),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+      const audio = Buffer.from(await response.arrayBuffer());
+      if (!audio.length) throw new Error("empty audio response");
+      console.log(JSON.stringify({ level: "info", requestId, msg: "tts_success", endpoint: redactUrl(endpoint), profile, speed, ms: Date.now() - started, bytes: audio.length }));
+      res.writeHead(200, {
+        "content-type": response.headers.get("content-type") || "audio/wav",
+        "content-length": audio.length,
+        "cache-control": "no-store",
+        "x-request-id": requestId,
+      });
+      return res.end(audio);
+    } catch (error) {
+      console.log(JSON.stringify({ level: "warn", requestId, msg: "tts_failure", endpoint: redactUrl(endpoint), ms: Date.now() - started, error: error.message }));
+      attempts.push({ endpoint: redactUrl(endpoint), ok: false, ms: Date.now() - started, error: error.message });
+      signal.throwIfAborted();
+    }
+  }
+
+  return json(res, 502, { error: "all_tts_endpoints_failed", requestId, attempts });
 }
 
 function parseJsonOrText(text) {

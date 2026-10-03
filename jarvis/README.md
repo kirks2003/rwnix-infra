@@ -10,7 +10,7 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 - After wake detection, waits for the utterance to finish and sends its complete audio to Whisper. This preserves commands spoken immediately after "Rocky". A wake word alone opens a separate command window with an audible beep.
 - Sends audio to one or more self-hosted Whisper endpoints through the backend, so the browser never needs cross-origin access to Whisper.
 - Sends the recognized prompt to an OpenAI-compatible self-hosted brain through the backend, so API keys never reach the browser.
-- Speaks the answer with browser `speechSynthesis` and writes both prompt and answer on the page.
+- Speaks the answer with the selected voice and writes both prompt and answer on the page. **Browser voice** uses `speechSynthesis`; **HAL 9000** uses a self-hosted neural TTS backend through the server proxy.
 
 ## Browser limitations
 
@@ -26,6 +26,21 @@ The **Live log** prints `Wake probe recognized: "..."` and `Command recognized: 
 
 Commands end after `SILENCE_MS` silence, with a 10-second wait for initial speech and a 15-second command limit. Whisper upstream requests time out after 20 seconds per endpoint and brain requests after 45 seconds. TTS has a bounded watchdog that cancels speech and reports an error rather than pretending playback finished.
 
+## Answer voice
+
+Pick **Answer voice** in the UI; the choice is saved in local storage per browser profile and origin, like the wake word, and applies to the next answer. An answer that is already being spoken finishes in the old voice.
+
+- **Browser voice** — unchanged `speechSynthesis` behaviour, one utterance per answer, no backend needed.
+- **HAL 9000** — the answer is split into clauses on sentence punctuation. Each clause is synthesized by the TTS endpoints in `TTS_ENDPOINTS` (requested at `speed` 0.8), then played through a Web Audio chain that band-limits it to roughly 95-3800 Hz, lifts 220 Hz, compresses it flat and adds a short room tail, with a 420 ms pause between clauses. The next clause is fetched while the current one plays.
+
+`TTS_ENDPOINTS` must speak the OpenAI `/v1/audio/speech` protocol. The deployed backend is the `speaches` container on gpu-1, which serves both `/v1/audio/speech` (Kokoro) and `/v1/audio/transcriptions` (Whisper large-v3) behind one API key — see `DEPLOYMENT.md`. Kokoro-FastAPI and openedai-speech (which can front Piper) are drop-in alternatives. The browser only talks to `/api/speak` on this backend, so `TTS_API_KEY` stays on the host.
+
+Multiple endpoints are comma-separated and tried round-robin with failover, like Whisper. Each clause request times out after 20 seconds. Measured against gpu-1 over HTTPS: about 0.5 s per clause for synthesis and 1.0 s for a short command transcription.
+
+**Answer text is sent to the configured TTS endpoints.** `/api/speak` truncates at 2000 characters and clamps speed to 0.5-2.
+
+With `TTS_ENDPOINTS` empty, HAL 9000 is still selectable but degrades to `speechSynthesis` at rate 0.68 and pitch 0.5, preferring a deep English voice if the browser has one: the cadence survives, the filtering and reverb do not. The same fallback finishes the remaining clauses if the TTS backend fails part-way through an answer, and the live log says so rather than dropping the rest of the answer.
+
 ## Runtime configuration
 
 Copy `.env.example` to `.env` on the Docker host and set:
@@ -35,16 +50,22 @@ PORT=8094
 PUBLIC_BASE_PATH=/
 WAKE_PHRASE=Rocky
 SILENCE_MS=1500
-WHISPER_ENDPOINTS=http://192.168.53.111:8003/v1/audio/transcriptions
-WHISPER_MODEL=deepdml/faster-whisper-large-v3-turbo-ct2
-WHISPER_LANGUAGE=de
+WHISPER_ENDPOINTS=https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions
+WHISPER_MODEL=Systran/faster-whisper-large-v3
+WHISPER_LANGUAGE=en
 WHISPER_VAD_FILTER=true
+WHISPER_API_KEY=
 BRAIN_BASE_URL=https://ds4-flash.gpu-2-de-fra-1-exo.csdc-nm.at/v1
 BRAIN_MODEL=deepseek-v4-flash
 BRAIN_API_KEY=
+TTS_ENDPOINTS=https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/speech
+TTS_MODEL=speaches-ai/Kokoro-82M-v1.0-ONNX
+TTS_VOICE=bm_george
+TTS_API_KEY=
 ```
 
 Multiple Whisper endpoints are comma-separated and are tried round-robin with failover.
+`WHISPER_API_KEY` and `TTS_API_KEY` are sent as bearer tokens to the voice services and never reach the browser; leave them empty for a no-auth endpoint.
 Leave `BRAIN_API_KEY` empty for a no-auth self-hosted OpenAI-compatible endpoint, or set it on the host if the brain requires bearer auth.
 
 ## Local run
@@ -74,13 +95,13 @@ npx playwright install --with-deps --no-shell chromium
 npm run test:browser
 ```
 
-Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality.
+Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality. `tests/voice.test.mjs` covers clause splitting and HAL playback sequencing against Web Audio stubs; actual playback is covered by the Chromium tests.
 
 Optional live vm103 speech test (supply a WAV saying "Rocky, what time is it?" followed by five seconds of silence; Chromium loops the fixture):
 
 ```bash
 JARVIS_LIVE_STT_ENDPOINT=http://192.168.53.111:8003/v1/audio/transcriptions \
-JARVIS_TEST_LANGUAGE=de JARVIS_SPEECH_FIXTURE=/absolute/path/speech.wav \
+JARVIS_TEST_LANGUAGE=en JARVIS_SPEECH_FIXTURE=/absolute/path/speech.wav \
 node --test --test-name-pattern='actual vm103' tests/pipeline.browser.mjs
 ```
 
