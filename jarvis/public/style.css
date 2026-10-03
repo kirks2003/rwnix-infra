@@ -83,6 +83,12 @@ body {
   animation: spin 8s linear infinite;
 }
 
+.prompting .ring-a {
+  border-color: var(--green);
+  box-shadow: 0 0 48px rgba(45, 255, 191, 0.75), inset 0 0 26px rgba(45, 255, 191, 0.25);
+  animation: pulse 0.55s ease-in-out infinite;
+}
+
 .recording .ring-a {
   border-color: var(--green);
   box-shadow: 0 0 40px rgba(45, 255, 191, 0.6), inset 0 0 22px rgba(45, 255, 191, 0.2);

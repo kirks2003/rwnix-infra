@@ -20,6 +20,7 @@ const state = {
   pendingWakeTimer: null,
   pendingWakeCommand: "",
   speechWatchdog: null,
+  beepContext: null,
   busy: false,
 };
 
@@ -130,7 +131,36 @@ function stopJarvis() {
 async function unlockAudio() {
   const utterance = new SpeechSynthesisUtterance("");
   speechSynthesis.speak(utterance);
+  state.beepContext = state.beepContext || new AudioContext();
+  if (state.beepContext.state === "suspended") await state.beepContext.resume();
   log("audio", "Browser audio unlocked by user gesture");
+}
+
+function playWakeBeep() {
+  try {
+    const context = state.beepContext || new AudioContext();
+    state.beepContext = context;
+    if (context.state === "suspended") context.resume();
+
+    const now = context.currentTime;
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.18, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    gain.connect(context.destination);
+
+    for (const [offset, frequency] of [[0, 880], [0.09, 1320]]) {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, now + offset);
+      oscillator.connect(gain);
+      oscillator.start(now + offset);
+      oscillator.stop(now + offset + 0.11);
+    }
+    log("audio", "Wake confirmation beep played");
+  } catch (error) {
+    log("audio", "Wake confirmation beep failed", normalizeError(error));
+  }
 }
 
 function startWakeRecognition() {
@@ -168,7 +198,11 @@ function startWakeRecognition() {
     const wakePhrase = String(state.config.wakePhrase || "hey jarvis").toLowerCase();
     const wakeIndex = transcript.indexOf(wakePhrase);
     if (wakeIndex >= 0) {
-      if (!state.pendingWakeTimer) log("wake", "Wake phrase detected; waiting briefly for command tail");
+      if (!state.pendingWakeTimer) {
+        log("wake", "Wake phrase detected; waiting briefly for command tail");
+        playWakeBeep();
+        setPipelineStage("prompting", "Wake detected", "Beep. Say your command now; Jarvis is opening the microphone.", "record");
+      }
       markStep("wake", "done");
       const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
       if (inlineCommand) state.pendingWakeCommand = inlineCommand;
@@ -187,7 +221,8 @@ function startWakeRecognition() {
           processPrompt(command, { source: "wake-inline" });
         } else {
           state.busy = true;
-          setPipelineStage("recording", "Wake detected", "Opening microphone for your command.", "record");
+          log("record", "No command tail heard with wake word; opening command recorder.");
+          setPipelineStage("prompting", "Waiting for prompt", "Jarvis is awake. Speak your command after the beep.", "record");
           window.setTimeout(startCommandRecording, 300);
         }
       }, 650);
@@ -251,7 +286,8 @@ async function startCommandRecording() {
     state.busy = true;
     state.recording = true;
     state.chunks = [];
-    setPipelineStage("recording", "Recording", `Speak now. Recording stops after ${state.config.silenceMs} ms of silence.`, "record");
+    setPipelineStage("recording", "Listening for prompt", `Speak now. Recording stops after ${state.config.silenceMs} ms of silence.`, "record");
+    log("record", "Command recorder is active; waiting for speech.");
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
