@@ -98,12 +98,16 @@ export class Microphone {
     await this.context.audioWorklet.addModule("/capture-worklet.js");
     this.signal.throwIfAborted();
     this.source = this.context.createMediaStreamSource(this.stream);
+    // Mix bus into the capture worklet: microphone and test-signal injections
+    // share the path, so the pipeline treats injected audio like speech.
+    this.inputMix = this.context.createGain();
+    this.source.connect(this.inputMix);
     // Parallel tap for the waveform ring: the analyser is a sink, so capture
     // through the worklet is untouched.
     this.analyser = this.context.createAnalyser();
     this.analyser.fftSize = 512;
     this.analyser.smoothingTimeConstant = 0.5;
-    this.source.connect(this.analyser);
+    this.inputMix.connect(this.analyser);
     this.node = new AudioWorkletNode(this.context, "jarvis-capture");
     this.node.onprocessorerror = () => { this.failure = new Error("Audio capture processor failed"); };
     this.node.port.onmessage = ({ data }) => {
@@ -111,7 +115,7 @@ export class Microphone {
       this.buffer.push(data);
       this.lastBlockAt = performance.now();
     };
-    this.source.connect(this.node);
+    this.inputMix.connect(this.node);
     this.node.connect(this.context.destination);
     this.lastBlockAt = performance.now();
   }
@@ -138,12 +142,52 @@ export class Microphone {
     oscillator.stop(now + 0.2);
   }
 
+  // Route a node that produces synthetic audio into the capture path: the
+  // worklet and the waveform ring see it exactly like microphone speech.
+  inject(node) {
+    node.connect(this.inputMix);
+    return node;
+  }
+
+  // One short peep, audible and inside the capture path, so a single click
+  // proves the microphone pipeline is alive and triggers a wake probe.
+  testSignal() {
+    this.signal.throwIfAborted();
+    const context = this.context;
+    const oscillator = context.createOscillator();
+    const capture = context.createGain();
+    const audible = context.createGain();
+    const now = context.currentTime;
+    oscillator.frequency.setValueAtTime(880, now);
+    oscillator.frequency.setValueAtTime(1320, now + 0.09);
+    for (const gain of [capture, audible]) {
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    }
+    oscillator.connect(capture);
+    this.inject(capture);
+    oscillator.connect(audible).connect(context.destination);
+    return new Promise((resolve) => {
+      const finish = () => {
+        oscillator.disconnect();
+        capture.disconnect();
+        audible.disconnect();
+        resolve();
+      };
+      oscillator.onended = finish;
+      this.signal.addEventListener("abort", finish, { once: true });
+      oscillator.start(now);
+      oscillator.stop(now + 0.2);
+    });
+  }
+
   close() {
     if (this.node) {
       this.node.port.onmessage = null;
       this.node.disconnect();
     }
     this.source?.disconnect();
+    this.inputMix?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     if (this.context.state !== "closed") {
       this.context.close().catch((error) => console.error("Audio context cleanup failed", error));

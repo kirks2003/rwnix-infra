@@ -125,6 +125,17 @@ Brain HTTP 401: {"error":"Unauthorized"}
 
 After using the `a1-dsv4f` / `ds4-flash` key, `/api/chat` returned the expected answer.
 
+## MCP web search
+
+The UI's **MCP web search** toggle (per browser, saved in local storage like the wake word) switches the brain between plain answering and web-grounded answering:
+
+- The browser sends `websearch: true/false` with every `/api/chat` request.
+- When on, the backend spawns `mcp/websearch.mjs` (a Model Context Protocol server, JSON-RPC 2.0 over stdio, reused as one child process across requests) and calls its `web_search` tool with the user prompt.
+- The search itself needs no API key: DuckDuckGo HTML first (with one retry; result links are unwrapped from the `//duckduckgo.com/l/?uddg=…` redirect form), Wikipedia search API as fallback. Top 5 results (title, URL, snippet) are added to the brain request as one extra system message — fresh per prompt, never stored in the per-session conversation history.
+- A failed or empty search degrades to a normal brain answer; the backend JSON logs record `websearch_success` (chars, ms), `websearch_failure`, and `websearch_skipped` (request aborted).
+- Requirement: outbound internet from the backend container (the container egresses to DuckDuckGo/Wikipedia; the browser is unaffected). No new `.env` entries — the toggle is the only control.
+- Spoken answers are sanitized in the browser before any TTS request or `speechSynthesis` utterance (`textForSpeech` in `public/voice.js`): markdown, links, code markers, URLs and special signs are stripped, so the speaker says normal language only. The printed Answer panel is unchanged.
+
 ## Browser limitations and next improvements
 
 - Browser speech recognition is not used. While armed, voice-containing ambient audio is sent to the configured vm103 service to check for wake words; this is not on-device wake detection.

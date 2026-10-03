@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -163,4 +163,19 @@ test("Stop ends HAL playback and releases its audio context", async () => {
   await assert.rejects(speaking, { name: "AbortError" });
   assert.equal(played.length, 1);
   assert.equal(voice.context.state, "closed");
+});
+
+test("the speaker gets plain language without markdown or special signs", () => {
+  assert.equal(textForSpeech("It is **14:05**."), "It is 14:05.");
+  assert.equal(textForSpeech("Use `npm test` and [the docs](https://example.com/docs)"), "Use npm test and the docs");
+  assert.equal(textForSpeech("- first\n- second"), "first second");
+  assert.equal(textForSpeech("1. one\n2. two"), "one two");
+  assert.equal(textForSpeech("See https://example.com/path for details"), "See for details");
+  assert.equal(textForSpeech("# Heading\nBody text"), "Heading Body text");
+  assert.equal(textForSpeech("50% done, right? — Yes!"), "50% done, right? — Yes!");
+  assert.equal(textForSpeech("café, Straße, naïve"), "café, Straße, naïve");
+  assert.equal(textForSpeech("```\ncode block\n```"), "");
+  assert.equal(textForSpeech("a * b | c > d"), "a b c d");
+  assert.equal(textForSpeech(""), "");
+  assert.equal(textForSpeech(null), "");
 });

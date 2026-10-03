@@ -54,8 +54,9 @@ body {
 .core {
   --stage-color: var(--cyan);
   position: relative;
-  width: 224px;
-  height: 224px;
+  /* 30% smaller core: rings, reactor and the viewBox-scaled waveform follow. */
+  width: 157px;
+  height: 157px;
   margin: 0;
   border-radius: 50%;
   filter: brightness(calc(1 + var(--audio-level, 0) * 0.35));
@@ -197,12 +198,26 @@ h2 {
 }
 
 .controls {
-  grid-template-columns: repeat(3, max-content) max-content 1fr;
+  grid-template-columns: repeat(3, max-content) max-content max-content max-content 1fr;
   align-items: center;
   padding: 16px;
   border: 1px solid rgba(66, 217, 255, 0.18);
   border-radius: 18px;
   background: var(--panel);
+}
+
+.test-control {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.test-control-help {
+  margin: 0;
+  max-width: 200px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
 }
 
 button {
@@ -266,7 +281,7 @@ button:disabled {
   justify-items: center;
 }
 
-#languageStatus {
+#languageStatus, #websearchStatus {
   margin: 0;
   max-width: 220px;
   color: var(--muted);
@@ -491,7 +506,7 @@ menu {
   }
 
   .core {
-    width: 175px;
-    height: 175px;
+    width: 122px;
+    height: 122px;
   }
 }

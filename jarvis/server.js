@@ -106,7 +106,7 @@ const server = http.createServer(async (req, res) => {
       const prompt = String(payload.prompt || "").trim();
       const sessionId = String(payload.sessionId || "default").slice(0, 128);
       if (!prompt) return json(res, 400, { error: "missing_prompt", requestId });
-      const result = await chat(prompt, sessionId, normalizeLanguage(payload.language) || "en", requestId, controller.signal);
+      const result = await chat(prompt, sessionId, normalizeLanguage(payload.language) || "en", requestId, controller.signal, Boolean(payload.websearch));
       return json(res, 200, result);
     }
 
@@ -358,7 +358,138 @@ function isLikelyWhisperHallucination(text) {
   return ["thank you.", "thank you", "you", "bye.", "okay.", "."].includes(normalized);
 }
 
-async function chat(prompt, sessionId, language, requestId, signal) {
+// Minimal MCP client (JSON-RPC 2.0 over stdio, one child process reused
+// across requests). The web-search tool is only used when the browser's
+// MCP web-search toggle sends websearch: true with the /api/chat request.
+class McpClient {
+  constructor(command, args) {
+    this.command = command;
+    this.args = args;
+    this.child = null;
+    this.pending = new Map();
+    this.nextId = 1;
+    this.buffer = "";
+    this.startPromise = null;
+  }
+
+  start() {
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = new Promise((resolve, reject) => {
+      const { spawn } = require("node:child_process");
+      const fail = (error) => {
+        this.startPromise = null;
+        this.child = null;
+        reject(error);
+      };
+      const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => this.onData(chunk));
+      child.stderr.on("data", (chunk) => {
+        const text = chunk.toString().trim();
+        if (text) console.log(JSON.stringify({ level: "warn", msg: "mcp_stderr", text }));
+      });
+      child.on("error", (error) => fail(error));
+      child.on("exit", () => {
+        this.child = null;
+        this.startPromise = null;
+        for (const entry of this.pending.values()) entry.reject(new Error("MCP server exited"));
+        this.pending.clear();
+      });
+      this.child = child;
+      this.request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "jarvis-backend", version: "1.0.0" },
+      }).then((result) => {
+        this.notify("notifications/initialized");
+        resolve(result);
+      }, fail);
+    });
+    return this.startPromise;
+  }
+
+  onData(chunk) {
+    this.buffer += chunk;
+    let newline;
+    while ((newline = this.buffer.indexOf("\n")) >= 0) {
+      const line = this.buffer.slice(0, newline).trim();
+      this.buffer = this.buffer.slice(newline + 1);
+      if (!line) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const entry = message.id !== undefined ? this.pending.get(message.id) : null;
+      if (!entry) continue;
+      this.pending.delete(message.id);
+      clearTimeout(entry.timer);
+      if (message.error) entry.reject(new Error(message.error.message || "MCP error"));
+      else entry.resolve(message.result);
+    }
+  }
+
+  request(method, params, timeoutMs = 20000) {
+    return new Promise((resolve, reject) => {
+      if (!this.child || this.child.exitCode !== null) {
+        reject(new Error("MCP server is not running"));
+        return;
+      }
+      const id = this.nextId++;
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out after ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    });
+  }
+
+  notify(method, params = {}) {
+    if (this.child && this.child.exitCode === null) {
+      this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+    }
+  }
+
+  async call(name, args, timeoutMs = 20000) {
+    await this.start();
+    return this.request("tools/call", { name, arguments: args }, timeoutMs);
+  }
+}
+
+const mcpWebSearch = new McpClient(process.execPath, [path.join(__dirname, "mcp", "websearch.mjs")]);
+
+// Runs the web_search tool of the MCP server and resolves with the result
+// text; the caller treats a failure as "answer without search results".
+async function webSearch(query, requestId, signal) {
+  const started = Date.now();
+  try {
+    const result = await withAbort(mcpWebSearch.call("web_search", { query, max_results: 5 }, 20000), signal);
+    const text = (result.content || []).map((item) => item.text || "").join("\n").trim();
+    if (result.isError || !text) throw new Error(text || "web search returned no results");
+    console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_success", ms: Date.now() - started, chars: text.length }));
+    return text;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_failure", ms: Date.now() - started, error: error.message }));
+    throw error;
+  }
+}
+
+function withAbort(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const cancel = () => reject(signal.reason);
+    if (signal.aborted) return cancel();
+    signal.addEventListener("abort", cancel, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener("abort", cancel); resolve(value); },
+      (error) => { signal.removeEventListener("abort", cancel); reject(error); },
+    );
+  });
+}
+
+async function chat(prompt, sessionId, language, requestId, signal, websearch) {
   if (!isBrainConfigured()) {
     throw new Error("Brain endpoint/model is not configured");
   }
@@ -368,11 +499,27 @@ async function chat(prompt, sessionId, language, requestId, signal) {
   // The override wins over a hardcoded answer language in BRAIN_SYSTEM_PROMPT,
   // which is how the UI language switch reaches the brain.
   const answerLanguage = language === "de" ? "German (Deutsch)" : "English";
+  // Fresh per request: search results are context for this prompt only and are
+  // never stored in the per-session conversation history.
+  let searchMessage = null;
+  if (websearch) {
+    try {
+      const results = await webSearch(prompt, requestId, signal);
+      searchMessage = {
+        role: "system",
+        content: `Web search results for this prompt (use them if relevant, keep the answer short and spoken):\n${results}`,
+      };
+    } catch (error) {
+      if (signal.aborted) throw error;
+      console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_skipped", error: error.message }));
+    }
+  }
   const messages = [
     {
       role: "system",
       content: `${config.brainSystemPrompt}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
     },
+    ...(searchMessage ? [searchMessage] : []),
     ...history,
     { role: "user", content: prompt },
   ];
