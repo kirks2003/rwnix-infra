@@ -23,34 +23,76 @@ for git operations (see `kandev-credential-setup.md`).
 
 ## PS1 / bash settings
 
+Both `kandev` and `root` users share the same `.bashrc` structure — a
+conditional EUID check renders the prompt red for root and green for
+regular users, plus color-enabled `ls`/`grep` aliases and common shortcuts.
+
 ### `kandev` user (`/data/home/.bashrc`)
 
-Green prompt with static `kandev104` label, matching the NBG/VIE-1 sandbox
-PS1 convention:
-
 ```
-export PATH="/data/.npm-global/bin:$PATH"
-PS1='\[\033[1;32m\]\u\[\033[1;37m\]@\[\033[1;36m\]kandev104\[\033[00m\]:\[\033[1;34m\]$PWD\[\033[00m\] \$> '
+if [ "$EUID" -eq 0 ]; then
+    PS1='\[\033[1;31m\]\u\[\033[1;37m\]@\[\033[1;36m\]kandev104\[\033[00m\]:\[\033[1;34m\]$PWD\[\033[00m\] \$> '
+else
+    PS1='\[\033[1;32m\]\u\[\033[1;37m\]@\[\033[1;36m\]kandev104\[\033[00m\]:\[\033[1;34m\]$PWD\[\033[00m\] \$> '
+fi
+
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+fi
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+export PATH="$HOME/scripts/check-hosts:$PATH"
+export SCRIPTS="$HOME/scripts/check-hosts"
+alias SCRIPTS='cd "$SCRIPTS"'
 ```
 
 ### `root` user (`/root/.bashrc`)
 
-Red prompt (root colour), same `kandev104` label:
+Same content as the `kandev` user file (the EUID conditional handles the
+colour automatically). Root's `.bashrc` is written directly rather than
+relying on the entrypoint copy, ensuring the red prompt works even if the
+entrypoint copy fails.
+
+### `.profile` (`/data/home/.profile`)
+
+Sourced for login shells; sources `.bashrc` when running under bash:
 
 ```
-export PATH="/data/.npm-global/bin:$PATH"
-PS1='\[\033[1;31m\]\u\[\033[1;37m\]@\[\033[1;36m\]kandev104\[\033[00m\]:\[\033[1;34m\]$PWD\[\033[00m\] \$> '
+# ~/.profile: executed by the command interpreter for login shells.
+# Source .bashrc for interactive non-login shells (and aliases)
+if [ -n "$BASH_VERSION" ]; then
+    if [ -f "$HOME/.bashrc" ]; then
+        . "$HOME/.bashrc"
+    fi
+fi
 ```
 
 ### Color scheme
 
-| User | Colour | Escape code |
+| Role | Colour | Escape code |
 |---|---|---|
-| `kandev` | green | `\[\033[1;32m\]` |
-| `root` | red | `\[\033[1;31m\]` |
+| `root` prompt | red | `\[\033[1;31m\]` |
+| regular user prompt | green | `\[\033[1;32m\]` |
 | separator `@` | white | `\[\033[1;37m\]` |
 | hostname label | cyan | `\[\033[1;36m\]` |
 | path | blue | `\[\033[1;34m\]` |
+
+### Comparison: NBG sandbox vs kandev104
+
+| Feature | NBG sandbox | kandev104 |
+|---|---|---|
+| Default shell (`kandev`) | `/bin/bash` | `/bin/bash` |
+| PS1 style | conditional EUID (red/green) | conditional EUID (red/green) |
+| Hostname label | `kandev.gw-1-vie-1-at-netcup` | `kandev104` |
+| dircolors + color aliases | yes (`ls`, `grep`) | yes (`ls`, `grep`) |
+| `ll`/`la`/`l` aliases | yes | yes |
+| `SCRIPTS` path and alias | yes | yes |
+| `.profile` format | bash-version guard | bash-version guard |
+| Root `.bashrc` | empty (entrypoint copy) | standalone (EUID conditional) |
 
 ## What was done (2026-10-03)
 
@@ -61,18 +103,20 @@ PS1='\[\033[1;31m\]\u\[\033[1;37m\]@\[\033[1;36m\]kandev104\[\033[00m\]:\[\033[1
 3. Created convenience symlinks `kandev → id_ed25519` and
    `kandev.pub → id_ed25519.pub` (same pattern as NBG/VIE-1 sandboxes)
 4. Verified fingerprint matches `SHA256:/1xfmrDI0Y4EjdD…`
-5. Set PS1 for `kandev` user in `/data/home/.bashrc`: green prompt with
-   static `kandev104` hostname label, full `$PWD`, `\$>` prompt ending
-6. Set PS1 for `root` user in `/root/.bashrc`: same format but red colour
-7. Verified effective PS1 on both users via `bash -l -i -c 'printf "%s\n" "$PS1"'`
+5. Set initial PS1 for `kandev` user (green) and `root` user (red) with
+   static `kandev104` label
+6. **Later (comparison fix):** replaced `.bashrc` files with NBG-parity
+   version — conditional EUID PS1, dircolors/color aliases, `ll`/`la`/`l`
+   shortcuts, `SCRIPTS` path and alias, and NBG-matching `.profile`
+7. Verified effective PS1 on both users via `bash -l -i -c`
 
 ## Verification
 
-The SSH key is correctly installed and the prompt renders:
+The SSH key is correctly installed:
 
 ```
 $ ssh -J vm104 -p 2222 kandev@127.0.0.1
-kandev@kandev104:/data/home $ ssh-keygen -lf ~/.ssh/id_ed25519
+kandev@kandev104:~ $ ssh-keygen -lf ~/.ssh/id_ed25519
 256 SHA256:/1xfmrDI0Y4EjdD+PZOPIYnruP0BHiDCQ3ZC7vVBc9Y kandev (ED25519)
 ```
 
