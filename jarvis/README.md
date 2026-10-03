@@ -5,9 +5,9 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 ## What it does
 
 - Shows every stage in the web UI: boot, wake listening, wake detected, recording, 1.5 s silence stop, Whisper upload, LLM prompt, TTS speaking, errors, and backend request details.
-- Uses vm103 Whisper wake probes for the phrase `Hey Jarvis`; browser speech recognition is not used for wake or prompt STT.
+- Uses vm103 Whisper wake probes for the word `Rocky`; browser speech recognition is not used for wake or prompt STT.
 - Captures mono PCM continuously with an `AudioWorklet` while armed. Overlapping voice probes are encoded as complete WAV files, without gaps while Whisper responds.
-- After wake detection, waits for the utterance to finish and sends its complete audio to Whisper. This preserves commands spoken immediately after "Hey Jarvis". A wake phrase alone opens a separate command window with an audible beep.
+- After wake detection, waits for the utterance to finish and sends its complete audio to Whisper. This preserves commands spoken immediately after "Rocky". A wake word alone opens a separate command window with an audible beep.
 - Sends audio to one or more self-hosted Whisper endpoints through the backend, so the browser never needs cross-origin access to Whisper.
 - Sends the recognized prompt to an OpenAI-compatible self-hosted brain through the backend, so API keys never reach the browser.
 - Speaks the answer with browser `speechSynthesis` and writes both prompt and answer on the page.
@@ -29,7 +29,7 @@ Copy `.env.example` to `.env` on the Docker host and set:
 ```env
 PORT=8094
 PUBLIC_BASE_PATH=/
-WAKE_PHRASE=hey jarvis
+WAKE_PHRASE=Rocky
 SILENCE_MS=1500
 WHISPER_ENDPOINTS=http://192.168.53.111:8003/v1/audio/transcriptions
 WHISPER_MODEL=deepdml/faster-whisper-large-v3-turbo-ct2
@@ -72,7 +72,7 @@ npm run test:browser
 
 Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality.
 
-Optional live vm103 speech test (supply a WAV saying "Hey Jarvis, what time is it?" followed by five seconds of silence; Chromium loops the fixture):
+Optional live vm103 speech test (supply a WAV saying "Rocky, what time is it?" followed by five seconds of silence; Chromium loops the fixture):
 
 ```bash
 JARVIS_LIVE_STT_ENDPOINT=http://192.168.53.111:8003/v1/audio/transcriptions \

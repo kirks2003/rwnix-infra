@@ -46,7 +46,7 @@ Findings while exposing the service:
 
 ## Runtime behavior
 
-- Wake phrase: `hey jarvis`
+- Wake word: `Rocky` (changed from `hey jarvis` on 2026-10-03 at the user's request; matching is case-insensitive)
 - Wake engine: vm103 Whisper probes from continuous browser AudioWorklet PCM capture
 - Command recording: complete mono WAV snapshots; capture continues during Whisper latency
 - Auto-stop: `1500 ms` continuous silence

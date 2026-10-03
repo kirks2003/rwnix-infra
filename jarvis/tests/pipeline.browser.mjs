@@ -73,7 +73,7 @@ async function setup(t, transcribe, options = {}) {
     speechSynthesis.resume = () => {};
   });
   await page.route("**/api/config", (route) => route.fulfill({ json: {
-    wakePhrase: "hey jarvis", silenceMs: process.env.JARVIS_LIVE_STT_ENDPOINT ? 1500 : 250,
+    wakePhrase: "Rocky", silenceMs: process.env.JARVIS_LIVE_STT_ENDPOINT ? 1500 : 250,
     whisperLanguage: process.env.JARVIS_TEST_LANGUAGE || "en",
     whisperEndpoints: [process.env.JARVIS_LIVE_STT_ENDPOINT || "http://vm103.test/v1/audio/transcriptions"],
   } }));
@@ -109,7 +109,7 @@ async function setup(t, transcribe, options = {}) {
 }
 
 test("real Chromium capture completes three wake cycles with fresh valid audio", { timeout: 45000 }, async (t) => {
-  const { page, calls } = await setup(t, async () => ({ text: "Hey, Jarvis! What time is it?" }));
+  const { page, calls } = await setup(t, async () => ({ text: "Rocky! What time is it?" }));
   await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 35000 });
   await page.click("#stopButton");
   assert.equal(calls.prompts.length, 3);
@@ -124,7 +124,7 @@ test("Stop ignores late Whisper responses and allows a clean re-arm", { timeout:
   const blocked = new Promise((resolve) => { release = resolve; });
   const { page, calls } = await setup(t, async (n) => {
     if (n === 1) await blocked;
-    return { text: "Hey Jarvis tell me the time" };
+    return { text: "Rocky tell me the time" };
   });
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Checking wake word");
   await page.click("#stopButton");
@@ -141,7 +141,7 @@ test("Stop ignores late Whisper responses and allows a clean re-arm", { timeout:
 test("Whisper errors are visible, then recover without parallel requests", { timeout: 30000 }, async (t) => {
   const { page, calls } = await setup(t, async (n) => n === 1
     ? { status: 502, error: "vm103 unavailable" }
-    : { text: "Hey Jarvis recovered" });
+    : { text: "Rocky recovered" });
   await page.waitForFunction(() => document.getElementById("core").classList.contains("error"));
   assert.match(await page.textContent("#stageDetail"), /vm103 unavailable/);
   await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
@@ -150,7 +150,7 @@ test("Whisper errors are visible, then recover without parallel requests", { tim
 });
 
 test("missing TTS onend cancels speech before the next wake", { timeout: 30000 }, async (t) => {
-  const { page } = await setup(t, async () => ({ text: "Hey Jarvis hello" }), { hangTTS: true });
+  const { page } = await setup(t, async () => ({ text: "Rocky hello" }), { hangTTS: true });
   await page.waitForFunction(() => document.getElementById("stageDetail").textContent.includes("Speech output timed out"), null, { timeout: 18000 });
   assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
   await page.click("#stopButton");
@@ -159,7 +159,7 @@ test("missing TTS onend cancels speech before the next wake", { timeout: 30000 }
 });
 
 test("wake-only response waits for new speech, then transcribes the command", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Hey, Jarvis." : "What time is it?" }));
+  const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky." : "What time is it?" }));
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Speak after the beep");
   await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 18000 });
   await page.click("#stopButton");

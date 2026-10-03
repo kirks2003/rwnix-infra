@@ -9,7 +9,7 @@ const port = Number(process.env.PORT || 8094);
 
 const config = {
   publicBasePath: normalizeBasePath(process.env.PUBLIC_BASE_PATH || "/"),
-  wakePhrase: process.env.WAKE_PHRASE || "hey jarvis",
+  wakePhrase: process.env.WAKE_PHRASE || "Rocky",
   silenceMs: Number(process.env.SILENCE_MS || 1500),
   whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "http://192.168.53.111:8003/v1/audio/transcriptions"),
   whisperModel: process.env.WHISPER_MODEL || "whisper-1",

@@ -9,6 +9,14 @@ test("Whisper punctuation and case do not prevent wake detection", () => {
   assert.equal(wakeCommand("background speech", "hey jarvis"), null);
 });
 
+test("Rocky supports wake-only and inline commands without matching longer words", () => {
+  assert.equal(wakeCommand("Rocky, what time is it?", "Rocky"), "what time is it?");
+  assert.equal(wakeCommand("ROCKY!", "Rocky"), "");
+  assert.equal(wakeCommand("rocky. Wie viel Uhr ist es?", "Rocky"), "Wie viel Uhr ist es?");
+  assert.equal(wakeCommand("Rockyard", "Rocky"), null);
+  assert.equal(wakeCommand("Hey Jarvis", "Rocky"), null);
+});
+
 test("every overlapping audio snapshot has a complete WAV header and correct PCM", async () => {
   const buffer = new AudioBufferWindow(16000, 1);
   buffer.push(new Float32Array(16000).fill(0.5));
