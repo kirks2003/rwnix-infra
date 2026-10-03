@@ -1,24 +1,83 @@
 import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase } from "./audio.js";
 import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
-  pickSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError } from "./voice.js";
+  pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError } from "./voice.js";
+import { CoreVisualizer } from "./visualizer.js";
 
 const el = Object.fromEntries([
-  "core", "stageTitle", "stageDetail", "armButton", "stopButton", "testButton",
+  "core", "waveform", "stageTitle", "stageDetail", "armButton", "stopButton", "testButton",
   "clearLogButton", "micLevel", "silenceLevel", "promptText", "answerText",
-  "log", "steps", "promptDialog", "manualPrompt", "whisperStatus",
+  "log", "steps", "promptDialog", "manualPrompt",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
+  "languageSwitch", "languageStatus",
 ].map((id) => [id, document.getElementById(id)]));
 const steps = ["wake", "record", "vad", "whisper", "brain", "tts"];
 const sessionId = crypto.randomUUID();
 const wakeWordStorageKey = "jarvis.wakePhrase";
 const voiceStorageKey = "jarvis.voice";
 const voiceSpeedStorageKey = "jarvis.voiceSpeed";
+const languageStorageKey = "jarvis.language";
 let config;
 let voiceId = "browser";
 let voiceSpeed = voiceSpeedRange.default;
+let language = "en";
 let current = null;
 let sequence = 0;
+
+const visualizer = new CoreVisualizer(el.waveform, el.core);
+visualizer.pickAnalyser = () => {
+  const session = current;
+  if (!session) return null;
+  // Speaking shows the agent's own voice when it is tappable; the microphone
+  // drives every other armed stage.
+  return visualizer.stage === "speaking" ? session.voice?.analyser ?? null : session.mic?.analyser ?? null;
+};
+visualizer.start();
+
+// Animation preview: click a pipeline stage without arming. The live pipeline
+// owns the core while a session runs, so the buttons are disabled then.
+const previewButtons = [...document.querySelectorAll("#stagePreview [data-stage]")];
+const stagePreview = {
+  standby: ["Standby", "Idle breathing. Arm Jarvis for the live pipeline.", null],
+  wake: ["Wake listening", "Preview: slow ring spin. The waveform follows the live mic when armed.", "wake"],
+  recording: ["Recording command", "Preview: fast spin while the VAD waits for 1.5 s of silence.", "record"],
+  transcribing: ["Transcribing", "Preview: flicker while audio goes to Whisper.", "whisper"],
+  thinking: ["Thinking", "Preview: fast flicker while the brain computes.", "brain"],
+  speaking: ["Speaking", "Preview: pulse. The waveform runs a synthetic speech pattern.", "tts"],
+  error: ["Pipeline error", "Preview: shake. The next live stage takes over from here.", null],
+};
+for (const button of previewButtons) {
+  button.addEventListener("click", () => {
+    const [title, detail, active] = stagePreview[button.dataset.stage];
+    stage(button.dataset.stage, title, detail, active);
+  });
+}
+
+// Language switch (English/Deutsch). One click flips the whole pipeline -
+// Whisper, brain and spoken output - from the next request on, without
+// stopping a running session.
+function setLanguage(value, persist) {
+  language = value === "de" ? "de" : "en";
+  const label = language === "de" ? "Deutsch" : "English";
+  el.languageSwitch.setAttribute("aria-checked", String(language === "de"));
+  el.languageSwitch.setAttribute("aria-label", `Language: ${label}`);
+  if (persist) {
+    try {
+      localStorage.setItem(languageStorageKey, language);
+      el.languageStatus.textContent = `Saved: ${label}.`;
+    } catch (error) {
+      el.languageStatus.textContent = `${label} for this tab only; storage unavailable.`;
+      log("settings", "Could not save language", { message: error.message });
+    }
+  } else {
+    el.languageStatus.textContent = `Active: ${label}.`;
+  }
+  log("settings", `Language: ${language}`);
+}
+el.languageSwitch.addEventListener("click", () => {
+  if (el.languageSwitch.disabled) return;
+  setLanguage(language === "de" ? "en" : "de", true);
+});
 
 function log(scope, message, data) {
   const line = `[${new Date().toLocaleTimeString()}] ${scope}: ${message}`;
@@ -28,6 +87,11 @@ function log(scope, message, data) {
 
 function stage(kind, title, detail, active = null) {
   el.core.className = `core ${kind}`;
+  visualizer.setStage(kind);
+  // Only a manual preview (no live session) highlights its button.
+  for (const button of previewButtons) {
+    button.classList.toggle("active", !current && button.dataset.stage === kind);
+  }
   el.stageTitle.textContent = title;
   el.stageDetail.textContent = detail;
   for (const item of el.steps.children) item.classList.remove("active");
@@ -56,6 +120,7 @@ function stop(message = "Jarvis is disarmed.") {
   el.armButton.disabled = !config;
   el.testButton.disabled = !config;
   el.stopButton.disabled = true;
+  for (const button of previewButtons) button.disabled = !config;
   el.micLevel.value = 0;
   el.silenceLevel.value = 0;
   stage("standby", "Stopped", message);
@@ -69,6 +134,7 @@ function newSession() {
   el.armButton.disabled = true;
   el.testButton.disabled = true;
   el.stopButton.disabled = false;
+  for (const button of previewButtons) button.disabled = true;
   resetSteps();
   log("session", `Started ${session.id}`);
   return session;
@@ -93,10 +159,10 @@ async function transcribe(session, start, purpose) {
   const blob = session.mic.buffer.wav(start);
   stage("transcribing", purpose === "wake" ? "Checking wake word" : "Transcribing command",
     `Sending ${Math.round(blob.size / 1024)} KB to ${config.whisperEndpoints.join(", ")}`, purpose === "wake" ? "wake" : "whisper");
-  const result = await request(session, "/api/transcribe", {
+  const result = await request(session, `/api/transcribe?language=${language}`, {
     method: "POST", headers: { "content-type": blob.type }, body: blob,
   });
-  el.whisperStatus.textContent = `Last ${purpose}: ${result.endpoint} | request ${result.requestId}`;
+  log("stt", `Last ${purpose}: ${result.endpoint} | request ${result.requestId}`);
   const { text, ...details } = result;
   log("whisper", `${purpose === "wake" ? "Wake probe" : "Command"} recognized: ${text ? JSON.stringify(text) : "(no speech recognized)"}`);
   log("whisper", "Response details", details);
@@ -222,7 +288,7 @@ async function answer(session, prompt) {
   stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
   const result = await request(session, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, sessionId }),
+    body: JSON.stringify({ prompt, sessionId, language }),
   });
   if (!result.answer) throw new Error("Brain returned no answer");
   log("brain", `Request ${result.requestId} completed`);
@@ -236,6 +302,13 @@ async function answer(session, prompt) {
 
 async function speak(session, text) {
   const profile = voiceProfiles[voiceId];
+  if (language === "de") {
+    // The self-hosted engine (Kokoro) has no German voices, so German is
+    // spoken by the browser voice in the selected profile's cadence.
+    log("tts", `German selected: the self-hosted TTS engine is English-only; ${profile.label} falls back to the browser voice.`);
+    await speakWithSynthesis(session, splitForSpeech(text, profile.chunkChars), profile);
+    return;
+  }
   if (profile.neural && config.ttsConfigured) {
     session.voice ??= new NeuralVoice(session.signal, profile);
     try {
@@ -257,7 +330,9 @@ async function speak(session, text) {
 
 async function speakWithSynthesis(session, chunks, baseProfile) {
   const profile = { ...baseProfile, rate: scaledRate(baseProfile.rate, voiceSpeed) };
-  const voice = profile.voiceHints ? pickSynthesisVoice(speechSynthesis.getVoices(), profile) : null;
+  const voice = language === "de"
+    ? pickGermanSynthesisVoice(speechSynthesis.getVoices())
+    : (profile.voiceHints ? pickSynthesisVoice(speechSynthesis.getVoices(), profile) : null);
   if (voice) log("tts", `Browser voice selected: ${voice.name} (${voice.lang})`);
   for (const [index, chunk] of chunks.entries()) {
     await utter(session, chunk, profile, voice);
@@ -269,7 +344,7 @@ function utter(session, text, profile, voice) {
   return new Promise((resolve, reject) => {
     check(session);
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = voice?.lang || config.whisperLanguage || navigator.language;
+    utterance.lang = voice?.lang || language || navigator.language;
     utterance.rate = profile.rate;
     utterance.pitch = profile.pitch;
     if (voice) utterance.voice = voice;
@@ -425,6 +500,8 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => stop());
 el.armButton.disabled = el.testButton.disabled = true;
+for (const button of previewButtons) button.disabled = true;
+el.languageSwitch.disabled = true;
 el.voiceSelect.replaceChildren(...Object.values(voiceProfiles).map((profile) => {
   const option = document.createElement("option");
   option.value = profile.id;
@@ -468,9 +545,19 @@ fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) })
     }
     applyVoiceSpeed(savedSpeed ?? voiceSpeed, false);
     el.voiceSelect.disabled = el.saveVoiceButton.disabled = el.voiceSpeed.disabled = false;
+    let savedLanguage = null;
+    try {
+      savedLanguage = localStorage.getItem(languageStorageKey);
+    } catch (error) {
+      log("settings", "Could not load language", { message: error.message });
+    }
+    // The saved choice wins; otherwise the server default (WHISPER_LANGUAGE).
+    setLanguage(savedLanguage || config.whisperLanguage || "en", false);
+    el.languageSwitch.disabled = false;
     el.silenceLevel.max = config.silenceMs;
-    el.whisperStatus.textContent = `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`;
+    log("stt", `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`);
     el.armButton.disabled = el.testButton.disabled = false;
+    for (const button of previewButtons) button.disabled = false;
     stage("standby", "Standby", "Arm to send voice probes to vm103. Microphone audio stays local until a probe or command is sent.");
     log("build", "PCM lifecycle v2");
   })

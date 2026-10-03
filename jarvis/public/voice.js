@@ -29,6 +29,62 @@ export const voiceProfiles = {
     voiceHints: ["george", "lewis", "daniel", "arthur", "fable", "ryan", "alex", "david"],
     langHints: ["en-GB", "en-US", "en"],
   },
+  // Character delivery profiles. The neural backend gives each its own Kokoro
+  // voice (see profileVoices in server.js); the delivery fields below shape the
+  // pace, pitch and clause pauses, and the voiceHints steer the browser-voice
+  // fallback when no TTS backend is configured.
+  commander: {
+    id: "commander",
+    label: "Commander",
+    neural: true,
+    rate: 0.85,
+    pitch: 0.45,
+    pauseMs: 400,
+    chunkChars: 240,
+    speed: 0.92,
+    playbackRate: 0.9,
+    voiceHints: ["daniel", "adam", "michael", "david"],
+    langHints: ["en-GB", "en-US", "en"],
+  },
+  android: {
+    id: "android",
+    label: "Android",
+    neural: true,
+    rate: 0.95,
+    pitch: 0.8,
+    pauseMs: 250,
+    chunkChars: 200,
+    speed: 1.0,
+    playbackRate: 1.0,
+    voiceHints: ["lewis", "ryan", "daniel"],
+    langHints: ["en-GB", "en-US", "en"],
+  },
+  wizard: {
+    id: "wizard",
+    label: "Wizard",
+    neural: true,
+    rate: 0.82,
+    pitch: 0.7,
+    pauseMs: 450,
+    chunkChars: 240,
+    speed: 0.9,
+    playbackRate: 0.92,
+    voiceHints: ["arthur", "george", "david"],
+    langHints: ["en-GB", "en-US", "en"],
+  },
+  newscaster: {
+    id: "newscaster",
+    label: "Newscaster",
+    neural: true,
+    rate: 1.12,
+    pitch: 1.0,
+    pauseMs: 150,
+    chunkChars: 300,
+    speed: 1.15,
+    playbackRate: 1.05,
+    voiceHints: ["michael", "ryan", "adam"],
+    langHints: ["en-US", "en-GB", "en"],
+  },
 };
 
 export function normalizeVoiceId(value) {
@@ -96,6 +152,26 @@ export function pickSynthesisVoice(voices, profile) {
   return scored[0]?.voice || null;
 }
 
+// German mode: the self-hosted TTS engine is English-only, so German answers
+// are spoken by the browser voice. Prefer a male German voice by name, and
+// always fall back to *some* German voice rather than the browser default,
+// which may be English.
+export const germanSynthesisHints = ["conrad", "michael", "thomas", "markus", "stefan"];
+
+export function pickGermanSynthesisVoice(voices) {
+  const german = (voices || []).filter((voice) => (voice.lang || "").toLowerCase().startsWith("de"));
+  if (!german.length) return null;
+  const scored = german.map((voice) => {
+    const name = `${voice.name} ${voice.voiceURI || ""}`.toLowerCase();
+    let score = 0;
+    const hint = germanSynthesisHints.findIndex((value) => name.includes(value));
+    if (hint >= 0) score += 100 - hint;
+    if (/\bmale\b|conrad|michael|thomas|markus|stefan/.test(name)) score += 40;
+    return { voice, score };
+  }).sort((a, b) => b.score - a.score);
+  return scored[0].voice;
+}
+
 // Thrown when the neural backend fails part-way so the caller can finish the
 // answer with speechSynthesis instead of dropping the rest of it.
 export class VoiceError extends Error {
@@ -129,10 +205,14 @@ export class NeuralVoice {
     const wet = new GainNode(context, { gain: 0.16 });
     const dry = new GainNode(context, { gain: 0.9 });
     const output = new GainNode(context, { gain: 1 });
+    // Parallel tap on the shaped output: the waveform ring sees the agent's
+    // voice exactly as the filters, compressor and reverb deliver it.
+    this.analyser = new AnalyserNode(context, { fftSize: 512, smoothingTimeConstant: 0.5 });
     highpass.connect(lowpass).connect(chest).connect(presence).connect(compressor);
     compressor.connect(dry).connect(output);
     compressor.connect(reverb).connect(wet).connect(output);
     output.connect(context.destination);
+    output.connect(this.analyser);
     return highpass;
   }
 

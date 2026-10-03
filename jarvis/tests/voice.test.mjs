@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, NeuralVoice } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -21,6 +21,28 @@ test("only known voice profiles are accepted", () => {
   }
   assert.ok(voiceProfiles.hal9000.neural);
   assert.equal(voiceProfiles.browser.neural, false);
+});
+
+test("German mode picks a male German voice and never an English one", () => {
+  const voices = [
+    { name: "Google US English", lang: "en-US" },
+    { name: "Google Deutsch", lang: "de-DE" },
+    { name: "Microsoft Conrad - German (Germany)", lang: "de-DE" },
+  ];
+  assert.equal(pickGermanSynthesisVoice(voices).name, "Microsoft Conrad - German (Germany)");
+  assert.equal(pickGermanSynthesisVoice([voices[1], voices[0]]).name, "Google Deutsch");
+  assert.equal(pickGermanSynthesisVoice([voices[0]]), null);
+});
+
+test("character profiles are neural and keep distinct delivery", () => {
+  for (const id of ["commander", "android", "wizard", "newscaster"]) {
+    assert.equal(voiceProfiles[id].neural, true, id);
+    assert.ok(voiceProfiles[id].speed > 0 && voiceProfiles[id].chunkChars > 0, id);
+    assert.ok(voiceProfiles[id].voiceHints.length > 0, id);
+  }
+  // Distinct paces keep the characters audible apart even on the browser fallback.
+  assert.notEqual(voiceProfiles.commander.speed, voiceProfiles.newscaster.speed);
+  assert.notEqual(voiceProfiles.commander.pitch, voiceProfiles.newscaster.pitch);
 });
 
 test("the HAL profile prefers a deep English voice over a default female one", () => {
@@ -58,6 +80,7 @@ function installWebAudioStubs(played) {
   globalThis.DynamicsCompressorNode = Node;
   globalThis.ConvolverNode = Node;
   globalThis.GainNode = Node;
+  globalThis.AnalyserNode = Node;
   globalThis.AudioBufferSourceNode = class extends Node {
     constructor(context, { buffer }) { super(); this.buffer = buffer; }
     start() {

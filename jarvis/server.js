@@ -32,6 +32,17 @@ let whisperCursor = 0;
 let ttsCursor = 0;
 const conversations = new Map();
 
+// Per-profile Kokoro voice. All ids are in the en_GB set of Kokoro-82M-v1.0,
+// which the deployed gpu-1 model serves. Unknown profiles fall back to the
+// configured TTS_VOICE.
+const profileVoices = {
+  hal9000: "bm_george",
+  commander: "bm_daniel",
+  android: "bm_lewis",
+  wizard: "bm_fable",
+  newscaster: "am_michael",
+};
+
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -83,7 +94,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && pathname === "/api/transcribe") {
       const body = await readBody(req, 25 * 1024 * 1024);
       if (!body.length) return json(res, 400, { error: "empty_audio", requestId });
-      const result = await transcribeWithFailover(body, req.headers["content-type"] || "audio/webm", requestId, controller.signal);
+      // The UI language switch sends the spoken language per request; the
+      // configured WHISPER_LANGUAGE stays the default for other clients.
+      const language = normalizeLanguage(url.searchParams.get("language")) || config.whisperLanguage;
+      const result = await transcribeWithFailover(body, req.headers["content-type"] || "audio/webm", language, requestId, controller.signal);
       return json(res, result.error ? 502 : 200, result);
     }
 
@@ -92,7 +106,7 @@ const server = http.createServer(async (req, res) => {
       const prompt = String(payload.prompt || "").trim();
       const sessionId = String(payload.sessionId || "default").slice(0, 128);
       if (!prompt) return json(res, 400, { error: "missing_prompt", requestId });
-      const result = await chat(prompt, sessionId, requestId, controller.signal);
+      const result = await chat(prompt, sessionId, normalizeLanguage(payload.language) || "en", requestId, controller.signal);
       return json(res, 200, result);
     }
 
@@ -100,9 +114,15 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse((await readBody(req, 64 * 1024)).toString("utf8") || "{}");
       const text = String(payload.text || "").trim().slice(0, 2000);
       const speed = clampSpeed(payload.speed);
+      const profile = String(payload.profile || "default").slice(0, 32);
       if (!text) return json(res, 400, { error: "missing_text", requestId });
       if (!config.ttsEndpoints.length) return json(res, 503, { error: "tts_not_configured", requestId });
-      return synthesizeWithFailover(text, speed, String(payload.profile || "default").slice(0, 32), requestId, res, controller.signal);
+      // The self-hosted TTS engine (Kokoro) is English-only; German answers
+      // are spoken by the browser voice, so reject instead of mispronouncing.
+      if (normalizeLanguage(payload.language) !== "" && normalizeLanguage(payload.language) !== "en") {
+        return json(res, 503, { error: "tts_language_unsupported", language: normalizeLanguage(payload.language), requestId });
+      }
+      return synthesizeWithFailover(text, speed, profileVoices[profile] || config.ttsVoice, profile, requestId, res, controller.signal);
     }
 
     if (req.method === "GET") {
@@ -202,7 +222,7 @@ function readBody(req, limitBytes) {
   });
 }
 
-async function transcribeWithFailover(audioBuffer, mimeType, requestId, signal) {
+async function transcribeWithFailover(audioBuffer, mimeType, language, requestId, signal) {
   if (!config.whisperEndpoints.length) throw new Error("No Whisper endpoints configured");
   const attempts = [];
 
@@ -217,7 +237,7 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId, signal) 
       const blob = new Blob([audioBuffer], { type: mimeType });
       form.append("file", blob, mimeType.startsWith("audio/wav") ? "jarvis-command.wav" : "jarvis-command.webm");
       form.append("model", config.whisperModel);
-      form.append("language", config.whisperLanguage);
+      form.append("language", language);
       form.append("response_format", "json");
       form.append("vad_filter", String(config.whisperVadFilter));
       form.append("temperature", "0");
@@ -256,9 +276,15 @@ function clampSpeed(value) {
   return Number.isFinite(speed) ? Math.min(2, Math.max(0.5, speed)) : 1;
 }
 
+// Only accept a two-letter ISO code; anything else falls back to the default.
+function normalizeLanguage(value) {
+  const language = String(value || "").trim().toLowerCase();
+  return /^[a-z]{2}$/.test(language) ? language : "";
+}
+
 // Proxies an OpenAI-compatible /v1/audio/speech endpoint (Kokoro-FastAPI,
 // openedai-speech, Piper wrappers) so the browser never holds the TTS key.
-async function synthesizeWithFailover(text, speed, profile, requestId, res, signal) {
+async function synthesizeWithFailover(text, speed, voice, profile, requestId, res, signal) {
   const attempts = [];
 
   for (let i = 0; i < config.ttsEndpoints.length; i += 1) {
@@ -274,7 +300,7 @@ async function synthesizeWithFailover(text, speed, profile, requestId, res, sign
         headers,
         body: JSON.stringify({
           model: config.ttsModel,
-          voice: config.ttsVoice,
+          voice,
           input: text,
           response_format: "wav",
           speed,
@@ -332,17 +358,20 @@ function isLikelyWhisperHallucination(text) {
   return ["thank you.", "thank you", "you", "bye.", "okay.", "."].includes(normalized);
 }
 
-async function chat(prompt, sessionId, requestId, signal) {
+async function chat(prompt, sessionId, language, requestId, signal) {
   if (!isBrainConfigured()) {
     throw new Error("Brain endpoint/model is not configured");
   }
 
   const history = conversations.get(sessionId) || [];
   const now = new Date();
+  // The override wins over a hardcoded answer language in BRAIN_SYSTEM_PROMPT,
+  // which is how the UI language switch reaches the brain.
+  const answerLanguage = language === "de" ? "German (Deutsch)" : "English";
   const messages = [
     {
       role: "system",
-      content: `${config.brainSystemPrompt}\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
+      content: `${config.brainSystemPrompt}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
     },
     ...history,
     { role: "user", content: prompt },

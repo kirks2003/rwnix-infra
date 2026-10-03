@@ -71,10 +71,10 @@ async function wavBuffer(seconds) {
   return Buffer.from(await audio.wav(0).arrayBuffer());
 }
 
-async function transcribe(signal) {
+async function transcribe(signal, path = "/api/transcribe") {
   const audio = new AudioBufferWindow(16000, 1);
   audio.push(new Float32Array(16000).fill(0.2));
-  return fetch(`${origin}/api/transcribe`, {
+  return fetch(`${origin}${path}`, {
     method: "POST", headers: { "content-type": "audio/wav" }, body: audio.wav(0), signal,
   });
 }
@@ -131,6 +131,45 @@ test("hung Whisper returns a bounded timeout instead of blocking forever", { tim
   assert.ok(Date.now() - start < 24000);
 });
 
+test("the language switch reaches Whisper per request and invalid codes fall back", async () => {
+  mode = "success";
+  const languageOf = () => received.toString("latin1").match(/name="language"\r?\n\r?\n([a-z]{2})\r?\n/)[1];
+  await transcribe();
+  assert.equal(languageOf(), "en");
+  await transcribe(undefined, "/api/transcribe?language=de");
+  assert.equal(languageOf(), "de");
+  // Well-formed codes are forwarded (Whisper rejects what it does not know);
+  // malformed input falls back to the configured default.
+  await transcribe(undefined, "/api/transcribe?language=fr");
+  assert.equal(languageOf(), "fr");
+  await transcribe(undefined, "/api/transcribe?language=english");
+  assert.equal(languageOf(), "en");
+});
+
+test("the language switch overrides the brain answer language", async () => {
+  mode = "success";
+  const ask = (language) => fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Hello", sessionId: `lang-${language}`, language }),
+  });
+  assert.equal((await ask("de")).status, 200);
+  assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Language override: answer in German \(Deutsch\)/);
+  assert.equal((await ask("en")).status, 200);
+  assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Language override: answer in English/);
+});
+
+test("the TTS proxy rejects non-English languages instead of mispronouncing", async () => {
+  mode = "success";
+  const response = await fetch(`${origin}/api/speak`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "Hallo", language: "de" }),
+  });
+  assert.equal(response.status, 503);
+  const result = await response.json();
+  assert.equal(result.error, "tts_language_unsupported");
+  assert.equal(result.language, "de");
+});
+
 test("brain proxy still returns the upstream answer", async () => {
   mode = "success";
   const response = await fetch(`${origin}/api/chat`, {
@@ -159,6 +198,19 @@ test("TTS proxy returns upstream audio and reports configuration", async () => {
   assert.equal(request.response_format, "wav");
   assert.equal(request.speed, 0.8);
   assert.equal(request.voice, "bm_george");
+});
+
+test("each character profile maps to its own Kokoro voice, unknown ones fall back", async () => {
+  mode = "success";
+  const cases = { commander: "bm_daniel", android: "bm_lewis", wizard: "bm_fable", newscaster: "am_michael", hal9000: "bm_george", default: "bm_george" };
+  for (const [profile, voice] of Object.entries(cases)) {
+    const response = await fetch(`${origin}/api/speak`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "Hello", profile, speed: 1 }),
+    });
+    assert.equal(response.status, 200, profile);
+    assert.equal(JSON.parse(received.toString("utf8")).voice, voice, profile);
+  }
 });
 
 test("TTS requests are validated and clamped before reaching the engine", async () => {

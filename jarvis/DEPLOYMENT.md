@@ -56,7 +56,8 @@ Findings while exposing the service:
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
 - Output: the selected answer voice plus prompt/result text in the UI
-- Answer voice: the UI's **Answer voice** select and **Speaking speed** slider (0.60x-1.60x, a multiplier on the voice's own pace) persist locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** proxies clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shapes them in Web Audio. `TTS_ENDPOINTS` is unset in this deployment, so HAL 9000 currently falls back to `speechSynthesis` with HAL cadence only.
+- Answer voice: the UI's **Answer voice** select and **Speaking speed** slider (0.60x-1.60x, a multiplier on the voice's own pace) persist locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** and the character profiles (Commander, Android, Wizard, Newscaster) proxy clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shape them in Web Audio. The deployed backend is the `speaches` Kokoro container on gpu-1; `server.js` maps each profile to its own Kokoro voice (`profileVoices`), so the timbre changes with the profile.
+- Language: the UI's **Language** toggle (English/Deutsch, per browser) sends the language with every Whisper request (`/api/transcribe?language=…`), appends a `Language override` directive to the brain system prompt per `/api/chat` request, and switches spoken output. German answers are spoken with the browser voice (German voice preferred) because the Kokoro engine ships English voices only; `/api/speak` rejects non-English with `tts_language_unsupported` as a backstop.
 - Observability: browser live log and backend JSON logs via `docker logs jarvis`
 - Recognized speech: the browser live log explicitly prints every wake/command transcript (or no-speech result), followed by endpoint/request metadata. Full transcripts are not newly persisted in Docker logs.
 
@@ -238,8 +239,9 @@ obvious next thing to shorten.
 - The VAD is not over-aggressive: synthesized speech attenuated to 8% and 3% of full scale
   still transcribed perfectly with the filter on.
 - Forcing English on German speech breaks wake matching outright.
-  *"Rocky, wie viel Uhr ist es?"* transcribes as *"Roki waivil ua ist iz."*. A per-browser
-  language setting, like the wake-word override, is the fix if both languages are wanted.
+  *"Rocky, wie viel Uhr ist es?"* transcribes as *"Roki waivil ua ist iz."*. Implemented as
+  the per-browser **Language** toggle (English/Deutsch) that sends the language with every
+  Whisper request — see "Frontend feature rollout" below.
 - Latency: 0.80 s warm for a 1.2 s command, 1.19 s for 3.3 s of audio, ~27 s cold while the
   model loads into VRAM. `WHISPER__TTL=-1` keeps it warm.
 
@@ -260,3 +262,45 @@ failing; `transcriptChars: 0` is an empty window; `transcriptChars: 10` was the
   on vm104 looks like a dead service when the app is healthy.
 - `npm ci` on vm104 and in CI-like containers skips devDependencies when `NODE_ENV` is
   `production`; use `npm ci --include=dev` before running the browser suite.
+
+## Frontend feature rollout (2026-10-03, evening)
+
+Rolled out to vm104 from this branch using the same file-copy + `docker compose up -d
+--build` procedure as the HAL voice rollout. Backups under `/home/ubuntu/docker/` on vm104:
+
+- `jarvis-code.bak-20261003_220410.tgz` — before live waveform ring + Prompt/Answer above controls
+- `jarvis-code.bak-20261003_220829.tgz` — before animation preview buttons
+- `jarvis-code.bak-20261003_221924.tgz` — before character voices, language switch and full-width bottom log
+- `jarvis-code.bak-20261003_222222.tgz` — before the Kokoro voice-ID fix (wizard/newscaster)
+- `jarvis-code.bak-20261003_223240.tgz` — before the language switch UI (first pass)
+- `jarvis-code.bak-20261003_223857.tgz` — before the language toggle switch (current state)
+
+Features shipped:
+
+- Live circular waveform ring around the core: mic-driven while listening, shaped-TTS-driven
+  while speaking, deterministic synthetic motion where audio cannot be tapped (browser
+  `speechSynthesis`, Whisper/brain waiting). Reactor glow and size follow the overall level.
+- Animation preview buttons (Standby/Wake/Recording/Transcribing/Thinking/Speaking/Error);
+  disabled while a session runs so the live pipeline owns the core.
+- Four character voice profiles (Commander, Android, Wizard, Newscaster) mapped to their own
+  Kokoro voices via `profileVoices` in `server.js`.
+- EN/DE **Language** toggle in the top controls row: per-request Whisper language, brain
+  `Language override` directive, German spoken output via the browser voice because the
+  Kokoro engine is English-only; `/api/speak` answers 503 `tts_language_unsupported` for
+  non-English as a backstop.
+- Layout: Prompt/Answer above the mic-level controls; Live log is a full-width panel at the
+  bottom; STT endpoint/request-ID detail appears only in the Live log.
+
+Verified against the running container:
+
+- Unit suite 35/35, including per-profile voice mapping, per-request Whisper language, brain
+  override, TTS guard, German voice picker and waveform math.
+- All five voice profiles returned valid RIFF WAVs from the live Kokoro engine
+  (`hal9000/commander/android/wizard/newscaster` → `bm_george/bm_daniel/bm_lewis/bm_fable/am_michael`).
+- The engine's supported-voice list was probed through its 422 detail dump: en-GB males are
+  `bm_daniel, bm_fable, bm_george, bm_lewis`; there are **no German voices**, which is why
+  German answers fall back to the browser voice.
+- Live brain through the deployed backend: German request → `"Ich bin bereit."`, English
+  request → `"I am ready."`.
+- `/api/transcribe?language=de` and `=en` both returned 200 from gpu-1.
+- Container reported `healthy` after the final rebuild.
