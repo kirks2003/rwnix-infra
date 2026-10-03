@@ -47,8 +47,8 @@ Findings while exposing the service:
 ## Runtime behavior
 
 - Wake phrase: `hey jarvis`
-- Wake engine: vm103 Whisper probes from browser `MediaRecorder` segments
-- Command recording: `MediaRecorder`; command audio and wake+command tails are transcribed by vm103 Whisper
+- Wake engine: vm103 Whisper probes from continuous browser AudioWorklet PCM capture
+- Command recording: complete mono WAV snapshots; capture continues during Whisper latency
 - Auto-stop: `1500 ms` continuous silence
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
@@ -76,11 +76,36 @@ When the user said `hey jarvis, what's the time`, the original browser flow dete
 
 Fixes applied:
 
-- Jarvis now uses vm103 Whisper for wake detection too. The browser records short wake-probe segments and uploads them to `/api/transcribe`; if vm103 Whisper returns `hey jarvis` plus command text, that vm103 transcript becomes the prompt. If it returns only the wake phrase, Jarvis beeps and records the next command for vm103 Whisper.
+- Jarvis uses vm103 Whisper for wake detection too. Voice-containing, overlapping WAV probes go to `/api/transcribe`. After wake detection the complete utterance is transcribed again, so a partially heard command is not submitted prematurely. If it contains only the wake phrase, Jarvis beeps and waits for a separate command.
 - Whisper requests now send `vad_filter=true` and `temperature=0`.
 - Known no-speech hallucinations such as `Untertitelung des ZDF` and Amara subtitle phrases are rejected and shown as no-speech errors instead of prompting the brain.
 - Brain requests now include the current server timestamp, use a larger token budget, and answer time/date questions from that timestamp.
-- Browser TTS now waits briefly for voices and resumes `speechSynthesis` before speaking to improve Chrome/Android reliability.
+- Browser TTS completion is awaited before re-arming. Failure/watchdog timeout cancels playback and reports an error; old callbacks cannot change a stopped or newer session.
+
+## Pipeline redesign findings
+
+The previous health checks and mocked transcript tests did not validate real audio capture. Later live logs confirmed successful vm103 requests even while the UI pipeline was failing; a configured endpoint or successful HTTP probe alone is not evidence that repeated browser wake cycles work.
+
+Concrete defects in the successive implementations:
+
+- Stopping capture during each wake transcription introduced gaps and cut off command tails.
+- Literal `indexOf("hey jarvis")` rejected normal Whisper punctuation such as `Hey, Jarvis!`.
+- The rolling WebM implementation dropped initial container headers while retaining later chunks; those slices are not standalone recordings.
+- Independent UI/restart/TTS timers and mutable recording flags allowed late callbacks to affect later runs.
+- Whisper/brain requests had no deadline; upstream failures were returned as HTTP 200, and wake polling treated failures like no wake word.
+
+The replacement uses one sequential async pipeline per cancellable browser session and valid WAV snapshots from a bounded PCM ring. Stop/re-arm and tab hiding invalidate the session, cancel downstream fetches and release the mic. Voice probes overlap; command completion waits for silence. The UI distinguishes listening, checking wake audio, command capture, Whisper, brain, TTS and errors. The displayed last STT endpoint/request ID comes from the response rather than a hardcoded success label.
+
+Whisper has a 20-second deadline per attempt; brain has a 45-second deadline. Actual upstream failures return HTTP 502 with attempt details. Valid silence/hallucination filtering returns `noSpeech: true` with empty text and a `whisper_no_speech` log, never a fabricated prompt. Browser errors are visible before bounded retry; capture failure requires re-arming.
+
+Redesign verification on 2026-10-03:
+
+- Nine audio/backend tests cover punctuation, valid overlapping WAV data, cancellation, actual multipart forwarding, no-speech handling, HTTP failures, a real 20-second upstream timeout, and the brain proxy.
+- Eight Chromium lifecycle checks use actual fake-device microphone capture through the production AudioWorklet: three consecutive wake cycles, Stop/re-arm with a delayed response, STT failure/retry, missing TTS completion, wake-only/separate command, silence/background stop, denied permission, and permission granted after Stop.
+- Real synthesized speech through Chromium and vm103 passed twice with the live `de` language setting and 1500 ms silence threshold. The first short probe sometimes returned `Hey Jarvis! What type?`; the completed audio correctly returned `Hey Jarvis! What time is it?`. This demonstrates why submitting the first partial wake transcript was wrong.
+- An isolated candidate container used the existing live environment without exposing its secrets. Two complete browser -> backend -> vm103 -> real DeepSeek cycles succeeded. Command transcription request IDs: `1dd5ec51-a57b-402a-a6fe-fad0389a7339` and `6c4c48f8-c316-4f77-b6e9-c92bfc04d2ab`; brain IDs: `a91e9250-4ba6-4d13-8eb4-39688f525cf1` and `fbf7ee20-237a-49f7-9519-6d10c5d95b9a`.
+- After deployment, the same two-cycle test passed against the production container: command STT IDs `34b7e39c-717e-4f23-b2e4-9b04a8319cbf` and `62049b0a-8f76-4c04-ba89-3a0cc62ad42f`, with two real brain answers. The previous image is retained as `jarvis-before-pcm-v2`; the pre-change source backup is `/tmp/jarvis-before-pcm-v2.tar.gz` on vm104.
+- Headless TTS callbacks were simulated because that Chromium has no installed voices. Physical microphone acoustics, speaker playback and Android hardware remain unverified; server health alone does not establish those.
 
 ## Brain configuration finding
 
@@ -96,8 +121,8 @@ After using the `a1-dsv4f` / `ds4-flash` key, `/api/chat` returned the expected 
 
 ## Browser limitations and next improvements
 
-- `webkitSpeechRecognition` is a first-version foreground wake listener, not a true low-power wake-word engine.
-- Android Chrome can stop listening when the tab is backgrounded, the device locks, or the OS throttles the browser.
+- Browser speech recognition is not used. While armed, voice-containing ambient audio is sent to the configured vm103 service to check for wake words; this is not on-device wake detection.
+- Android Chrome can stop capture when the tab is backgrounded, the device locks, or the OS throttles the browser. This build explicitly disarms on tab hiding.
 - A production wake-word path should replace the current wake listener with an on-device WASM model such as Porcupine or another local wake-word model.
 - Browser TTS is intentionally used for the first version; cloned/server-side TTS can be added later behind a backend proxy if needed.
 

@@ -45,6 +45,7 @@ body {
 }
 
 .core {
+  --stage-color: var(--cyan);
   position: relative;
   width: 220px;
   height: 220px;
@@ -71,9 +72,15 @@ body {
 
 .reactor {
   inset: 72px;
-  background: radial-gradient(circle, #eaffff, var(--cyan) 34%, rgba(66, 217, 255, 0.2) 60%, transparent 70%);
-  box-shadow: 0 0 42px var(--cyan);
+  background: radial-gradient(circle, #eaffff, var(--stage-color) 34%, transparent 70%);
+  box-shadow: 0 0 42px var(--stage-color);
 }
+
+.core.prompting, .core.recording { --stage-color: var(--green); }
+.core.transcribing { --stage-color: var(--blue); }
+.core.thinking { --stage-color: var(--amber); }
+.core.speaking { --stage-color: var(--purple); }
+.core.error { --stage-color: var(--red); }
 
 .standby .ring-a {
   animation: pulse 3s ease-in-out infinite;

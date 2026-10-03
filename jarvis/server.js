@@ -11,7 +11,7 @@ const config = {
   publicBasePath: normalizeBasePath(process.env.PUBLIC_BASE_PATH || "/"),
   wakePhrase: process.env.WAKE_PHRASE || "hey jarvis",
   silenceMs: Number(process.env.SILENCE_MS || 1500),
-  whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "http://host.docker.internal:8001/v1/audio/transcriptions"),
+  whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "http://192.168.53.111:8003/v1/audio/transcriptions"),
   whisperModel: process.env.WHISPER_MODEL || "whisper-1",
   whisperLanguage: process.env.WHISPER_LANGUAGE || "de",
   whisperVadFilter: parseBoolean(process.env.WHISPER_VAD_FILTER || "true"),
@@ -36,6 +36,10 @@ const mimeTypes = {
 const server = http.createServer(async (req, res) => {
   const requestId = crypto.randomUUID();
   const started = Date.now();
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) controller.abort(new Error("Browser disconnected"));
+  });
   try {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const pathname = stripBasePath(url.pathname);
@@ -66,8 +70,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && pathname === "/api/transcribe") {
       const body = await readBody(req, 25 * 1024 * 1024);
       if (!body.length) return json(res, 400, { error: "empty_audio", requestId });
-      const result = await transcribeWithFailover(body, req.headers["content-type"] || "audio/webm", requestId);
-      return json(res, 200, result);
+      const result = await transcribeWithFailover(body, req.headers["content-type"] || "audio/webm", requestId, controller.signal);
+      return json(res, result.error ? 502 : 200, result);
     }
 
     if (req.method === "POST" && pathname === "/api/chat") {
@@ -75,7 +79,7 @@ const server = http.createServer(async (req, res) => {
       const prompt = String(payload.prompt || "").trim();
       const sessionId = String(payload.sessionId || "default").slice(0, 128);
       if (!prompt) return json(res, 400, { error: "missing_prompt", requestId });
-      const result = await chat(prompt, sessionId, requestId);
+      const result = await chat(prompt, sessionId, requestId, controller.signal);
       return json(res, 200, result);
     }
 
@@ -86,14 +90,14 @@ const server = http.createServer(async (req, res) => {
     json(res, 405, { error: "method_not_allowed", requestId });
   } catch (error) {
     console.error(JSON.stringify({ level: "error", requestId, msg: error.message, stack: error.stack }));
-    json(res, 500, { error: "server_error", message: error.message, requestId });
+    if (!res.destroyed) json(res, 500, { error: "server_error", message: error.message, requestId });
   } finally {
     console.log(JSON.stringify({ level: "info", requestId, method: req.method, url: req.url, ms: Date.now() - started }));
   }
 });
 
 server.listen(port, "0.0.0.0", () => {
-  console.log(`Jarvis listening on 0.0.0.0:${port}`);
+  console.log(`Jarvis listening on 0.0.0.0:${server.address().port}`);
 });
 
 function splitCsv(value) {
@@ -171,11 +175,12 @@ function readBody(req, limitBytes) {
       chunks.push(chunk);
     });
     req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("aborted", () => reject(new Error("Request upload aborted")));
     req.on("error", reject);
   });
 }
 
-async function transcribeWithFailover(audioBuffer, mimeType, requestId) {
+async function transcribeWithFailover(audioBuffer, mimeType, requestId, signal) {
   if (!config.whisperEndpoints.length) throw new Error("No Whisper endpoints configured");
   const attempts = [];
 
@@ -188,32 +193,34 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId) {
       console.log(JSON.stringify({ level: "info", requestId, msg: "whisper_attempt", endpoint: redactUrl(endpoint), bytes: audioBuffer.length, mimeType }));
       const form = new FormData();
       const blob = new Blob([audioBuffer], { type: mimeType });
-      form.append("file", blob, "jarvis-command.webm");
+      form.append("file", blob, mimeType.startsWith("audio/wav") ? "jarvis-command.wav" : "jarvis-command.webm");
       form.append("model", config.whisperModel);
       form.append("language", config.whisperLanguage);
       form.append("response_format", "json");
       form.append("vad_filter", String(config.whisperVadFilter));
       form.append("temperature", "0");
 
-      const response = await fetch(endpoint, { method: "POST", body: form });
+      const response = await fetch(endpoint, {
+        method: "POST", body: form,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
+      });
       const text = await response.text();
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 400)}`);
       const data = parseJsonOrText(text);
-      const transcript = extractTranscript(data);
-      if (isLikelyWhisperHallucination(transcript)) {
-        throw new Error(`Whisper hallucination/no-speech result: ${transcript}`);
-      }
-      if (!transcript) throw new Error("Whisper returned no transcript");
-      console.log(JSON.stringify({ level: "info", requestId, msg: "whisper_success", endpoint: redactUrl(endpoint), ms: Date.now() - started, transcriptChars: transcript.length }));
+      const rawTranscript = extractTranscript(data);
+      const transcript = isLikelyWhisperHallucination(rawTranscript) ? "" : rawTranscript;
+      console.log(JSON.stringify({ level: "info", requestId, msg: transcript ? "whisper_success" : "whisper_no_speech", endpoint: redactUrl(endpoint), ms: Date.now() - started, transcriptChars: transcript.length }));
       return {
         requestId,
         text: transcript,
+        noSpeech: !transcript,
         endpoint: redactUrl(endpoint),
         attempts: attempts.concat({ endpoint: redactUrl(endpoint), ok: true, ms: Date.now() - started }),
       };
     } catch (error) {
       console.log(JSON.stringify({ level: "warn", requestId, msg: "whisper_failure", endpoint: redactUrl(endpoint), ms: Date.now() - started, error: error.message }));
       attempts.push({ endpoint: redactUrl(endpoint), ok: false, ms: Date.now() - started, error: error.message });
+      signal.throwIfAborted();
     }
   }
 
@@ -247,13 +254,9 @@ function isLikelyWhisperHallucination(text) {
   return hallucinations.some((phrase) => normalized.includes(phrase));
 }
 
-async function chat(prompt, sessionId, requestId) {
+async function chat(prompt, sessionId, requestId, signal) {
   if (!isBrainConfigured()) {
-    return {
-      requestId,
-      answer: "Brain endpoint is reachable from the Jarvis backend only after BRAIN_API_KEY is set in /home/ubuntu/docker/jarvis/.env.",
-      configured: false,
-    };
+    throw new Error("Brain endpoint/model is not configured");
   }
 
   const history = conversations.get(sessionId) || [];
@@ -272,6 +275,7 @@ async function chat(prompt, sessionId, requestId) {
 
   const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
     method: "POST",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(45000)]),
     headers,
     body: JSON.stringify({
       model: config.brainModel,
