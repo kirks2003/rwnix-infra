@@ -1,0 +1,16 @@
+services:
+  jarvis:
+    build: .
+    container_name: jarvis
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "192.168.54.111:8094:8094"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8094/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
