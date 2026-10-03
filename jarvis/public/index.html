@@ -40,6 +40,13 @@
         <button id="armButton" type="button">Arm Jarvis</button>
         <button id="stopButton" type="button" disabled>Stop</button>
         <button id="testButton" type="button">Manual prompt</button>
+        <div class="test-control">
+          <button id="signalButton" type="button" disabled
+                  title="Inject a short test peep into the live capture path: proves capture, level and the wake-probe round trip without speaking.">Test signal</button>
+          <button id="wakeTestButton" type="button" disabled
+                  title="Synthesize the wake word plus a test command with the TTS backend and inject it into the capture path, running the full pipeline hands-free.">Wake test</button>
+          <p class="test-control-help">Inject audio into the live capture path. Arm Jarvis first.</p>
+        </div>
         <div class="language-control">
           <button id="languageSwitch" class="lang-switch" type="button" role="switch" aria-checked="false"
                   title="Switches Whisper, brain and spoken output between English and German, live.
@@ -50,6 +57,16 @@
             <span class="lang-knob" aria-hidden="true"></span>
           </button>
           <p id="languageStatus" role="status">Loading language settings.</p>
+        </div>
+        <div class="language-control">
+          <button id="websearchSwitch" class="lang-switch" type="button" role="switch" aria-checked="false"
+                  title="Enable the Jarvis MCP web-search server: for every prompt the backend searches the web and gives the brain the results as context. Saved in this browser only."
+                  disabled>
+            <span class="lang-option">MCP off</span>
+            <span class="lang-option">MCP search</span>
+            <span class="lang-knob" aria-hidden="true"></span>
+          </button>
+          <p id="websearchStatus" role="status">Loading MCP search settings.</p>
         </div>
         <div class="meters">
           <label>Mic level <progress id="micLevel" max="100" value="0"></progress></label>

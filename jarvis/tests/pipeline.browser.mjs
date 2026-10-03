@@ -54,7 +54,7 @@ async function setup(t, transcribe, options = {}) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
-  const calls = { audio: [], prompts: [], speak: [] };
+  const calls = { audio: [], prompts: [], speak: [], websearch: undefined };
   await page.addInitScript(() => {
     window.testTracks = [];
     window.ttsEvents = [];
@@ -93,7 +93,9 @@ async function setup(t, transcribe, options = {}) {
       if (!page.isClosed()) throw error;
     });
   });
-  await page.route("**/api/transcribe", async (route) => {
+  // The app sends the spoken language as a query parameter; Playwright globs
+  // match the full URL, so the pattern must keep matching past the "?".
+  await page.route("**/api/transcribe*", async (route) => {
     const body = route.request().postDataBuffer();
     assert.equal(body.toString("ascii", 0, 4), "RIFF");
     assert.equal(body.toString("ascii", 8, 12), "WAVE");
@@ -109,7 +111,9 @@ async function setup(t, transcribe, options = {}) {
     });
   });
   await page.route("**/api/chat", async (route) => {
-    calls.prompts.push(route.request().postDataJSON().prompt);
+    const payload = route.request().postDataJSON();
+    calls.prompts.push(payload.prompt);
+    calls.websearch = payload.websearch;
     await route.fulfill({ json: { answer: options.answer || "Done.", requestId: "brain-test" } });
   });
   await page.goto(origin);
@@ -197,6 +201,66 @@ test("silence makes no Whisper calls and hiding the tab releases capture", async
   });
   assert.equal(await page.textContent("#stageTitle"), "Stopped");
   assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "ended")));
+});
+
+test("test signal is injected into the capture path and fires a wake probe", { timeout: 30000 }, async (t) => {
+  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  await page.waitForFunction(() => !document.getElementById("signalButton").disabled);
+  await page.waitForTimeout(1500);
+  assert.equal(calls.audio.length, 0);
+  await page.click("#signalButton");
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Wake probe recognized"),
+    null, { timeout: 20000 });
+  await page.click("#stopButton");
+  assert.ok(calls.audio.length >= 1, `probes: ${calls.audio.length}`);
+  const log = await page.textContent("#log");
+  assert.match(log, /Test signal/);
+  assert.match(log, /Wake probe recognized: \(no speech recognized\)/);
+});
+
+test("wake test injects TTS speech and completes the full pipeline", { timeout: 45000 }, async (t) => {
+  const { page, calls } = await setup(t, async () => ({ text: "Rocky. What time is it?" }), {
+    silent: true,
+    config: { ttsConfigured: true, ttsModel: "kokoro", ttsVoice: "bm_george" },
+    answer: "It is 14:05.",
+    speak: async () => ({ status: 200 }),
+  });
+  await page.waitForFunction(() => !document.getElementById("wakeTestButton").disabled);
+  await page.click("#wakeTestButton");
+  await page.waitForFunction(() => window.savedUtterances.length >= 1, null, { timeout: 30000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  assert.equal(calls.audio.length, 2);
+  const log = await page.textContent("#log");
+  assert.match(log, /Wake test/);
+  assert.match(log, /Command recognized: "Rocky\. What time is it\?"/);
+});
+
+test("MCP web-search toggle is saved, restored and sent with brain requests", { timeout: 30000 }, async (t) => {
+  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  assert.match(await page.textContent("#websearchStatus"), /MCP web search off/);
+  await page.click("#stopButton");
+  await page.click("#websearchSwitch");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.websearch")), "true");
+  assert.match(await page.textContent("#websearchStatus"), /Saved/);
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.getAttribute("#websearchSwitch", "aria-checked"), "true");
+  await page.click("#testButton");
+  // page.fill is unstable in minimal containers (see the wake-word tests);
+  // set the value directly.
+  await page.evaluate((value) => {
+    const input = document.getElementById("manualPrompt");
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, "What time is it?");
+  await page.click("#sendManualButton");
+  await page.waitForFunction(() => window.savedUtterances.length >= 1, null, { timeout: 15000 });
+  // The manual-prompt flow stops itself, so the Stop button is disabled.
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
+    null, { timeout: 15000 });
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  assert.equal(calls.websearch, true);
 });
 
 test("microphone denial leaves an actionable error and enabled Arm button", async (t) => {

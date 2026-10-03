@@ -1,15 +1,17 @@
 import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase } from "./audio.js";
 import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
-  pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError } from "./voice.js";
+  pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError, textForSpeech } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
 
 const el = Object.fromEntries([
   "core", "waveform", "levelReadout", "stageTitle", "stageDetail", "armButton", "stopButton", "testButton",
+  "signalButton", "wakeTestButton",
   "clearLogButton", "micLevel", "silenceLevel", "promptText", "answerText",
   "log", "steps", "promptDialog", "manualPrompt",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
   "languageSwitch", "languageStatus",
+  "websearchSwitch", "websearchStatus",
 ].map((id) => [id, document.getElementById(id)]));
 const steps = ["wake", "record", "vad", "whisper", "brain", "tts"];
 const sessionId = crypto.randomUUID();
@@ -17,10 +19,12 @@ const wakeWordStorageKey = "jarvis.wakePhrase";
 const voiceStorageKey = "jarvis.voice";
 const voiceSpeedStorageKey = "jarvis.voiceSpeed";
 const languageStorageKey = "jarvis.language";
+const websearchStorageKey = "jarvis.websearch";
 let config;
 let voiceId = "browser";
 let voiceSpeed = voiceSpeedRange.default;
 let language = "en";
+let websearch = false;
 let current = null;
 let sequence = 0;
 
@@ -83,6 +87,31 @@ el.languageSwitch.addEventListener("click", () => {
   setLanguage(language === "de" ? "en" : "de", true);
 });
 
+// MCP web-search toggle: per browser, sent with every /api/chat request. When
+// on, the backend runs the MCP web-search server for the prompt and hands the
+// results to the brain as context.
+function setWebsearch(value, persist) {
+  websearch = Boolean(value);
+  el.websearchSwitch.setAttribute("aria-checked", String(websearch));
+  el.websearchSwitch.setAttribute("aria-label", `MCP web search: ${websearch ? "on" : "off"}`);
+  if (persist) {
+    try {
+      localStorage.setItem(websearchStorageKey, String(websearch));
+      el.websearchStatus.textContent = `Saved: MCP web search ${websearch ? "on" : "off"}.`;
+    } catch (error) {
+      el.websearchStatus.textContent = `MCP web search ${websearch ? "on" : "off"} for this tab only; storage unavailable.`;
+      log("settings", "Could not save MCP web search", { message: error.message });
+    }
+  } else {
+    el.websearchStatus.textContent = `Active: MCP web search ${websearch ? "on" : "off"}.`;
+  }
+  log("settings", `MCP web search: ${websearch ? "on" : "off"}`);
+}
+el.websearchSwitch.addEventListener("click", () => {
+  if (el.websearchSwitch.disabled) return;
+  setWebsearch(!websearch, true);
+});
+
 function log(scope, message, data) {
   const line = `[${new Date().toLocaleTimeString()}] ${scope}: ${message}`;
   el.log.textContent = `${el.log.textContent}${line}${data ? ` ${JSON.stringify(data)}` : ""}\n`.slice(-24000);
@@ -116,6 +145,13 @@ function check(session) {
   if (session !== current) throw abortError();
 }
 
+// Test-signal injection only exists while a microphone session is running.
+function syncTestButtons() {
+  const armed = Boolean(current && current.mic);
+  el.signalButton.disabled = !armed;
+  el.wakeTestButton.disabled = !armed;
+}
+
 function stop(message = "Jarvis is disarmed.") {
   const old = current;
   current = null;
@@ -124,6 +160,7 @@ function stop(message = "Jarvis is disarmed.") {
   el.armButton.disabled = !config;
   el.testButton.disabled = !config;
   el.stopButton.disabled = true;
+  syncTestButtons();
   for (const button of previewButtons) button.disabled = !config;
   el.micLevel.value = 0;
   el.silenceLevel.value = 0;
@@ -294,7 +331,7 @@ async function answer(session, prompt) {
   stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
   const result = await request(session, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, sessionId, language }),
+    body: JSON.stringify({ prompt, sessionId, language, websearch }),
   });
   if (!result.answer) throw new Error("Brain returned no answer");
   log("brain", `Request ${result.requestId} completed`);
@@ -308,30 +345,34 @@ async function answer(session, prompt) {
 
 async function speak(session, text) {
   const profile = voiceProfiles[voiceId];
+  // The printed answer stays verbatim; only the speaker gets plain language
+  // without special signs.
+  const spoken = textForSpeech(text);
   if (language === "de") {
     // The self-hosted engine (Kokoro) has no German voices, so German is
     // spoken by the browser voice in the selected profile's cadence.
     log("tts", `German selected: the self-hosted TTS engine is English-only; ${profile.label} falls back to the browser voice.`);
-    await speakWithSynthesis(session, splitForSpeech(text, profile.chunkChars), profile);
+    await speakWithSynthesis(session, splitForSpeech(spoken, profile.chunkChars), profile);
     return;
   }
   if (profile.neural && config.ttsConfigured) {
     session.voice ??= new NeuralVoice(session.signal, profile);
     try {
-      await session.voice.speak(text, {
+      await session.voice.speak(spoken, {
         speed: scaledRate(profile.speed, voiceSpeed),
         onChunk: (chunk, index, total) => log("tts", `${profile.label} clause ${index + 1}/${total}`, { chars: chunk.length }),
       });
       return;
     } catch (error) {
       if (!(error instanceof VoiceError)) throw error;
+      // error.remaining is already split from the sanitized spoken text.
       log("tts", `Self-hosted TTS failed; finishing the answer with the browser voice: ${error.message}`);
       await speakWithSynthesis(session, error.remaining, profile);
       return;
     }
   }
   if (profile.neural) log("tts", `No TTS backend configured; using the browser voice at ${profile.label} cadence.`);
-  await speakWithSynthesis(session, splitForSpeech(text, profile.chunkChars), profile);
+  await speakWithSynthesis(session, splitForSpeech(spoken, profile.chunkChars), profile);
 }
 
 async function speakWithSynthesis(session, chunks, baseProfile) {
@@ -398,6 +439,7 @@ el.armButton.addEventListener("click", async () => {
     speechSynthesis.speak(unlock);
     await session.mic.start();
     check(session);
+    syncTestButtons();
     await listen(session);
   } catch (error) {
     fatal(session, error);
@@ -405,6 +447,69 @@ el.armButton.addEventListener("click", async () => {
 });
 el.stopButton.addEventListener("click", () => stop());
 el.testButton.addEventListener("click", () => el.promptDialog.showModal());
+
+// Test signal: one peep into the live capture path. The level readout and
+// waveform react, and the trailing-edge probe fires on the tone, so the log
+// shows the whole capture-to-Whisper round trip without anyone speaking.
+el.signalButton.addEventListener("click", () => {
+  const session = current;
+  if (!session?.mic) return;
+  log("test", "Test signal: peep into the capture path. Watch LEVEL and the waveform, then the wake probe it triggers.");
+  session.mic.testSignal().catch((error) => {
+    if (session === current && !session.signal.aborted) log("test", `Test signal failed: ${error.message}`);
+  });
+});
+
+// Wake test: the TTS backend speaks the wake word plus a command and that
+// audio is injected into the capture path, so the full pipeline runs
+// hands-free and the log narrates every stage from wake to answer.
+el.wakeTestButton.addEventListener("click", () => {
+  const session = current;
+  if (!session?.mic) return;
+  if (!config.ttsConfigured) {
+    log("test", "Wake test needs a configured TTS backend, which this server does not have.");
+    return;
+  }
+  if (language !== "en") {
+    log("test", "Wake test uses the English-only TTS engine; switch the language back to English first.");
+    return;
+  }
+  el.wakeTestButton.disabled = true;
+  const text = `${config.wakePhrase}. What time is it?`;
+  log("test", `Wake test: injecting "${text}" into the capture path.`);
+  fetch("/api/speak", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text, speed: 1, language: "en" }),
+    signal: AbortSignal.any([session.signal, AbortSignal.timeout(20000)]),
+    cache: "no-store",
+  }).then(async (response) => {
+    const audio = await response.arrayBuffer();
+    if (!response.ok) {
+      throw new Error(`TTS HTTP ${response.status}: ${new TextDecoder().decode(audio).slice(0, 120)}`);
+    }
+    if (!audio.byteLength) throw new Error("TTS returned empty audio");
+    const context = session.mic.context;
+    const decoded = await context.decodeAudioData(audio);
+    const source = context.createBufferSource();
+    source.buffer = decoded;
+    const gain = context.createGain();
+    source.connect(gain);
+    session.mic.inject(gain);
+    gain.connect(context.destination);
+    source.onended = () => {
+      source.disconnect();
+      gain.disconnect();
+      if (session === current) syncTestButtons();
+    };
+    source.start();
+  }).catch((error) => {
+    if (session === current && !session.signal.aborted) {
+      log("test", `Wake test failed: ${error.message}`);
+      syncTestButtons();
+    }
+  });
+});
 el.promptDialog.addEventListener("close", async () => {
   const prompt = el.manualPrompt.value.trim();
   if (el.promptDialog.returnValue !== "send" || !prompt || current) return;
@@ -508,6 +613,7 @@ window.addEventListener("pagehide", () => stop());
 el.armButton.disabled = el.testButton.disabled = true;
 for (const button of previewButtons) button.disabled = true;
 el.languageSwitch.disabled = true;
+el.websearchSwitch.disabled = true;
 el.voiceSelect.replaceChildren(...Object.values(voiceProfiles).map((profile) => {
   const option = document.createElement("option");
   option.value = profile.id;
@@ -560,6 +666,14 @@ fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) })
     // The saved choice wins; otherwise English is the default.
     setLanguage(savedLanguage || "en", false);
     el.languageSwitch.disabled = false;
+    let savedWebsearch = null;
+    try {
+      savedWebsearch = localStorage.getItem(websearchStorageKey);
+    } catch (error) {
+      log("settings", "Could not load MCP web search setting");
+    }
+    setWebsearch(savedWebsearch === "true", false);
+    el.websearchSwitch.disabled = false;
     el.silenceLevel.max = config.silenceMs;
     log("stt", `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`);
     el.armButton.disabled = el.testButton.disabled = false;

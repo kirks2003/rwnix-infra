@@ -172,6 +172,21 @@ export function pickGermanSynthesisVoice(voices) {
   return scored[0].voice;
 }
 
+// The answer panel keeps the brain's text verbatim; the speaker gets plain
+// spoken language only. Strip markdown, links, code markers and special
+// signs before anything is sent to a TTS engine or speechSynthesis.
+export function textForSpeech(text) {
+  let spoken = String(text || "");
+  spoken = spoken.replace(/```[\s\S]*?```/g, " "); // fenced code blocks
+  spoken = spoken.replace(/`([^`]+)`/g, "$1"); // inline code
+  spoken = spoken.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1"); // links keep their label
+  spoken = spoken.replace(/https?:\/\/\S+|www\.[^\s]*/g, " "); // bare URLs
+  spoken = spoken.replace(/^\s*(?:[-*+•]|\d+[.)])\s+/gm, ""); // list and quote markers
+  spoken = spoken.replace(/[*_~#|>{}[\]]/g, ""); // leftover markup (no space: "**14:05**." keeps its period)
+  spoken = spoken.replace(/[^\p{L}\p{N}\p{M} .,!?;:'"()\-–—…&%]/gu, " "); // keep plain language
+  return spoken.replace(/\s+/g, " ").trim();
+}
+
 // Thrown when the neural backend fails part-way so the caller can finish the
 // answer with speechSynthesis instead of dropping the rest of it.
 export class VoiceError extends Error {
