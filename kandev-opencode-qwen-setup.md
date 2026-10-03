@@ -141,20 +141,33 @@ repo uses a PAT for git operations).
 
 ## Kandev agent profiles (`/data/data/kandev.db`)
 
-The `agent_profiles` table holds two profiles, both linked to the
-`opencode-acp` agent (`6131b727-40c9-4c02-9bf2-4d5d906918ce`):
+Seven profiles are now configured, referencing three ACP backends:
 
-| Name | Model | Agent display | Mode | Enabled |
+| Name | Model | Agent | Mode | Enabled |
 |---|---|---|---|---|
-| `a1-deepseek-v4.0-flash` | `a1-dsv4f/a1-dsv4f` | OpenCode | build | yes |
-| `a1-qwen38-27b` | `qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf` | OpenCode | build | yes |
+| `a1-deepseek-v4.0-flash` | `a1-dsv4f/a1-dsv4f` | opencode-acp | build | yes |
+| `a1-qwen38-27b` | `qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf` | opencode-acp | build | yes |
+| `rw_ovhcloud-qwen3.6-27b` | `ovh/Qwen3.6-27B` | opencode-acp | build | yes |
+| `rw_openrouter-qwen3.8-27b` | `openrouter/qwen/qwen3.8-27b` | opencode-acp | build | yes |
+| `rw_openrouter-DeepSeek-V4.1-Flash` | `openrouter/deepseek/deepseek-v4.1-flash` | opencode-acp | build | yes |
+| `rw-claude-Opus5.5` | `opus` | claude-acp | bypassPermissions | yes |
+| `a1-copilot-GPT-5.5` | `gpt-5.5` | copilot-acp | autopilot | yes |
 
-Profile IDs:
-- `a1-deepseek-v4.0-flash`: `25dff9b2-82a5-4a8b-a867-4a58df6ebc16`
-- `a1-qwen38-27b`: `fd40b2af-366a-42e6-92f8-77669f4eb2c7`
+The three ACP agent backends:
 
-Both use `auto_approve=1`, `allow_indexing=0`. The `a1-deepseek-v4.0-flash`
-profile was set up previously (see `kandev-opencode-dsv4f-setup.md`).
+| Agent ID | Name |
+|---|---|
+| `6131b727-40c9-4c02-9bf2-4d5d906918ce` | `opencode-acp` |
+| `f9771637-2d1e-4e3b-84ca-aad8290bc14b` | `claude-acp` |
+| `d01a2bc4-6fc7-424f-847d-8b4f66c7bfb6` | `copilot-acp` |
+
+The managed runtime settings needed to start the ACP backends already
+existed in the DB (from the base image): `managed_runtime.default.*` and
+`managed_runtime.active.*` entries for `claude-acp`, `copilot-acp`, and
+`opencode-acp`. Only the agent rows and profile rows were missing and
+have been added.
+
+All profiles use `auto_approve=1`, `allow_indexing=0`.
 
 ## Verification
 
@@ -198,6 +211,11 @@ ovh endpoint serves `Qwen3.6-27B` via OVH AI Endpoints.
    plus the `qwen3.8-27b` opencode agent
 10. **Verified** full config parity — byte-identical to NBG after normalizing
     API keys; tested all three models via `opencode run`
+11. **Cloned remaining agent profiles from NBG:** created `claude-acp` and
+    `copilot-acp` agent rows, then added 5 profiles:
+    `rw-claude-Opus5.5`, `a1-copilot-GPT-5.5`, `rw_ovhcloud-qwen3.6-27b`,
+    `rw_openrouter-qwen3.8-27b`, `rw_openrouter-DeepSeek-V4.1-Flash`.
+    Kandev104 now has all 7 profiles matching NBG.
 
 ## Caveats and findings
 
