@@ -9,7 +9,7 @@ const port = Number(process.env.PORT || 8094);
 
 const config = {
   publicBasePath: normalizeBasePath(process.env.PUBLIC_BASE_PATH || "/"),
-  wakePhrase: process.env.WAKE_PHRASE || "Rocky",
+  wakePhrase: process.env.WAKE_PHRASE || "Hey Rocky",
   silenceMs: Number(process.env.SILENCE_MS || 1500),
   whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions"),
   whisperModel: process.env.WHISPER_MODEL || "Systran/faster-whisper-large-v3",

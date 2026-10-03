@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  barGeometry, sampleSpectrum, smoothStep, syntheticValues,
+  barGeometry, sampleSpectrum, smoothStep, syntheticValues, timeDomainLevel,
   WAVE_COUNT, WAVE_CENTER, WAVE_BASE_RADIUS,
 } from "../public/visualizer.js";
 
@@ -57,6 +57,20 @@ test("smoothing attacks fast, releases slow, and converges", () => {
   let value = 0;
   for (let i = 0; i < 200; i += 1) value = smoothStep(value, 1, 0.5, 0.12);
   assert.ok(value > 0.999);
+});
+
+test("time-domain level is 0 for silence, tracks amplitude, and clamps at 1", () => {
+  assert.equal(timeDomainLevel(new Uint8Array(512).fill(128)), 0);
+  const tone = (amplitude) => {
+    const data = new Uint8Array(512);
+    for (let i = 0; i < 512; i += 1) data[i] = Math.round(128 + amplitude * Math.sin((i / 512) * 20 * Math.PI));
+    return data;
+  };
+  const loud = timeDomainLevel(tone(40)); // RMS 0.22 * gain 8 -> clamped to 1
+  const quiet = timeDomainLevel(tone(4)); // RMS 0.016 * gain 8 -> ~0.12
+  assert.equal(loud, 1);
+  assert.ok(quiet > 0 && quiet < 0.3);
+  assert.ok(loud > quiet);
 });
 
 test("synthetic motion stays in the unit interval and modes differ in energy", () => {
