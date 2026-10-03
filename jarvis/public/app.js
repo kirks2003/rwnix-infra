@@ -19,6 +19,7 @@ const state = {
   wakeRestartTimer: null,
   pendingWakeTimer: null,
   pendingWakeCommand: "",
+  speechWatchdog: null,
   busy: false,
 };
 
@@ -117,6 +118,7 @@ function stopJarvis() {
   state.busy = false;
   clearWakeRestart();
   clearPendingWake();
+  clearSpeechWatchdog();
   stopWakeRecognition();
   stopRecording();
   resetPipeline();
@@ -184,7 +186,9 @@ function startWakeRecognition() {
           markStep("whisper", "skipped");
           processPrompt(command, { source: "wake-inline" });
         } else {
-          startCommandRecording();
+          state.busy = true;
+          setPipelineStage("recording", "Wake detected", "Opening microphone for your command.", "record");
+          window.setTimeout(startCommandRecording, 300);
         }
       }, 650);
     }
@@ -394,18 +398,24 @@ async function speak(text) {
   setPipelineStage("speaking", "Speaking", "Browser text-to-speech is reading the answer.", "tts");
   const utterance = new SpeechSynthesisUtterance(text);
   const voices = await waitForVoices();
-  utterance.voice = voices.find((voice) => /british|uk|english/i.test(`${voice.name} ${voice.lang}`)) || voices[0] || null;
-  utterance.rate = 0.96;
-  utterance.pitch = 0.92;
-  utterance.onend = () => {
-    log("tts", "Speech finished");
+  let speechFinished = false;
+  const completeSpeech = (reason) => {
+    if (speechFinished) return;
+    speechFinished = true;
+    clearSpeechWatchdog();
+    log("tts", `Speech finished (${reason})`);
     markStep("tts", "done");
     state.busy = false;
     finishPipelineSoon();
-    if (state.armed) restartWakeRecognition(450);
+    if (state.armed) restartWakeRecognition(1200);
     else setPipelineStage("standby", "Standby", "Jarvis is disarmed.");
   };
+  utterance.voice = voices.find((voice) => /british|uk|english/i.test(`${voice.name} ${voice.lang}`)) || voices[0] || null;
+  utterance.rate = 0.96;
+  utterance.pitch = 0.92;
+  utterance.onend = () => completeSpeech("onend");
   utterance.onerror = (event) => {
+    clearSpeechWatchdog();
     state.busy = false;
     fail("Speech synthesis failed", event.error || event);
     if (state.armed) restartWakeRecognition(1000);
@@ -413,7 +423,17 @@ async function speak(text) {
   speechSynthesis.cancel();
   speechSynthesis.resume();
   speechSynthesis.speak(utterance);
+  state.speechWatchdog = window.setTimeout(() => completeSpeech("watchdog"), estimateSpeechMs(text));
   window.setTimeout(() => speechSynthesis.resume(), 250);
+}
+
+function estimateSpeechMs(text) {
+  return Math.min(30000, Math.max(3500, String(text || "").length * 85 + 1500));
+}
+
+function clearSpeechWatchdog() {
+  if (state.speechWatchdog) window.clearTimeout(state.speechWatchdog);
+  state.speechWatchdog = null;
 }
 
 function setStage(kind, title, detail) {
