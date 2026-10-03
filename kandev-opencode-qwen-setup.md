@@ -219,18 +219,53 @@ ovh endpoint serves `Qwen3.6-27B` via OVH AI Endpoints.
 
 ## Caveats and findings
 
-- The Kandev backend/ACP supervisor runs on this container (port 38429),
-  but the `KANDEV_RESTART_ADAPTER=supervisor` mode is not configured to
-  auto-start opencode ACP servers, so the agent profiles are defined in
-  the DB but not usable as Kandev run profiles without additional setup.
-- The GPU-1 endpoint DNS (`qwen38-27b-mtp.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`)
-  resolves to an IP behind the Exoscale security group that allows traffic
-  from NBG (`152.53.118.212`) and VIE-1 (`152.53.35.177`) — traffic from
-  `192.168.54.111` (vm104) reaches it through owrt002's NAT, which appears
-  to be permitted by the current security group configuration.
-- The `kandev.db` had no `github_workspace_connections` or `secrets` table
-  entries, so git push from the Kandev workspace credential lease does not
-  work for this container — use the NBG or VIE-1 sandbox for git operations
-  on the `rwnix-infra` repo.
-- No MCP servers are configured in the Kandev profiles (no `vikunja` or
-  other MCP entries in `agent_profile_mcp_configs`).
+### ACP backends not running
+
+The supervisor (`agentctl`) runs with `KANDEV_RESTART_ADAPTER=supervisor` and
+the `managed_runtime.*` settings exist in the DB for `opencode-acp`,
+`claude-acp`, and `copilot-acp`. However, the ACP backends do **not** start
+automatically on this container. The same configuration works on the NBG/VIE-1
+sandboxes (Kandev v0.94.0) but not on kandev104 (Kandev v0.96.0).
+
+Impact:
+- All 7 agent profiles are defined in the DB but cannot execute via the
+  Kandev run system — the ACP backends don't advertise available models.
+- The Kandev UI profile editor shows no models in the model picker dropdown
+  (no ovhcloud, no openrouter, no claude models visible).
+- Models work via CLI: `su -l -c "opencode run -m <provider>/<model>" kandev`
+
+Workaround: use opencode CLI directly:
+```
+ssh -J vm104 -p 2222 kandev@127.0.0.1
+kandev@kandev104:~ $ echo "hello" | opencode run -m ovh/Qwen3.6-27B
+kandev@kandev104:~ $ echo "hello" | opencode run -m qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf
+kandev@kandev104:~ $ echo "hello" | opencode run -m a1-dsv4f/a1-dsv4f
+```
+
+### No `openrouter` provider in opencode config
+
+The `rw_openrouter-*` profiles reference models like
+`openrouter/qwen/qwen3.8-27b`, but there is no `openrouter` provider defined
+in `opencode.jsonc` on either NBG or kandev104. On NBG these models are
+served through the Copilot ACP backend which has its own OpenRouter
+integration. On kandev104 the Copilot ACP is not running either.
+
+### GPU endpoint reachability
+
+The GPU-1 endpoint DNS (`qwen38-27b-mtp.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`)
+resolves to an IP behind the Exoscale security group that allows traffic
+from NBG (`152.53.118.212`) and VIE-1 (`152.53.35.177`) — traffic from
+`192.168.54.111` (vm104) reaches it through owrt002's NAT, which appears
+to be permitted by the current security group configuration.
+
+### Git operations
+
+The `kandev.db` had no `github_workspace_connections` or `secrets` table
+entries, so git push from the Kandev workspace credential lease does not
+work for this container — use the NBG or VIE-1 sandbox for git operations
+on the `rwnix-infra` repo.
+
+### MCP servers
+
+No MCP servers are configured in the Kandev profiles (no `vikunja` or
+other MCP entries in `agent_profile_mcp_configs`).
