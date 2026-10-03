@@ -47,7 +47,7 @@ Findings while exposing the service:
 ## Runtime behavior
 
 - Language: English end to end. `WHISPER_LANGUAGE`, the brain system prompt and the HAL 9000 TTS voice all default to English as of 2026-10-03. The deployed vm103 `.env` still carries `WHISPER_LANGUAGE=de` until it is updated on the host.
-- Voice services: deployed on `gpu-1` 2026-10-03 (see "gpu-1 voice services" below). The app defaults now point at `https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`, replacing the vm103 Whisper endpoint. **The vm104 `.env` and container still run the old code against vm103; update both together, because the new endpoint requires `WHISPER_API_KEY` and the old build cannot send it.**
+- Voice services: deployed on `gpu-1` 2026-10-03 (see "gpu-1 voice services" below). STT and TTS both run there now, reached at `https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`; the vm103 Whisper endpoint is no longer used. vm104 was updated in the same step, because the new endpoint requires `WHISPER_API_KEY` and the previous build could not send it.
 - Wake word: `Rocky` (changed from `hey jarvis` on 2026-10-03 at the user's request; matching is case-insensitive)
 - Personal wake override: the UI's **Your wake word** field persists locally per browser/origin. Apply aborts the active session; re-arm to use the new word. It does not change `.env` or other users' defaults.
 - Wake engine: vm103 Whisper probes from continuous browser AudioWorklet PCM capture
@@ -186,3 +186,15 @@ on-host nginx-proxy-manager as `voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`
 returned `"Rocky, what time is it?"` in 1.02 s. Direct service timings: 0.80 s warm for a
 1.2 s command, 1.19 s for 3.3 s of audio, 27 s cold (model load). Unauthenticated requests
 return `403`.
+
+### vm104 rollout (2026-10-03)
+
+vm104 is not a git checkout; the app files are copied in. The HAL voice build was
+rolled out by extracting `server.js`, `public/`, `Dockerfile`, `docker-compose.yml`
+and the docs over `/home/ubuntu/docker/jarvis`, then `docker compose up -d --build`.
+
+- Backups taken first: `.env.bak-gpu1-voice-20261003_205829` and `../jarvis-code.bak-<ts>.tgz`.
+- `.env` gained `WHISPER_API_KEY`, `TTS_ENDPOINTS`, `TTS_MODEL`, `TTS_VOICE`, `TTS_API_KEY`; `WHISPER_ENDPOINTS`, `WHISPER_MODEL` and `WHISPER_LANGUAGE` now point at gpu-1 in English, and `BRAIN_SYSTEM_PROMPT` answers in English. `BRAIN_API_KEY` was left untouched.
+- Both voice keys hold the `speaches` container's `API_KEY` from gpu-1.
+- Verified against the running container on `192.168.54.111:8094` (the compose binds that address, not `127.0.0.1`): `/api/health` ok with `ttsEndpoints: 1`, `/api/config` reporting `whisperLanguage: en` and `ttsConfigured: true`, `/api/speak` returning a 187 KB WAV in 0.71 s, `/api/transcribe` of that audio returning "Good evening, I am completely operational." in 1.04 s, and `/api/chat` answering in 1.17 s.
+- The public gateway URLs answer `401` from outside, which is the existing Basic Auth/Authelia layer, not an app error. Browser verification of the HAL voice still needs a real login.
