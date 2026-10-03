@@ -26,18 +26,18 @@ llama.cpp endpoint (via NPM reverse proxy on gpu-1):
         }
       }
     },
-    "a1-qwen38-27b": {
+    "qwen": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "a1-qwen38-27b",
+      "name": "qwen38-27b-selfhosted",
       "options": {
         "baseURL": "https://qwen38-27b-mtp.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1",
         "apiKey": "<llama.cpp API key>"
       },
       "models": {
         "Qwen3.8-27B-UD-Q8_K_XL.gguf": {
-          "id": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
-          "name": "a1-qwen38-27b",
-          "limit": { "context": 262144, "output": 131072 }
+          "name": "Qwen3.8-27B (self-hosted)",
+          "limit": { "context": 262144, "output": 131072 },
+          "modalities": { "input": ["text", "image"], "output": ["text"] }
         }
       }
     }
@@ -67,7 +67,7 @@ The qwen endpoint is reachable from within the kandev104 container
 (and from docker-1-pve-104 host) via the GPU-1 NPM reverse proxy:
 
 ```
-$ echo "hello" | opencode run -m a1-qwen38-27b/Qwen3.8-27B-UD-Q8_K_XL.gguf
+$ echo "hello" | opencode run -m qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf
 > build · Qwen3.8-27B-UD-Q8_K_XL.gguf
 Hello! How can I help you today?
 ```
@@ -75,20 +75,31 @@ Hello! How can I help you today?
 ## What was done (2026-10-03)
 
 1. Backed up the existing `opencode.jsonc` as `opencode.jsonc.bak`
-2. Added the `a1-qwen38-27b` provider definition pointing to the GPU-1
-   llama.cpp NPM endpoint (`qwen38-27b-mtp.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`)
+2. Added the `qwen` provider definition (same format as NBG sandbox) pointing
+   to the GPU-1 llama.cpp NPM endpoint
+   (`qwen38-27b-mtp.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`)
 3. Verified the JSON is valid and the file mode is `600`
-4. Tested with `opencode run -m a1-qwen38-27b/Qwen3.8-27B-UD-Q8_K_XL.gguf` —
+4. Tested with `opencode run -m qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf` —
    model responded correctly
+5. Added `a1-qwen38-27b` Kandev agent profile to the `agent_profiles` table
+   in `/data/data/kandev.db`:
+   ```sql
+   -- Linked to the opencode-acp agent (6131b727-...)
+   -- Model: qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf, mode: build
+   -- Inserted with id=fd40b2af-366a-42e6-92f8-77669f4eb2c7
+   ```
+6. Verified both profiles exist: `a1-deepseek-v4.0-flash` and `a1-qwen38-27b`
 
-## What remains
+## Current state
 
-The profile is available for CLI use. To use it as a Kandev agent profile,
-it would need to be added to the `agent_profiles` table in `kandev.db` if the
-Kandev supervisor backend is set up on this container (currently not configured
-on the fresh kandev104 — see `kandev-opencode-dsv4f-setup.md`).
+Two Kandev agent profiles are now configured:
+
+| Name | Model | Enabled |
+|---|---|---|
+| `a1-deepseek-v4.0-flash` | `a1-dsv4f/a1-dsv4f` | yes |
+| `a1-qwen38-27b` | `qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf` | yes |
 
 To use via CLI:
 ```
-opencode run -m a1-qwen38-27b/Qwen3.8-27B-UD-Q8_K_XL.gguf
+opencode run -m qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf
 ```
