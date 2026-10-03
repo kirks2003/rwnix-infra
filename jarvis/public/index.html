@@ -10,6 +10,7 @@
     <main class="shell">
       <section class="hero">
         <div id="core" class="core standby" aria-hidden="true">
+          <svg id="waveform" class="waveform" viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg"></svg>
           <div class="ring ring-a"></div>
           <div class="ring ring-b"></div>
           <div class="reactor"></div>
@@ -18,7 +19,17 @@
           <p class="eyebrow">Jarvis web assistant</p>
           <h1 id="stageTitle">Standby</h1>
           <p id="stageDetail">Click Arm Jarvis to unlock audio and start wake listening.</p>
-          <p id="whisperStatus" role="status">STT configuration loading.</p>
+        </div>
+      </section>
+
+      <section class="transcript">
+        <div>
+          <h2>Prompt</h2>
+          <p id="promptText">—</p>
+        </div>
+        <div>
+          <h2>Answer</h2>
+          <p id="answerText">—</p>
         </div>
       </section>
 
@@ -26,10 +37,35 @@
         <button id="armButton" type="button">Arm Jarvis</button>
         <button id="stopButton" type="button" disabled>Stop</button>
         <button id="testButton" type="button">Manual prompt</button>
+        <div class="language-control">
+          <button id="languageSwitch" class="lang-switch" type="button" role="switch" aria-checked="false"
+                  title="Switches Whisper, brain and spoken output between English and German, live.
+                         German answers are spoken with the browser voice (the self-hosted TTS engine is English-only)."
+                  disabled>
+            <span class="lang-option">English</span>
+            <span class="lang-option">Deutsch</span>
+            <span class="lang-knob" aria-hidden="true"></span>
+          </button>
+          <p id="languageStatus" role="status">Loading language settings.</p>
+        </div>
         <div class="meters">
           <label>Mic level <progress id="micLevel" max="100" value="0"></progress></label>
           <label>Silence <progress id="silenceLevel" max="1500" value="0"></progress></label>
         </div>
+      </section>
+
+      <section class="stage-preview" id="stagePreview">
+        <h2>Animation preview</h2>
+        <div class="stage-preview-buttons">
+          <button type="button" data-stage="standby">Standby</button>
+          <button type="button" data-stage="wake">Wake</button>
+          <button type="button" data-stage="recording">Recording</button>
+          <button type="button" data-stage="transcribing">Transcribing</button>
+          <button type="button" data-stage="thinking">Thinking</button>
+          <button type="button" data-stage="speaking">Speaking</button>
+          <button type="button" data-stage="error">Error</button>
+        </div>
+        <p class="stage-preview-help">Preview every core animation without arming. The buttons disable while a session is running.</p>
       </section>
 
       <form id="wakeWordForm" class="wake-settings">
@@ -60,36 +96,24 @@
         <p id="voiceStatus" role="status">Loading voice settings.</p>
       </form>
 
-      <section class="transcript">
-        <div>
-          <h2>Prompt</h2>
-          <p id="promptText">—</p>
-        </div>
-        <div>
-          <h2>Answer</h2>
-          <p id="answerText">—</p>
-        </div>
+      <section class="panel pipeline-panel">
+        <h2>Pipeline</h2>
+        <ol id="steps">
+          <li data-step="wake">Wake word</li>
+          <li data-step="record">Record command</li>
+          <li data-step="vad">Stop after 1.5 s silence</li>
+          <li data-step="whisper">Whisper transcription</li>
+          <li data-step="brain">a1-deepseekv4flash brain</li>
+          <li data-step="tts">Speech output</li>
+        </ol>
       </section>
 
-      <section class="panels">
-        <div class="panel">
-          <h2>Pipeline</h2>
-          <ol id="steps">
-            <li data-step="wake">Wake word</li>
-            <li data-step="record">Record command</li>
-            <li data-step="vad">Stop after 1.5 s silence</li>
-            <li data-step="whisper">Whisper transcription</li>
-            <li data-step="brain">a1-deepseekv4flash brain</li>
-            <li data-step="tts">Speech output</li>
-          </ol>
+      <section class="panel log-panel">
+        <div class="log-title">
+          <h2>Live log</h2>
+          <button id="clearLogButton" type="button">Clear</button>
         </div>
-        <div class="panel log-panel">
-          <div class="log-title">
-            <h2>Live log</h2>
-            <button id="clearLogButton" type="button">Clear</button>
-          </div>
-          <pre id="log"></pre>
-        </div>
+        <pre id="log"></pre>
       </section>
     </main>
 

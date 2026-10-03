@@ -98,6 +98,12 @@ export class Microphone {
     await this.context.audioWorklet.addModule("/capture-worklet.js");
     this.signal.throwIfAborted();
     this.source = this.context.createMediaStreamSource(this.stream);
+    // Parallel tap for the waveform ring: the analyser is a sink, so capture
+    // through the worklet is untouched.
+    this.analyser = this.context.createAnalyser();
+    this.analyser.fftSize = 512;
+    this.analyser.smoothingTimeConstant = 0.5;
+    this.source.connect(this.analyser);
     this.node = new AudioWorkletNode(this.context, "jarvis-capture");
     this.node.onprocessorerror = () => { this.failure = new Error("Audio capture processor failed"); };
     this.node.port.onmessage = ({ data }) => {

@@ -136,7 +136,7 @@ test("real Chromium capture completes three wake cycles with fresh valid audio",
   assert.deepEqual(calls.prompts, Array(3).fill("What time is it?"));
   assert.equal(calls.audio.length, 6);
   assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "ended")));
-  assert.match(await page.textContent("#whisperStatus"), /stt-6/);
+  assert.match(await page.textContent("#log"), /stt-6/);
 });
 
 test("Stop ignores late Whisper responses and allows a clean re-arm", { timeout: 30000 }, async (t) => {
