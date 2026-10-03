@@ -205,26 +205,18 @@ function startWakeRecognition() {
       }
       markStep("wake", "done");
       const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
-      if (inlineCommand) state.pendingWakeCommand = inlineCommand;
+      if (inlineCommand) {
+        log("wake", `Ignored wake-recognition command tail so Whisper handles STT: ${inlineCommand}`);
+      }
       window.clearTimeout(state.pendingWakeTimer);
       state.pendingWakeTimer = window.setTimeout(() => {
         state.pendingWakeTimer = null;
         stopWakeRecognition();
-        if (state.pendingWakeCommand) {
-          const command = state.pendingWakeCommand;
-          state.pendingWakeCommand = "";
-          state.busy = true;
-          log("wake", `Using command spoken with wake phrase: ${command}`);
-          markStep("record", "skipped");
-          markStep("vad", "skipped");
-          markStep("whisper", "skipped");
-          processPrompt(command, { source: "wake-inline" });
-        } else {
-          state.busy = true;
-          log("record", "No command tail heard with wake word; opening command recorder.");
-          setPipelineStage("prompting", "Waiting for prompt", "Jarvis is awake. Speak your command after the beep.", "record");
-          window.setTimeout(startCommandRecording, 300);
-        }
+        state.pendingWakeCommand = "";
+        state.busy = true;
+        log("record", "Opening command recorder; prompt text will be transcribed by vm103 Whisper.");
+        setPipelineStage("prompting", "Waiting for prompt", "Jarvis is awake. Speak your command after the beep; vm103 Whisper will transcribe it.", "record");
+        window.setTimeout(startCommandRecording, 300);
       }, 650);
     }
   };
