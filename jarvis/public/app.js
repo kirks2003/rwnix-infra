@@ -1,15 +1,22 @@
 import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase } from "./audio.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
+  pickSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError } from "./voice.js";
 
 const el = Object.fromEntries([
   "core", "stageTitle", "stageDetail", "armButton", "stopButton", "testButton",
   "clearLogButton", "micLevel", "silenceLevel", "promptText", "answerText",
   "log", "steps", "promptDialog", "manualPrompt", "whisperStatus",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
+  "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
 ].map((id) => [id, document.getElementById(id)]));
 const steps = ["wake", "record", "vad", "whisper", "brain", "tts"];
 const sessionId = crypto.randomUUID();
 const wakeWordStorageKey = "jarvis.wakePhrase";
+const voiceStorageKey = "jarvis.voice";
+const voiceSpeedStorageKey = "jarvis.voiceSpeed";
 let config;
+let voiceId = "browser";
+let voiceSpeed = voiceSpeedRange.default;
 let current = null;
 let sequence = 0;
 
@@ -111,11 +118,22 @@ async function waitForCommandEnd(session, start, needsSpeech) {
   if (needsSpeech) session.mic.beep();
   const speechAfter = start + (needsSpeech ? buffer.sampleRate * 0.3 : 0);
   let heard = !needsSpeech;
+  let shown = 0;
   while (performance.now() - started < 15000) {
     await tick(session);
     if (buffer.lastVoice > speechAfter) heard = true;
     const silentMs = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000;
     el.silenceLevel.value = heard ? Math.min(config.silenceMs, silentMs) : 0;
+    // This stage can hold for up to 15 s on a noisy microphone that never goes
+    // quiet, so count down in place rather than looking frozen. Updated without
+    // stage() so the live log is not flooded.
+    const elapsed = performance.now() - started;
+    if (elapsed - shown >= 500) {
+      shown = elapsed;
+      el.stageDetail.textContent = heard
+        ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(config.silenceMs - silentMs))} ms more silence, or at the 15 s limit.`
+        : `Waiting for speech: ${(elapsed / 1000).toFixed(1)} s of 10 s. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
+    }
     if (heard) {
       mark("vad", "active");
       if (silentMs >= config.silenceMs) {
@@ -140,14 +158,24 @@ async function listen(session) {
     const buffer = session.mic.buffer;
     const floor = buffer.end;
     let probedThrough = floor;
+    let speechFrom = null;
     stage("wake", "Wake listening", `Say "${config.wakePhrase}". Voice probes go to vm103 Whisper.`, "wake");
     try {
       for (;;) {
         await tick(session);
-        if (buffer.end - probedThrough < buffer.sampleRate * 2 || buffer.lastVoice <= probedThrough) continue;
+        if (buffer.lastVoice <= probedThrough) continue;
+        // Probe on the trailing edge of speech, not on a fixed interval: a window
+        // that ends mid-word comes back from Whisper empty, so the phrase is only
+        // heard one probe cycle later. Hold until the talker stops; if speech runs
+        // on, probe anyway once this burst reaches the cap. The cap counts speech,
+        // not wall time, so leading silence cannot trip it mid-word.
+        speechFrom ??= buffer.lastVoice;
+        const settled = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000 >= 350;
+        if (!settled && buffer.end - speechFrom < buffer.sampleRate * 3) continue;
         // Overlap probes so a phrase crossing a probe boundary is not lost.
         const start = Math.max(floor, probedThrough - buffer.sampleRate * 2, buffer.end - buffer.sampleRate * 25);
         probedThrough = buffer.end;
+        speechFrom = null;
         const text = await transcribe(session, start, "wake");
         failures = 0;
         if (wakeCommand(text, config.wakePhrase) === null) {
@@ -200,17 +228,51 @@ async function answer(session, prompt) {
   log("brain", `Request ${result.requestId} completed`);
   mark("brain", "done");
   el.answerText.textContent = result.answer;
-  stage("speaking", "Speaking", "Browser text-to-speech is reading the answer.", "tts");
+  stage("speaking", "Speaking", `${voiceProfiles[voiceId].label} is reading the answer at ${voiceSpeed.toFixed(2)}x.`, "tts");
   await speak(session, result.answer);
   check(session);
   mark("tts", "done");
 }
 
-function speak(session, text) {
+async function speak(session, text) {
+  const profile = voiceProfiles[voiceId];
+  if (profile.neural && config.ttsConfigured) {
+    session.voice ??= new NeuralVoice(session.signal, profile);
+    try {
+      await session.voice.speak(text, {
+        speed: scaledRate(profile.speed, voiceSpeed),
+        onChunk: (chunk, index, total) => log("tts", `${profile.label} clause ${index + 1}/${total}`, { chars: chunk.length }),
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof VoiceError)) throw error;
+      log("tts", `Self-hosted TTS failed; finishing the answer with the browser voice: ${error.message}`);
+      await speakWithSynthesis(session, error.remaining, profile);
+      return;
+    }
+  }
+  if (profile.neural) log("tts", `No TTS backend configured; using the browser voice at ${profile.label} cadence.`);
+  await speakWithSynthesis(session, splitForSpeech(text, profile.chunkChars), profile);
+}
+
+async function speakWithSynthesis(session, chunks, baseProfile) {
+  const profile = { ...baseProfile, rate: scaledRate(baseProfile.rate, voiceSpeed) };
+  const voice = profile.voiceHints ? pickSynthesisVoice(speechSynthesis.getVoices(), profile) : null;
+  if (voice) log("tts", `Browser voice selected: ${voice.name} (${voice.lang})`);
+  for (const [index, chunk] of chunks.entries()) {
+    await utter(session, chunk, profile, voice);
+    if (profile.pauseMs && index < chunks.length - 1) await delay(profile.pauseMs, session.signal);
+  }
+}
+
+function utter(session, text, profile, voice) {
   return new Promise((resolve, reject) => {
     check(session);
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = config.whisperLanguage || navigator.language;
+    utterance.lang = voice?.lang || config.whisperLanguage || navigator.language;
+    utterance.rate = profile.rate;
+    utterance.pitch = profile.pitch;
+    if (voice) utterance.voice = voice;
     let finished = false;
     const finish = (error) => {
       if (finished) return;
@@ -224,7 +286,7 @@ function speak(session, text) {
     };
     const cancelled = () => finish(session.signal.reason);
     const timer = setTimeout(() => finish(new Error("Speech output timed out; audio was cancelled.")),
-      Math.min(90000, Math.max(5000, text.length * 100 + 3000)));
+      Math.min(90000, Math.max(5000, text.length * 100 / profile.rate + 3000)));
     session.signal.addEventListener("abort", cancelled, { once: true });
     utterance.onend = () => finish();
     utterance.onerror = (event) => finish(new Error(`Speech output failed: ${event.error}`));
@@ -277,6 +339,18 @@ el.promptDialog.addEventListener("close", async () => {
   }
 });
 el.clearLogButton.addEventListener("click", () => { el.log.textContent = ""; });
+el.voiceSpeed.addEventListener("input", () => {
+  voiceSpeed = normalizeVoiceSpeed(el.voiceSpeed.value);
+  el.voiceSpeedValue.textContent = `${voiceSpeed.toFixed(2)}x`;
+});
+el.voiceSpeed.addEventListener("change", () => {
+  applyVoiceSpeed(el.voiceSpeed.value, true);
+});
+el.voiceForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!config) return;
+  applyVoice(el.voiceSelect.value, true);
+});
 el.wakeWordInput.addEventListener("input", () => el.wakeWordInput.setCustomValidity(""));
 el.wakeWordForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -302,11 +376,61 @@ el.wakeWordForm.addEventListener("submit", (event) => {
   }
   log("settings", `Active wake word: ${JSON.stringify(phrase)}. Previous session stopped.`);
 });
+function applyVoiceSpeed(value, persist) {
+  voiceSpeed = normalizeVoiceSpeed(value);
+  el.voiceSpeed.value = String(voiceSpeed);
+  el.voiceSpeedValue.textContent = `${voiceSpeed.toFixed(2)}x`;
+  const profile = voiceProfiles[voiceId];
+  const effective = profile.neural && config.ttsConfigured
+    ? `engine speed ${scaledRate(profile.speed, voiceSpeed)}`
+    : `utterance rate ${scaledRate(profile.rate, voiceSpeed)}`;
+  el.voiceStatus.textContent = `Voice: ${profile.label} at ${voiceSpeed.toFixed(2)}x (${effective}). Applies to the next answer.`;
+  if (!persist) return;
+  try {
+    localStorage.setItem(voiceSpeedStorageKey, String(voiceSpeed));
+  } catch (error) {
+    el.voiceStatus.textContent = `Speed ${voiceSpeed.toFixed(2)}x for this tab only; browser storage is unavailable.`;
+    log("settings", "Could not save speaking speed", { message: error.message });
+  }
+  log("settings", `Speaking speed ${voiceSpeed.toFixed(2)}x`);
+}
+
+function applyVoice(value, persist) {
+  let id;
+  try {
+    id = normalizeVoiceId(value);
+  } catch (error) {
+    el.voiceStatus.textContent = `Voice unchanged. ${error.message}`;
+    log("settings", "Could not apply voice", { message: error.message });
+    return;
+  }
+  voiceId = id;
+  el.voiceSelect.value = id;
+  const profile = voiceProfiles[id];
+  const detail = !profile.neural ? "Plain browser speech synthesis."
+    : config.ttsConfigured ? `Self-hosted TTS: ${config.ttsModel} / ${config.ttsVoice}, shaped in the browser.`
+      : "No TTS backend configured, so the browser voice is used at HAL cadence only.";
+  el.voiceStatus.textContent = `Voice: ${profile.label}. ${detail} Applies to the next answer.`;
+  if (!persist) return;
+  try {
+    localStorage.setItem(voiceStorageKey, id);
+  } catch (error) {
+    el.voiceStatus.textContent = `Voice: ${profile.label} for this tab only; browser storage is unavailable.`;
+    log("settings", "Could not save voice", { message: error.message });
+  }
+}
+
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && current) stop("Tab hidden; microphone and pending requests stopped. Re-arm when ready.");
 });
 window.addEventListener("pagehide", () => stop());
 el.armButton.disabled = el.testButton.disabled = true;
+el.voiceSelect.replaceChildren(...Object.values(voiceProfiles).map((profile) => {
+  const option = document.createElement("option");
+  option.value = profile.id;
+  option.textContent = profile.label;
+  return option;
+}));
 stage("standby", "Loading", "Loading runtime configuration.");
 fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) })
   .then(async (response) => {
@@ -329,6 +453,21 @@ fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) })
     }
     el.wakeWordInput.value = config.wakePhrase;
     el.wakeWordInput.disabled = el.saveWakeWordButton.disabled = false;
+    let savedVoice = null;
+    try {
+      savedVoice = localStorage.getItem(voiceStorageKey);
+    } catch (error) {
+      log("settings", "Could not load voice", { message: error.message });
+    }
+    applyVoice(savedVoice ?? voiceId, false);
+    let savedSpeed = null;
+    try {
+      savedSpeed = localStorage.getItem(voiceSpeedStorageKey);
+    } catch (error) {
+      log("settings", "Could not load speaking speed", { message: error.message });
+    }
+    applyVoiceSpeed(savedSpeed ?? voiceSpeed, false);
+    el.voiceSelect.disabled = el.saveVoiceButton.disabled = el.voiceSpeed.disabled = false;
     el.silenceLevel.max = config.silenceMs;
     el.whisperStatus.textContent = `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`;
     el.armButton.disabled = el.testButton.disabled = false;

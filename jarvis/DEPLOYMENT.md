@@ -46,14 +46,17 @@ Findings while exposing the service:
 
 ## Runtime behavior
 
+- Language: English end to end. `WHISPER_LANGUAGE`, the brain system prompt and the HAL 9000 TTS voice all default to English as of 2026-10-03. The deployed vm103 `.env` still carries `WHISPER_LANGUAGE=de` until it is updated on the host.
+- Voice services: deployed on `gpu-1` 2026-10-03 (see "gpu-1 voice services" below). STT and TTS both run there now, reached at `https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`; the vm103 Whisper endpoint is no longer used. vm104 was updated in the same step, because the new endpoint requires `WHISPER_API_KEY` and the previous build could not send it.
 - Wake word: `Rocky` (changed from `hey jarvis` on 2026-10-03 at the user's request; matching is case-insensitive)
 - Personal wake override: the UI's **Your wake word** field persists locally per browser/origin. Apply aborts the active session; re-arm to use the new word. It does not change `.env` or other users' defaults.
-- Wake engine: vm103 Whisper probes from continuous browser AudioWorklet PCM capture
+- Wake engine: self-hosted Whisper probes from continuous browser AudioWorklet PCM capture, triggered on the trailing edge of speech (~350 ms after the talker stops, 3 s speech cap). Measured against the gpu-1 service with four isolated "Rocky" utterances: the old fixed-interval trigger cut two of eight probe windows mid-word and returned empty for them; the trailing-edge trigger recognized all six of its probes and detected the phrase about 0.9 s sooner.
 - Command recording: complete mono WAV snapshots; capture continues during Whisper latency
 - Auto-stop: `1500 ms` continuous silence
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
-- Output: browser `speechSynthesis` plus prompt/result text in the UI
+- Output: the selected answer voice plus prompt/result text in the UI
+- Answer voice: the UI's **Answer voice** select and **Speaking speed** slider (0.60x-1.60x, a multiplier on the voice's own pace) persist locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** proxies clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shapes them in Web Audio. `TTS_ENDPOINTS` is unset in this deployment, so HAL 9000 currently falls back to `speechSynthesis` with HAL cadence only.
 - Observability: browser live log and backend JSON logs via `docker logs jarvis`
 - Recognized speech: the browser live log explicitly prints every wake/command transcript (or no-speech result), followed by endpoint/request metadata. Full transcripts are not newly persisted in Docker logs.
 
@@ -65,7 +68,7 @@ The frontend exposes progress at each small step:
 4. Voice activity / silence tracking
 5. Whisper upload and transcription
 6. Brain request
-7. Browser speech output
+7. Speech output in the selected voice
 8. Error states and backend request IDs
 
 The backend intentionally proxies Whisper and brain requests so browser clients never receive service keys and do not need direct CORS access to internal endpoints.
@@ -152,3 +155,108 @@ Observed successful checks:
 - `/api/health` returned `brainConfigured: true`
 - `/api/chat` with `Say only: Jarvis online` returned `Jarvis online`
 - Both public routes returned the expected Basic Auth challenge before credentials
+
+## gpu-1 voice services
+
+Deployed 2026-10-03 on `gpu-1` (`194.182.188.115`): one `speaches` container serving both
+Whisper STT and Kokoro TTS over the OpenAI audio API.
+
+- Compose: `/home/ubuntu/docker/speaches/docker-compose.yaml`, image `ghcr.io/speaches-ai/speaches:latest-cuda`, published on `8003:8000`, model cache bind-mounted at `./hf-cache` (2.9 GB).
+- STT: `Systran/faster-whisper-large-v3` on the GPU (`float16`), about 4.4 GB VRAM, leaving the llama.cpp allocation untouched. `WHISPER__TTL=-1` keeps the model resident: the default 300 s TTL costs a ~27 s reload on the first wake probe after idle.
+- TTS: `speaches-ai/Kokoro-82M-v1.0-ONNX`, voice `bm_george`, on CPU.
+- Auth: the container's `API_KEY` (in the compose file, as with llama.cpp's `--api-key`) guards every route including `/health`, so the compose healthcheck authenticates too. Unauthenticated requests get `403`. Jarvis sends it as `WHISPER_API_KEY` and `TTS_API_KEY`.
+- Kokoro-FastAPI (`~/docker/kokoro-tts`) was deployed first, measured, then retired once speaches proved it covers both tasks; the compose file is left in place but the stack is down.
+
+### Exposure
+
+`gpu-1` ufw allows only 22/80/443 publicly, so the service is published through the
+on-host nginx-proxy-manager as `voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at`
+(wildcard DNS for the zone already resolves to the host).
+
+- This proxy host is **not** in NPM's database. It is an additive custom include at `/data/nginx/custom/http.conf` (`nginx.conf` includes `/data/nginx/custom/http[.]conf`), so NPM's rendered configs and database are untouched. NPM runs with `network_mode: host`, so the block proxies to `127.0.0.1:8003`.
+- Certificate: `certbot certonly --webroot --webroot-path=/data/letsencrypt-acme-challenge --cert-name npm-voice` run inside `npm-ui`, stored at `/etc/letsencrypt/live/npm-voice/`, expires 2027-01-01. NPM's existing renewal cron covers it because the renewal config is in the shared `/etc/letsencrypt`.
+- `client_max_body_size 25m` and 120 s proxy timeouts match Jarvis's own upload cap and request timeouts.
+- Rollback: delete `/data/nginx/custom/http.conf` and `docker exec npm-ui nginx -s reload`. A database backup was taken first as `database.sqlite.bak-voice-20261003_204446` even though the database was never modified.
+
+### Verified
+
+`nginx -t` passed before each reload, and the live llama.cpp endpoint kept returning
+`200` throughout. Over the public HTTPS path, with the Jarvis backend itself as the client:
+`/api/speak` returned a 104 KB WAV in 0.54 s, and `/api/transcribe` of that same audio
+returned `"Rocky, what time is it?"` in 1.02 s. Direct service timings: 0.80 s warm for a
+1.2 s command, 1.19 s for 3.3 s of audio, 27 s cold (model load). Unauthenticated requests
+return `403`.
+
+### vm104 rollout (2026-10-03)
+
+vm104 is not a git checkout; the app files are copied in. The HAL voice build was
+rolled out by extracting `server.js`, `public/`, `Dockerfile`, `docker-compose.yml`
+and the docs over `/home/ubuntu/docker/jarvis`, then `docker compose up -d --build`.
+
+- Backups taken first: `.env.bak-gpu1-voice-20261003_205829` and `../jarvis-code.bak-<ts>.tgz`.
+- `.env` gained `WHISPER_API_KEY`, `TTS_ENDPOINTS`, `TTS_MODEL`, `TTS_VOICE`, `TTS_API_KEY`; `WHISPER_ENDPOINTS`, `WHISPER_MODEL` and `WHISPER_LANGUAGE` now point at gpu-1 in English, and `BRAIN_SYSTEM_PROMPT` answers in English. `BRAIN_API_KEY` was left untouched.
+- Both voice keys hold the `speaches` container's `API_KEY` from gpu-1.
+- Verified against the running container on `192.168.54.111:8094` (the compose binds that address, not `127.0.0.1`): `/api/health` ok with `ttsEndpoints: 1`, `/api/config` reporting `whisperLanguage: en` and `ttsConfigured: true`, `/api/speak` returning a 187 KB WAV in 0.71 s, `/api/transcribe` of that audio returning "Good evening, I am completely operational." in 1.04 s, and `/api/chat` answering in 1.17 s.
+- The public gateway URLs answer `401` from outside, which is the existing Basic Auth/Authelia layer, not an app error. Browser verification of the HAL voice still needs a real login.
+
+## Voice pipeline findings (2026-10-03)
+
+Measured against the deployed gpu-1 service, not inferred.
+
+### Wake probes were cut mid-word
+
+The probe trigger fired as soon as 2 s of new audio existed and any voice had been heard,
+including while the talker was still speaking, so the window ended mid-syllable. Whisper
+returns an empty string for half a word, and the phrase was then only caught by the next
+probe about 2 s later: the user-visible symptom was having to repeat the wake word.
+
+A fixture of four isolated "Rocky" utterances (Kokoro-synthesized, 5 s of silence either
+side) played through real Chromium capture into the live service:
+
+| Trigger | Probes | Recognized | First detection |
+|---|---|---|---|
+| fixed 2 s interval | 8 | 6, two cut windows empty | 7.39 s (word at 5.0 s) |
+| trailing edge of speech | 6 | 6, none cut | 6.53 s |
+
+The trailing-edge trigger waits ~350 ms after voice stops, with a 3 s cap for speech that
+never pauses. An earlier attempt capped on elapsed audio instead of speech, which failed
+the same way, because 5 s of leading silence had already exceeded the cap by the time the
+word started. `tests/pipeline.browser.mjs` guards the fixed behaviour by asserting every
+probe window has a near-silent tail.
+
+Only 2 of the 4 utterances produced a full cycle in both runs: utterances 2 and 4 arrived
+while the pipeline was still in the command phase of the previous detection, which can run
+~15 s for a wake-only cycle. That is the single-pipeline design, not a cut, and is the
+obvious next thing to shorten.
+
+### Whisper behaviour on the new model
+
+- `large-v3` with `vad_filter=true` returns `""` for digital silence, faint noise and 50 Hz
+  hum. With `vad_filter=false` all three return `"Thank you."`. The filter stays on, and
+  `"Thank you."` / `"Okay."` / `"You"` are now treated as hallucinations: a silent command
+  window would otherwise send a phantom prompt to the brain.
+- The VAD is not over-aggressive: synthesized speech attenuated to 8% and 3% of full scale
+  still transcribed perfectly with the filter on.
+- Forcing English on German speech breaks wake matching outright.
+  *"Rocky, wie viel Uhr ist es?"* transcribes as *"Roki waivil ua ist iz."*. A per-browser
+  language setting, like the wake-word override, is the fix if both languages are wanted.
+- Latency: 0.80 s warm for a 1.2 s command, 1.19 s for 3.3 s of audio, ~27 s cold while the
+  model loads into VRAM. `WHISPER__TTL=-1` keeps it warm.
+
+### Reading the backend logs
+
+The backend deliberately logs `transcriptChars` rather than transcripts, so a session is
+diagnosed by shape. A run of `transcriptChars: 5` with no `/api/chat` requests means the
+wake phrase alone is being recognized (`"Rocky"` is 5 characters) and the command step is
+failing; `transcriptChars: 0` is an empty window; `transcriptChars: 10` was the
+`"Thank you."` hallucination. Exact transcripts are only in the browser's live log.
+
+### Incidental observations
+
+- Capture sample rate follows the client's `AudioContext`; one tested browser ran at
+  192 kHz, which makes uploaded windows four times the size expected at 48 kHz. Harmless,
+  but it skews any size-based reasoning about window length.
+- The deployed container binds `192.168.54.111:8094`, not `127.0.0.1`, so a localhost curl
+  on vm104 looks like a dead service when the app is healthy.
+- `npm ci` on vm104 and in CI-like containers skips devDependencies when `NODE_ENV` is
+  `production`; use `npm ci --include=dev` before running the browser suite.

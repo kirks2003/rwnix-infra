@@ -207,7 +207,29 @@ button:disabled {
   font: inherit;
 }
 
-#wakeWordHelp, #wakeWordStatus {
+#voiceSelect {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(66, 217, 255, 0.4);
+  border-radius: 12px;
+  color: var(--text);
+  background: #02050b;
+  font: inherit;
+}
+
+#voiceSpeed {
+  flex: 1 1 220px;
+  min-width: 0;
+  accent-color: var(--cyan);
+}
+
+#voiceSpeedValue {
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+#wakeWordHelp, #wakeWordStatus, #voiceHelp, #voiceStatus {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
