@@ -6,7 +6,7 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 
 - Shows every stage in the web UI: boot, wake listening, wake detected, recording, 1.5 s silence stop, Whisper upload, LLM prompt, TTS speaking, errors, and backend request details.
 - Uses a Chrome-compatible wake listener for the phrase `Hey Jarvis`.
-- Records the actual command with `MediaRecorder` and Web Audio VAD, then stops after `SILENCE_MS` of silence.
+- Starts a rolling `MediaRecorder` when Jarvis is armed. When the wake phrase is detected, the active recording switches into command mode, stops after `SILENCE_MS` of silence, and uploads to Whisper.
 - Sends audio to one or more self-hosted Whisper endpoints through the backend, so the browser never needs cross-origin access to Whisper.
 - Sends the recognized prompt to an OpenAI-compatible self-hosted brain through the backend, so API keys never reach the browser.
 - Speaks the answer with browser `speechSynthesis` and writes both prompt and answer on the page.
@@ -50,4 +50,4 @@ Open <http://127.0.0.1:8094>.
 docker compose up -d --build
 ```
 
-The compose file binds `192.168.54.111:8094` for vm104 and adds `host.docker.internal` so the Jarvis container can reach the existing vm104 Whisper container published on host port `8001`.
+The compose file binds `192.168.54.111:8094` for vm104. Live STT uses the vm103 Whisper endpoint configured in `WHISPER_ENDPOINTS`.

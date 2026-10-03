@@ -12,7 +12,10 @@ const state = {
   analyser: null,
   vadFrame: null,
   chunks: [],
+  chunkTimes: [],
   silenceStartedAt: 0,
+  recorderStartedAt: 0,
+  wakeDetectedAt: 0,
   sessionId: crypto.randomUUID(),
   pipelineRunId: 0,
   wakeRunId: 0,
@@ -22,7 +25,13 @@ const state = {
   speechWatchdog: null,
   beepContext: null,
   busy: false,
+  commandMode: false,
+  voiceStartedAfterWake: false,
+  discardRecording: false,
 };
+
+const rollingBufferMs = 12000;
+const commandMaxMs = 12000;
 
 const el = {
   core: document.getElementById("core"),
@@ -108,9 +117,10 @@ async function armJarvis() {
     state.armed = true;
     el.armButton.disabled = true;
     el.stopButton.disabled = false;
+    await startRollingRecorder();
     startWakeRecognition();
   } catch (error) {
-    fail("Audio unlock failed", error);
+    fail("Audio or microphone unlock failed", error);
   }
 }
 
@@ -121,7 +131,7 @@ function stopJarvis() {
   clearPendingWake();
   clearSpeechWatchdog();
   stopWakeRecognition();
-  stopRecording();
+  stopRecording({ discard: true });
   resetPipeline();
   setPipelineStage("standby", "Stopped", "Jarvis is disarmed.");
   el.armButton.disabled = false;
@@ -163,11 +173,18 @@ function playWakeBeep() {
   }
 }
 
-function startWakeRecognition() {
+async function startWakeRecognition() {
   if (!state.armed || state.busy) return;
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     fail("Wake listener unavailable", new Error("Chrome webkitSpeechRecognition is required for this first version."));
+    return;
+  }
+
+  try {
+    await startRollingRecorder();
+  } catch (error) {
+    fail("Could not start always-on command recorder", error);
     return;
   }
 
@@ -208,23 +225,21 @@ function startWakeRecognition() {
       markStep("wake", "done");
       const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
       if (inlineCommand) {
-        log("wake", `Ignored wake-recognition command tail so Whisper handles STT: ${inlineCommand}`);
+        log("wake", `Wake-recognition tail is only diagnostic; active recorder will send audio to vm103 Whisper: ${inlineCommand}`);
       }
       stopWakeRecognition();
-      log("record", "Opening command recorder; prompt text will be transcribed by vm103 Whisper.");
-      setPipelineStage("prompting", "Waiting for prompt", "Jarvis is awake. Speak your command after the beep; vm103 Whisper will transcribe it.", "record");
-      window.setTimeout(startCommandRecording, 300);
+      beginCommandCapture();
     }
   };
 
   recognition.onerror = (event) => {
     log("wake", `Wake recognition error: ${event.error}`, event);
-    if (wakeRunId === state.wakeRunId && state.armed && !state.recording && !state.busy) restartWakeRecognition(1200);
+    if (wakeRunId === state.wakeRunId && state.armed && !state.commandMode && !state.busy) restartWakeRecognition(1200);
   };
 
   recognition.onend = () => {
     log("wake", "Wake recognition ended");
-    if (wakeRunId === state.wakeRunId && state.armed && !state.recording && !state.busy) restartWakeRecognition(500);
+    if (wakeRunId === state.wakeRunId && state.armed && !state.commandMode && !state.busy) restartWakeRecognition(500);
   };
 
   state.wakeRecognition = recognition;
@@ -269,13 +284,17 @@ function clearPendingWake() {
   state.pendingWakeCommand = "";
 }
 
-async function startCommandRecording() {
+async function startRollingRecorder() {
+  if (state.recorder && state.recorder.state !== "inactive") return;
   try {
-    state.busy = true;
+    state.discardRecording = false;
+    state.commandMode = false;
+    state.voiceStartedAfterWake = false;
     state.recording = true;
     state.chunks = [];
-    setPipelineStage("recording", "Listening for prompt", `Speak now. Recording stops after ${state.config.silenceMs} ms of silence.`, "record");
-    log("record", "Command recorder is active; waiting for speech.");
+    state.chunkTimes = [];
+    state.recorderStartedAt = performance.now();
+    log("record", "Rolling microphone recorder started; wake commands will be uploaded to vm103 Whisper.");
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -294,17 +313,49 @@ async function startCommandRecording() {
     const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
     state.recorder = new MediaRecorder(stream, { mimeType });
     state.recorder.ondataavailable = (event) => {
-      if (event.data.size) state.chunks.push(event.data);
+      if (!event.data.size) return;
+      state.chunks.push(event.data);
+      state.chunkTimes.push(performance.now());
+      if (!state.commandMode) trimRollingBuffer();
     };
     state.recorder.onstop = onRecordingStopped;
     state.recorder.start(250);
-    log("record", `MediaRecorder started (${mimeType})`);
+    log("record", `MediaRecorder rolling (${mimeType})`);
     monitorVoiceActivity();
   } catch (error) {
     state.recording = false;
     state.busy = false;
-    fail("Could not start microphone recording", error);
-    if (state.armed) restartWakeRecognition(1000);
+    cleanupAudio();
+    throw error;
+  }
+}
+
+function beginCommandCapture() {
+  if (!state.recorder || state.recorder.state === "inactive") {
+    startRollingRecorder()
+      .then(beginCommandCapture)
+      .catch((error) => {
+        state.busy = false;
+        fail("Could not restart microphone recorder after wake", error);
+        if (state.armed) restartWakeRecognition(1000);
+      });
+    return;
+  }
+
+  trimRollingBuffer();
+  state.commandMode = true;
+  state.voiceStartedAfterWake = state.chunks.length > 0;
+  state.silenceStartedAt = 0;
+  state.wakeDetectedAt = performance.now();
+  log("record", "Command capture active; this recording will be sent to vm103 Whisper.");
+  setPipelineStage("recording", "Listening for prompt", `Speak now. Recording stops after ${state.config.silenceMs} ms of silence, then uploads to vm103 Whisper.`, "record");
+}
+
+function trimRollingBuffer() {
+  const cutoff = performance.now() - rollingBufferMs;
+  while (state.chunkTimes.length > 1 && state.chunkTimes[0] < cutoff) {
+    state.chunkTimes.shift();
+    state.chunks.shift();
   }
 }
 
@@ -319,12 +370,18 @@ function monitorVoiceActivity() {
     const level = Math.min(100, Math.round(average * 2.4));
     el.micLevel.value = level;
 
+    if (!state.commandMode) {
+      state.vadFrame = requestAnimationFrame(tick);
+      return;
+    }
+
     if (average > threshold) {
+      state.voiceStartedAfterWake = true;
       state.silenceStartedAt = 0;
       el.silenceLevel.value = 0;
       markStep("vad", "active");
       updateStepText("vad", "Voice detected; waiting for silence.");
-    } else {
+    } else if (state.voiceStartedAfterWake) {
       if (!state.silenceStartedAt) state.silenceStartedAt = performance.now();
       const silentFor = performance.now() - state.silenceStartedAt;
       el.silenceLevel.value = Math.min(state.config.silenceMs, silentFor);
@@ -336,6 +393,21 @@ function monitorVoiceActivity() {
         stopRecording();
         return;
       }
+    } else {
+      const waitingForVoice = performance.now() - state.wakeDetectedAt;
+      markStep("vad", "active");
+      updateStepText("vad", `Waiting for speech after wake (${Math.round(waitingForVoice)} ms).`);
+      if (waitingForVoice >= commandMaxMs) {
+        log("vad", "No speech detected after wake; stopping recorder");
+        stopRecording();
+        return;
+      }
+    }
+
+    if (performance.now() - state.wakeDetectedAt >= commandMaxMs) {
+      log("vad", "Command recording timeout reached; stopping recorder");
+      stopRecording();
+      return;
     }
 
     state.vadFrame = requestAnimationFrame(tick);
@@ -344,7 +416,8 @@ function monitorVoiceActivity() {
   state.vadFrame = requestAnimationFrame(tick);
 }
 
-function stopRecording() {
+function stopRecording({ discard = false } = {}) {
+  state.discardRecording = discard;
   if (state.vadFrame) cancelAnimationFrame(state.vadFrame);
   state.vadFrame = null;
   if (state.recorder && state.recorder.state !== "inactive") state.recorder.stop();
@@ -352,11 +425,16 @@ function stopRecording() {
 
 async function onRecordingStopped() {
   state.recording = false;
+  const shouldDiscard = state.discardRecording || !state.commandMode;
+  state.commandMode = false;
+  state.voiceStartedAfterWake = false;
   markStep("record", "done");
   cleanupAudio();
 
   const blob = new Blob(state.chunks, { type: state.chunks[0]?.type || "audio/webm" });
   state.chunks = [];
+  state.chunkTimes = [];
+  if (shouldDiscard) return;
   if (blob.size < 1200) {
     log("record", `Recording too small (${blob.size} bytes); returning to wake mode`);
     state.busy = false;

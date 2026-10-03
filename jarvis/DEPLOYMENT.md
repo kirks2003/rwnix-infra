@@ -48,7 +48,7 @@ Findings while exposing the service:
 
 - Wake phrase: `hey jarvis`
 - First-version wake engine: Chrome `webkitSpeechRecognition` in the foreground tab
-- Command recording: `MediaRecorder` with Web Audio level monitoring
+- Command recording: rolling `MediaRecorder` starts when Jarvis is armed; wake detection switches that active recording into command mode
 - Auto-stop: `1500 ms` continuous silence
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
@@ -59,7 +59,7 @@ The frontend exposes progress at each small step:
 
 1. Wake listening
 2. Wake phrase detected
-3. Microphone recording
+3. Active microphone recording
 4. Voice activity / silence tracking
 5. Whisper upload and transcription
 6. Brain request
@@ -76,7 +76,7 @@ When the user said `hey jarvis, what's the time`, the original browser flow dete
 
 Fixes applied:
 
-- If Chrome wake recognition hears words after `hey jarvis` in the same utterance, those words are logged and ignored. The command must be recorded after the wake beep so vm103 Whisper performs all prompt STT.
+- Jarvis now starts a rolling browser `MediaRecorder` as soon as it is armed. If Chrome wake recognition hears words after `hey jarvis` in the same utterance, those words are only diagnostic; the active audio recording is still uploaded to vm103 Whisper so prompt STT stays on the user's server.
 - Whisper requests now send `vad_filter=true` and `temperature=0`.
 - Known no-speech hallucinations such as `Untertitelung des ZDF` and Amara subtitle phrases are rejected and shown as no-speech errors instead of prompting the brain.
 - Brain requests now include the current server timestamp, use a larger token budget, and answer time/date questions from that timestamp.
