@@ -32,8 +32,8 @@ hop to `vm104` via `pve104` is required if direct mesh routing is unavailable.
 
 ### `/data/home/.config/opencode/opencode.jsonc`
 
-Two providers defined — DeepSeek V4 Flash (GPU-2 vLLM) and Qwen 3.8-27B
-(GPU-1 llama.cpp, via NPM reverse proxy):
+Three providers defined — DeepSeek V4 Flash (GPU-2 vLLM), Qwen 3.8-27B
+(GPU-1 llama.cpp, via NPM reverse proxy), and OVH AI Endpoints Qwen 3.6-27B:
 
 ```json
 {
@@ -68,9 +68,30 @@ Two providers defined — DeepSeek V4 Flash (GPU-2 vLLM) and Qwen 3.8-27B
           "modalities": { "input": ["text", "image"], "output": ["text"] }
         }
       }
+    },
+    "ovh": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "ovhcloud-ai",
+      "options": {
+        "baseURL": "https://qwen-3-6-27b.endpoints.kepler.ai.cloud.ovh.net/api/openai_compat/v1",
+        "apiKey": "<OVH AI Endpoints API key>"
+      },
+      "models": {
+        "Qwen3.6-27B": {
+          "name": "Qwen3.6-27B (OVH AI Endpoints)",
+          "limit": { "context": 128000, "output": 131072 }
+        }
+      }
     }
   },
   "model": "a1-dsv4f/a1-dsv4f",
+  "agent": {
+    "qwen3.8-27b": {
+      "description": "Qwen 3.8 27B self-hosted agent (llama.cpp via the qwen provider)",
+      "mode": "primary",
+      "model": "qwen/Qwen3.8-27B-UD-Q8_K_XL.gguf"
+    }
+  },
   "permission": {
     "*": "allow",
     "question": "deny"
@@ -78,8 +99,8 @@ Two providers defined — DeepSeek V4 Flash (GPU-2 vLLM) and Qwen 3.8-27B
 }
 ```
 
-Mode: `600` (kandev). The provider key names and model structure match the
-NBG sandbox format exactly.
+Mode: `600` (kandev). The config is byte-identical to the NBG sandbox
+(after accounting for runtime host differences).
 
 ### `/data/home/.bashrc` — PS1 (kandev user)
 
@@ -143,12 +164,16 @@ Hello! How can I help you today?
 $ echo "hello" | opencode run -m a1-dsv4f/a1-dsv4f
 > build · a1-dsv4f
 Hello! How can I help you today?
+
+$ echo "hello" | opencode run -m ovh/Qwen3.6-27B
+> build · Qwen3.6-27B
+Hello! How can I help you today?
 ```
 
-Both GPU endpoints are reachable from within the container (routed via
-pve104 → owrt002 → mesh hubs → Exoscale GPU security groups). The qwen
-endpoint serves the `Qwen3.8-27B-UD-Q8_K_XL.gguf` model via llama.cpp
-on GPU-1. The dsv4f endpoint serves `deepseek-v4-flash` via vLLM on GPU-2.
+All three endpoints are reachable from within the container. The qwen
+endpoint serves `Qwen3.8-27B-UD-Q8_K_XL.gguf` via llama.cpp on GPU-1,
+the dsv4f endpoint serves `deepseek-v4-flash` via vLLM on GPU-2, and the
+ovh endpoint serves `Qwen3.6-27B` via OVH AI Endpoints.
 
 ## What was done (2026-10-03)
 
@@ -166,6 +191,11 @@ on GPU-1. The dsv4f endpoint serves `deepseek-v4-flash` via vLLM on GPU-2.
    `kandev104` label, matching the NBG/VIE-1 sandbox PS1 convention
 7. **Tested** both models via `opencode run`
 8. **Verified** agent profiles in Kandev DB (2 profiles visible)
+9. **Added `ovh` provider** and `agent` section to `opencode.jsonc` to match
+   NBG sandbox exactly — three providers total (`a1-dsv4f`, `qwen`, `ovh`)
+   plus the `qwen3.8-27b` opencode agent
+10. **Verified** full config parity — byte-identical to NBG after normalizing
+    API keys; tested all three models via `opencode run`
 
 ## Caveats and findings
 
