@@ -1,0 +1,85 @@
+# mesh-test.sh host list — one host per line. Aliases match SSH config aliases.
+# Format: alias  user  ip  [sandbox]
+#   sandbox (optional 4th field): test this host only from that sandbox
+#   (nbg|vie-1) — for hosts reachable via a different IP per sandbox.
+# To add a new host, append a line here — no script edit needed.
+# Blank lines and # comments are ignored.
+# Include commissioned, connected WireGuard peers at their hub tunnel IP.
+# Tag each peer with its hub's sandbox; keep it listed during outages.
+# Owner exclusion: a1ars021 must not be tested, even if it later connects.
+# Rule and maintenance workflow: kandev-mesh-access.md, section 11.
+
+nbg-1    ubuntu  152.53.118.212
+vie-1    ubuntu  152.53.35.177
+wg_vie-1 ubuntu  10.1.1.17  nbg
+wg_nbg-1 ubuntu  10.2.1.17  vie-1
+owrt001  root    10.1.1.3  nbg
+owrt001  root    10.2.1.3  vie-1
+owrt002  root    10.1.1.2  nbg
+owrt002  root    10.2.1.2  vie-1
+owrt003  root    10.1.1.8  nbg
+owrt003  root    10.2.1.4  vie-1
+owrt011  root    10.1.1.5  nbg
+owrt011  root    10.2.1.5  vie-1
+owrt018  root    10.1.1.4  nbg
+owrt018  root    10.2.1.6  vie-1
+owrt031  root    10.1.1.7  nbg
+owrt031  root    10.2.1.7  vie-1
+owrt032  root    10.1.1.6  nbg
+owrt032  root    10.2.1.8  vie-1
+owrt033  root    10.1.1.9  nbg
+owrt033  root    10.2.1.9  vie-1
+pve103   root    192.168.15.7
+pve104   root    192.168.15.6
+vm103    ubuntu  192.168.53.111
+vm104    ubuntu  192.168.54.111
+gpu-1    ubuntu  194.182.188.115
+gpu-2    ubuntu  92.39.59.7
+
+# IONOS gateways
+ber-1  root  217.154.145.10
+ber-2  root  85.215.213.123
+
+# Exoscale gateway (no host firewall) — removed 2026-10-01, out of order
+# vie-2  ubuntu  138.124.211.32
+
+# OpenWrt gateway VMs on Hetzner Proxmox
+owrt-fsn-1  root  10.1.1.12  nbg
+owrt-fsn-1  root  10.2.1.12  vie-1
+owrt-hel-1  root  10.1.1.11  nbg
+owrt-hel-1  root  10.2.1.11  vie-1
+
+# Hetzner Proxmox
+fsn-1  root  144.76.14.155
+hel-1  root  65.109.122.228
+
+# OVH Proxmox
+gra-1   root  5.196.93.234
+lim-1   root  51.75.145.232
+eri-1   root  51.89.192.92
+waw-1   root  51.83.220.93
+
+# OVH OpenWrt gateway VMs (via wg-easy mesh)
+owrt-gra-1  root  10.1.1.13  nbg
+owrt-gra-1  root  10.2.1.13  vie-1
+owrt-eri-1  root  10.1.1.10  nbg
+owrt-eri-1  root  10.2.1.10  vie-1
+owrt-lim-1  root  10.1.1.14  nbg
+owrt-lim-1  root  10.2.1.14  vie-1
+owrt-waw-1  root  10.1.1.15  nbg
+owrt-waw-1  root  10.2.1.15  vie-1
+
+# Private Proxmox behind owrt031 (direct via mesh)
+pve1070  root  192.168.141.1
+
+# OpenWrt gateway VMs behind owrt002 (on pve103/pve104 LAN)
+owrt-pve103  root  192.168.15.53
+owrt-pve104  root  192.168.15.54
+
+# Proxmox hosts behind owrt011 (direct via mesh) + their OpenWrt gateway VMs
+# owrt-pve101/owrt-pve102 (OpenWrt VMs on pve101/pve102) at their LAN IPs (VM WANs 192.168.101.3/102.3; owrt011 routes
+# 192.168.51/52.0/24 to them via route_owrt051/route_owrt052)
+pve101   root  192.168.101.2
+pve102   root  192.168.102.2
+owrt-pve101  root  192.168.51.1
+owrt-pve102  root  192.168.52.1
