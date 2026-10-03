@@ -5,15 +5,15 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 ## What it does
 
 - Shows every stage in the web UI: boot, wake listening, wake detected, recording, 1.5 s silence stop, Whisper upload, LLM prompt, TTS speaking, errors, and backend request details.
-- Uses a Chrome-compatible wake listener for the phrase `Hey Jarvis`.
-- Starts a rolling `MediaRecorder` when Jarvis is armed. When the wake phrase is detected, the active recording switches into command mode, stops after `SILENCE_MS` of silence, and uploads to Whisper.
+- Uses vm103 Whisper wake probes for the phrase `Hey Jarvis`; browser speech recognition is not used for wake or prompt STT.
+- Records short wake-probe segments with `MediaRecorder`. When vm103 Whisper returns the wake phrase, Jarvis either uses the vm103-transcribed command tail or records the next command and uploads it to Whisper.
 - Sends audio to one or more self-hosted Whisper endpoints through the backend, so the browser never needs cross-origin access to Whisper.
 - Sends the recognized prompt to an OpenAI-compatible self-hosted brain through the backend, so API keys never reach the browser.
 - Speaks the answer with browser `speechSynthesis` and writes both prompt and answer on the page.
 
 ## Browser limitations
 
-The wake listener uses Chrome's `webkitSpeechRecognition` as the first-version wake-word engine. It works in foreground tabs after the user clicks **Arm Jarvis**, but Android/Chrome can pause it when the screen locks, the tab is backgrounded, or the OS throttles the browser. A production wake word should replace this with an on-device WASM wake-word engine such as Porcupine or a custom model.
+Jarvis keeps the microphone active only while the page is armed and in the foreground. Android/Chrome can still pause capture when the screen locks, the tab is backgrounded, or the OS throttles the browser. A production wake word could replace the vm103 Whisper probes with an on-device WASM wake-word engine such as Porcupine or a custom model.
 
 ## Runtime configuration
 

@@ -47,8 +47,8 @@ Findings while exposing the service:
 ## Runtime behavior
 
 - Wake phrase: `hey jarvis`
-- First-version wake engine: Chrome `webkitSpeechRecognition` in the foreground tab
-- Command recording: rolling `MediaRecorder` starts when Jarvis is armed; wake detection switches that active recording into command mode
+- Wake engine: vm103 Whisper probes from browser `MediaRecorder` segments
+- Command recording: `MediaRecorder`; command audio and wake+command tails are transcribed by vm103 Whisper
 - Auto-stop: `1500 ms` continuous silence
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
@@ -57,8 +57,8 @@ Findings while exposing the service:
 
 The frontend exposes progress at each small step:
 
-1. Wake listening
-2. Wake phrase detected
+1. Wake probe recording
+2. vm103 Whisper wake transcription
 3. Active microphone recording
 4. Voice activity / silence tracking
 5. Whisper upload and transcription
@@ -76,7 +76,7 @@ When the user said `hey jarvis, what's the time`, the original browser flow dete
 
 Fixes applied:
 
-- Jarvis now starts a rolling browser `MediaRecorder` as soon as it is armed. If Chrome wake recognition hears words after `hey jarvis` in the same utterance, those words are only diagnostic; the active audio recording is still uploaded to vm103 Whisper so prompt STT stays on the user's server.
+- Jarvis now uses vm103 Whisper for wake detection too. The browser records short wake-probe segments and uploads them to `/api/transcribe`; if vm103 Whisper returns `hey jarvis` plus command text, that vm103 transcript becomes the prompt. If it returns only the wake phrase, Jarvis beeps and records the next command for vm103 Whisper.
 - Whisper requests now send `vad_filter=true` and `temperature=0`.
 - Known no-speech hallucinations such as `Untertitelung des ZDF` and Amara subtitle phrases are rejected and shown as no-speech errors instead of prompting the brain.
 - Brain requests now include the current server timestamp, use a larger token budget, and answer time/date questions from that timestamp.

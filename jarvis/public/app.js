@@ -20,18 +20,21 @@ const state = {
   pipelineRunId: 0,
   wakeRunId: 0,
   wakeRestartTimer: null,
+  wakeProbeTimer: null,
   pendingWakeTimer: null,
   pendingWakeCommand: "",
   speechWatchdog: null,
   beepContext: null,
   busy: false,
   commandMode: false,
+  wakeProbeMode: false,
   voiceStartedAfterWake: false,
   discardRecording: false,
 };
 
 const rollingBufferMs = 12000;
 const commandMaxMs = 12000;
+const wakeProbeMs = 3500;
 
 const el = {
   core: document.getElementById("core"),
@@ -117,7 +120,6 @@ async function armJarvis() {
     state.armed = true;
     el.armButton.disabled = true;
     el.stopButton.disabled = false;
-    await startRollingRecorder();
     startWakeRecognition();
   } catch (error) {
     fail("Audio or microphone unlock failed", error);
@@ -128,6 +130,7 @@ function stopJarvis() {
   state.armed = false;
   state.busy = false;
   clearWakeRestart();
+  clearWakeProbe();
   clearPendingWake();
   clearSpeechWatchdog();
   stopWakeRecognition();
@@ -175,83 +178,29 @@ function playWakeBeep() {
 
 async function startWakeRecognition() {
   if (!state.armed || state.busy) return;
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    fail("Wake listener unavailable", new Error("Chrome webkitSpeechRecognition is required for this first version."));
-    return;
-  }
-
   try {
-    await startRollingRecorder();
-  } catch (error) {
-    fail("Could not start always-on command recorder", error);
-    return;
-  }
-
-  stopWakeRecognition();
-  clearPendingWake();
-  clearWakeRestart();
-  const wakeRunId = ++state.wakeRunId;
-  const recognition = new SpeechRecognition();
-  recognition.lang = "en-US";
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.maxAlternatives = 1;
-
-  recognition.onstart = () => {
+    stopWakeRecognition();
+    clearPendingWake();
+    clearWakeRestart();
+    clearWakeProbe();
+    state.wakeProbeMode = true;
     startPipelineRun();
-    setPipelineStage("wake", "Wake listening", `Say "${state.config.wakePhrase}" to activate Jarvis.`, "wake");
-    log("wake", "Wake recognition started");
-  };
-
-  recognition.onresult = (event) => {
-    if (state.busy) return;
-    const transcript = Array.from(event.results)
-      .slice(event.resultIndex)
-      .map((result) => result[0]?.transcript || "")
-      .join(" ")
-      .trim()
-      .toLowerCase();
-    if (transcript) log("wake", `Heard: ${transcript}`);
-    const wakePhrase = String(state.config.wakePhrase || "hey jarvis").toLowerCase();
-    const wakeIndex = transcript.indexOf(wakePhrase);
-    if (wakeIndex >= 0) {
-      state.busy = true;
-      clearPendingWake();
-      clearWakeRestart();
-      log("wake", "Wake phrase detected; locking wake listener and opening command recorder");
-      playWakeBeep();
-      setPipelineStage("prompting", "Wake detected", "Beep. Say your command now; Jarvis is opening the microphone.", "record");
-      markStep("wake", "done");
-      const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
-      if (inlineCommand) {
-        log("wake", `Wake-recognition tail is only diagnostic; active recorder will send audio to vm103 Whisper: ${inlineCommand}`);
-      }
-      stopWakeRecognition();
-      beginCommandCapture();
-    }
-  };
-
-  recognition.onerror = (event) => {
-    log("wake", `Wake recognition error: ${event.error}`, event);
-    if (wakeRunId === state.wakeRunId && state.armed && !state.commandMode && !state.busy) restartWakeRecognition(1200);
-  };
-
-  recognition.onend = () => {
-    log("wake", "Wake recognition ended");
-    if (wakeRunId === state.wakeRunId && state.armed && !state.commandMode && !state.busy) restartWakeRecognition(500);
-  };
-
-  state.wakeRecognition = recognition;
-  try {
-    recognition.start();
+    setPipelineStage("wake", "Wake listening", `Listening through vm103 Whisper for "${state.config.wakePhrase}".`, "wake");
+    log("wake", "Wake probe recording started; vm103 Whisper will check this audio for the wake phrase.");
+    await startRollingRecorder();
+    state.wakeProbeTimer = window.setTimeout(() => {
+      state.wakeProbeTimer = null;
+      log("wake", "Wake probe segment complete; uploading to vm103 Whisper.");
+      stopRecording();
+    }, wakeProbeMs);
   } catch (error) {
-    log("wake", "Wake recognition start failed; retrying", normalizeError(error));
-    if (state.armed && !state.busy) restartWakeRecognition(1200);
+    state.wakeProbeMode = false;
+    fail("Could not start vm103 Whisper wake probe", error);
   }
 }
 
 function stopWakeRecognition() {
+  clearWakeProbe();
   if (!state.wakeRecognition) return;
   const recognition = state.wakeRecognition;
   state.wakeRecognition = null;
@@ -278,6 +227,11 @@ function clearWakeRestart() {
   state.wakeRestartTimer = null;
 }
 
+function clearWakeProbe() {
+  if (state.wakeProbeTimer) window.clearTimeout(state.wakeProbeTimer);
+  state.wakeProbeTimer = null;
+}
+
 function clearPendingWake() {
   if (state.pendingWakeTimer) window.clearTimeout(state.pendingWakeTimer);
   state.pendingWakeTimer = null;
@@ -289,7 +243,7 @@ async function startRollingRecorder() {
   try {
     state.discardRecording = false;
     state.commandMode = false;
-    state.voiceStartedAfterWake = false;
+    state.voiceStartedAfterWake = state.wakeProbeMode;
     state.recording = true;
     state.chunks = [];
     state.chunkTimes = [];
@@ -343,6 +297,7 @@ function beginCommandCapture() {
   }
 
   trimRollingBuffer();
+  state.wakeProbeMode = false;
   state.commandMode = true;
   state.voiceStartedAfterWake = state.chunks.length > 0;
   state.silenceStartedAt = 0;
@@ -418,6 +373,7 @@ function monitorVoiceActivity() {
 
 function stopRecording({ discard = false } = {}) {
   state.discardRecording = discard;
+  clearWakeProbe();
   if (state.vadFrame) cancelAnimationFrame(state.vadFrame);
   state.vadFrame = null;
   if (state.recorder && state.recorder.state !== "inactive") state.recorder.stop();
@@ -425,7 +381,9 @@ function stopRecording({ discard = false } = {}) {
 
 async function onRecordingStopped() {
   state.recording = false;
-  const shouldDiscard = state.discardRecording || !state.commandMode;
+  const wasWakeProbe = state.wakeProbeMode && !state.commandMode;
+  const shouldDiscard = state.discardRecording || (!state.commandMode && !wasWakeProbe);
+  state.wakeProbeMode = false;
   state.commandMode = false;
   state.voiceStartedAfterWake = false;
   markStep("record", "done");
@@ -435,6 +393,10 @@ async function onRecordingStopped() {
   state.chunks = [];
   state.chunkTimes = [];
   if (shouldDiscard) return;
+  if (wasWakeProbe) {
+    await processWakeProbe(blob);
+    return;
+  }
   if (blob.size < 1200) {
     log("record", `Recording too small (${blob.size} bytes); returning to wake mode`);
     state.busy = false;
@@ -455,6 +417,53 @@ async function onRecordingStopped() {
     state.busy = false;
     fail("Whisper transcription failed or no speech was detected", error);
     if (state.armed) restartWakeRecognition(1000);
+  }
+}
+
+async function processWakeProbe(blob) {
+  if (blob.size < 1200) {
+    log("wake", `Wake probe too small (${blob.size} bytes); continuing vm103 Whisper wake listening.`);
+    if (state.armed) restartWakeRecognition(100);
+    return;
+  }
+
+  try {
+    setPipelineStage("transcribing", "Checking wake word", "Uploading wake audio to vm103 Whisper.", "whisper");
+    log("whisper", `Uploading ${blob.size} wake-probe bytes to backend`);
+    const transcribed = await postBlob("/api/transcribe", blob);
+    log("whisper", "Wake probe Whisper result", transcribed);
+
+    const transcript = String(transcribed.text || "").trim();
+    const wakePhrase = String(state.config.wakePhrase || "hey jarvis").toLowerCase();
+    const wakeIndex = transcript.toLowerCase().indexOf(wakePhrase);
+    if (wakeIndex < 0) {
+      log("wake", transcript ? `No wake phrase in vm103 Whisper text: ${transcript}` : "No speech/wake phrase from vm103 Whisper.");
+      state.busy = false;
+      if (state.armed) restartWakeRecognition(100);
+      return;
+    }
+
+    state.busy = true;
+    markStep("wake", "done");
+    markStep("whisper", "done");
+    playWakeBeep();
+    const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
+    if (inlineCommand) {
+      log("wake", `Wake and command were transcribed by vm103 Whisper: ${inlineCommand}`);
+      markStep("record", "done");
+      markStep("vad", "done");
+      await processPrompt(inlineCommand, { source: "whisper-wake" });
+      return;
+    }
+
+    log("wake", "Wake phrase transcribed by vm103 Whisper; opening command capture.");
+    setPipelineStage("prompting", "Wake detected", "Beep. Speak your command; vm103 Whisper will transcribe it.", "record");
+    await startRollingRecorder();
+    beginCommandCapture();
+  } catch (error) {
+    log("wake", "Wake probe transcription failed; continuing vm103 Whisper wake listening", normalizeError(error));
+    state.busy = false;
+    if (state.armed) restartWakeRecognition(500);
   }
 }
 

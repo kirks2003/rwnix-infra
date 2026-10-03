@@ -185,6 +185,7 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId) {
     const endpoint = config.whisperEndpoints[index];
     const started = Date.now();
     try {
+      console.log(JSON.stringify({ level: "info", requestId, msg: "whisper_attempt", endpoint: redactUrl(endpoint), bytes: audioBuffer.length, mimeType }));
       const form = new FormData();
       const blob = new Blob([audioBuffer], { type: mimeType });
       form.append("file", blob, "jarvis-command.webm");
@@ -203,6 +204,7 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId) {
         throw new Error(`Whisper hallucination/no-speech result: ${transcript}`);
       }
       if (!transcript) throw new Error("Whisper returned no transcript");
+      console.log(JSON.stringify({ level: "info", requestId, msg: "whisper_success", endpoint: redactUrl(endpoint), ms: Date.now() - started, transcriptChars: transcript.length }));
       return {
         requestId,
         text: transcript,
@@ -210,6 +212,7 @@ async function transcribeWithFailover(audioBuffer, mimeType, requestId) {
         attempts: attempts.concat({ endpoint: redactUrl(endpoint), ok: true, ms: Date.now() - started }),
       };
     } catch (error) {
+      console.log(JSON.stringify({ level: "warn", requestId, msg: "whisper_failure", endpoint: redactUrl(endpoint), ms: Date.now() - started, error: error.message }));
       attempts.push({ endpoint: redactUrl(endpoint), ok: false, ms: Date.now() - started, error: error.message });
     }
   }
