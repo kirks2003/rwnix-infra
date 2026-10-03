@@ -188,6 +188,7 @@ function startWakeRecognition() {
   };
 
   recognition.onresult = (event) => {
+    if (state.busy) return;
     const transcript = Array.from(event.results)
       .slice(event.resultIndex)
       .map((result) => result[0]?.transcript || "")
@@ -198,26 +199,21 @@ function startWakeRecognition() {
     const wakePhrase = String(state.config.wakePhrase || "hey jarvis").toLowerCase();
     const wakeIndex = transcript.indexOf(wakePhrase);
     if (wakeIndex >= 0) {
-      if (!state.pendingWakeTimer) {
-        log("wake", "Wake phrase detected; waiting briefly for command tail");
-        playWakeBeep();
-        setPipelineStage("prompting", "Wake detected", "Beep. Say your command now; Jarvis is opening the microphone.", "record");
-      }
+      state.busy = true;
+      clearPendingWake();
+      clearWakeRestart();
+      log("wake", "Wake phrase detected; locking wake listener and opening command recorder");
+      playWakeBeep();
+      setPipelineStage("prompting", "Wake detected", "Beep. Say your command now; Jarvis is opening the microphone.", "record");
       markStep("wake", "done");
       const inlineCommand = transcript.slice(wakeIndex + wakePhrase.length).replace(/^[,.;:!?\s]+/, "").trim();
       if (inlineCommand) {
         log("wake", `Ignored wake-recognition command tail so Whisper handles STT: ${inlineCommand}`);
       }
-      window.clearTimeout(state.pendingWakeTimer);
-      state.pendingWakeTimer = window.setTimeout(() => {
-        state.pendingWakeTimer = null;
-        stopWakeRecognition();
-        state.pendingWakeCommand = "";
-        state.busy = true;
-        log("record", "Opening command recorder; prompt text will be transcribed by vm103 Whisper.");
-        setPipelineStage("prompting", "Waiting for prompt", "Jarvis is awake. Speak your command after the beep; vm103 Whisper will transcribe it.", "record");
-        window.setTimeout(startCommandRecording, 300);
-      }, 650);
+      stopWakeRecognition();
+      log("record", "Opening command recorder; prompt text will be transcribed by vm103 Whisper.");
+      setPipelineStage("prompting", "Waiting for prompt", "Jarvis is awake. Speak your command after the beep; vm103 Whisper will transcribe it.", "record");
+      window.setTimeout(startCommandRecording, 300);
     }
   };
 

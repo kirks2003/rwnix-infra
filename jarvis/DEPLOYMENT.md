@@ -76,7 +76,7 @@ When the user said `hey jarvis, what's the time`, the original browser flow dete
 
 Fixes applied:
 
-- If Chrome wake recognition hears words after `hey jarvis` in the same utterance, those words are used directly as the command instead of starting a second recording.
+- If Chrome wake recognition hears words after `hey jarvis` in the same utterance, those words are logged and ignored. The command must be recorded after the wake beep so vm103 Whisper performs all prompt STT.
 - Whisper requests now send `vad_filter=true` and `temperature=0`.
 - Known no-speech hallucinations such as `Untertitelung des ZDF` and Amara subtitle phrases are rejected and shown as no-speech errors instead of prompting the brain.
 - Brain requests now include the current server timestamp, use a larger token budget, and answer time/date questions from that timestamp.
