@@ -245,10 +245,15 @@ kandev@kandev104:~ $ echo "hello" | opencode run -m a1-dsv4f/a1-dsv4f
 ### No `openrouter` provider in opencode config
 
 The `rw_openrouter-*` profiles reference models like
-`openrouter/qwen/qwen3.8-27b`, but there is no `openrouter` provider defined
-in `opencode.jsonc` on either NBG or kandev104. On NBG these models are
-served through the Copilot ACP backend which has its own OpenRouter
-integration. On kandev104 the Copilot ACP is not running either.
+`openrouter/qwen/qwen3.8-27b`. An `openrouter` provider was added to
+`opencode.jsonc` on both NBG and kandev104 (same API key from
+`auth.json`). The provider serves three models:
+
+| Model reference | Name |
+|---|---|
+| `openrouter/qwen/qwen3.8-27b` | Qwen 3.8 27B (OpenRouter) |
+| `openrouter/deepseek/deepseek-v4.1-flash` | DeepSeek V4.1 Flash (OpenRouter) |
+| `openrouter/anthropic/claude-fable-5.1` | Claude Fable 5.1 (OpenRouter) |
 
 ### GPU endpoint reachability
 
