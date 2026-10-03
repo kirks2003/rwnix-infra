@@ -93,6 +93,7 @@ fi
 | `SCRIPTS` path and alias | yes | yes |
 | `.profile` format | bash-version guard | bash-version guard |
 | Root `.bashrc` | empty (entrypoint copy) | standalone (EUID conditional) |
+| `SHELL` env var | `/bin/bash` | `/bin/bash` |
 
 ## What was done (2026-10-03)
 
@@ -109,6 +110,12 @@ fi
    version — conditional EUID PS1, dircolors/color aliases, `ll`/`la`/`l`
    shortcuts, `SCRIPTS` path and alias, and NBG-matching `.profile`
 7. Verified effective PS1 on both users via `bash -l -i -c`
+8. **Found and fixed `SHELL` env var:** the base image
+   (`ghcr.io/kdlbs/kandev:v0.96.0`) sets `SHELL=/bin/sh` by default, so the
+   Kandev UI terminal launched `/bin/sh` (dash) instead of `/bin/bash` and
+   showed only `$`. Added `SHELL: /bin/bash` to the compose environment and
+   recreated the container. Now both root and `kandev` users have
+   `SHELL=/bin/bash` and the terminal shows the coloured prompt.
 
 ## Verification
 
