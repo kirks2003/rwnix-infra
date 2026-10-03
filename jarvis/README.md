@@ -44,6 +44,36 @@ Multiple endpoints are comma-separated and tried round-robin with failover, like
 
 With `TTS_ENDPOINTS` empty, HAL 9000 is still selectable but degrades to `speechSynthesis` at rate 0.68 and pitch 0.5, preferring a deep English voice if the browser has one: the cadence survives, the filtering and reverb do not. The same fallback finishes the remaining clauses if the TTS backend fails part-way through an answer, and the live log says so rather than dropping the rest of the answer.
 
+## Troubleshooting
+
+**"I say the wake word and nothing happens."** Three causes have actually been observed, in
+descending order of likelihood:
+
+1. **The microphone never goes quiet.** A command is only submitted after `SILENCE_MS`
+   (1.5 s) of silence; if the room noise floor stays above the capture threshold
+   (`0.012` in `public/audio.js`), recording runs to the 15-second cap instead, then
+   uploads a window that is mostly noise and comes back empty. The **Listening for
+   command** stage counts elapsed time and shows the live mic level while it waits, so
+   watch those: if the level never falls near zero, lower the input gain or raise the
+   threshold.
+2. **Language mismatch.** `WHISPER_LANGUAGE` is `en`. German speech forced through the
+   English model is mangled badly enough that the wake phrase no longer matches:
+   *"Rocky, wie viel Uhr ist es?"* came back from the live service as
+   *"Roki waivil ua ist iz."*, so the pipeline never starts. Speak the configured
+   language, or change `WHISPER_LANGUAGE`.
+3. **Saying the wake phrase alone** opens the two-step flow: a beep, then up to 10 s
+   waiting for a separate command. Saying phrase and command in one breath
+   ("Rocky, what time is it?") skips it.
+
+**Phantom answers.** `large-v3` emits `"Thank you."`, `"Okay."` or `"You"` for
+near-silence even with the VAD filter on, so those exact strings are filtered as
+hallucinations alongside the ZDF/Amara subtitle artefacts. Without the filter, a silent
+command window would send a phantom prompt to the brain.
+
+Keep `WHISPER_VAD_FILTER=true`. It is what suppresses those hallucinations: with the
+filter off, pure digital silence transcribes as `"Thank you."` every time. It does not
+cost sensitivity, as speech 3% of full scale still transcribed correctly in testing.
+
 ## Runtime configuration
 
 Copy `.env.example` to `.env` on the Docker host and set:
@@ -99,6 +129,17 @@ npm run test:browser
 ```
 
 Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality. `tests/voice.test.mjs` covers clause splitting and HAL playback sequencing against Web Audio stubs; actual playback is covered by the Chromium tests.
+
+`wake probes end in silence rather than cutting a word in half` is a property test: it
+asserts every uploaded probe window has a near-silent tail, which is what keeps the
+trailing-edge trigger from regressing into mid-word cuts.
+
+Three wake-word tests (`personal wake word is saved...`, `invalid personal wake
+words...`, `blocked local storage...`) fail in containers without Chromium's system
+libraries, where `page.fill` on `#wakeWordInput` does not take effect and the renderer is
+unstable. They fail identically on unmodified `main`, so treat a failure there as an
+environment signal, not a regression; verify on a host where
+`npx playwright install --with-deps` has run.
 
 Optional live vm103 speech test (supply a WAV saying "Rocky, what time is it?" followed by five seconds of silence; Chromium loops the fixture):
 

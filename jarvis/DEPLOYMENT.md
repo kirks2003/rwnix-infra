@@ -198,3 +198,65 @@ and the docs over `/home/ubuntu/docker/jarvis`, then `docker compose up -d --bui
 - Both voice keys hold the `speaches` container's `API_KEY` from gpu-1.
 - Verified against the running container on `192.168.54.111:8094` (the compose binds that address, not `127.0.0.1`): `/api/health` ok with `ttsEndpoints: 1`, `/api/config` reporting `whisperLanguage: en` and `ttsConfigured: true`, `/api/speak` returning a 187 KB WAV in 0.71 s, `/api/transcribe` of that audio returning "Good evening, I am completely operational." in 1.04 s, and `/api/chat` answering in 1.17 s.
 - The public gateway URLs answer `401` from outside, which is the existing Basic Auth/Authelia layer, not an app error. Browser verification of the HAL voice still needs a real login.
+
+## Voice pipeline findings (2026-10-03)
+
+Measured against the deployed gpu-1 service, not inferred.
+
+### Wake probes were cut mid-word
+
+The probe trigger fired as soon as 2 s of new audio existed and any voice had been heard,
+including while the talker was still speaking, so the window ended mid-syllable. Whisper
+returns an empty string for half a word, and the phrase was then only caught by the next
+probe about 2 s later: the user-visible symptom was having to repeat the wake word.
+
+A fixture of four isolated "Rocky" utterances (Kokoro-synthesized, 5 s of silence either
+side) played through real Chromium capture into the live service:
+
+| Trigger | Probes | Recognized | First detection |
+|---|---|---|---|
+| fixed 2 s interval | 8 | 6, two cut windows empty | 7.39 s (word at 5.0 s) |
+| trailing edge of speech | 6 | 6, none cut | 6.53 s |
+
+The trailing-edge trigger waits ~350 ms after voice stops, with a 3 s cap for speech that
+never pauses. An earlier attempt capped on elapsed audio instead of speech, which failed
+the same way, because 5 s of leading silence had already exceeded the cap by the time the
+word started. `tests/pipeline.browser.mjs` guards the fixed behaviour by asserting every
+probe window has a near-silent tail.
+
+Only 2 of the 4 utterances produced a full cycle in both runs: utterances 2 and 4 arrived
+while the pipeline was still in the command phase of the previous detection, which can run
+~15 s for a wake-only cycle. That is the single-pipeline design, not a cut, and is the
+obvious next thing to shorten.
+
+### Whisper behaviour on the new model
+
+- `large-v3` with `vad_filter=true` returns `""` for digital silence, faint noise and 50 Hz
+  hum. With `vad_filter=false` all three return `"Thank you."`. The filter stays on, and
+  `"Thank you."` / `"Okay."` / `"You"` are now treated as hallucinations: a silent command
+  window would otherwise send a phantom prompt to the brain.
+- The VAD is not over-aggressive: synthesized speech attenuated to 8% and 3% of full scale
+  still transcribed perfectly with the filter on.
+- Forcing English on German speech breaks wake matching outright.
+  *"Rocky, wie viel Uhr ist es?"* transcribes as *"Roki waivil ua ist iz."*. A per-browser
+  language setting, like the wake-word override, is the fix if both languages are wanted.
+- Latency: 0.80 s warm for a 1.2 s command, 1.19 s for 3.3 s of audio, ~27 s cold while the
+  model loads into VRAM. `WHISPER__TTL=-1` keeps it warm.
+
+### Reading the backend logs
+
+The backend deliberately logs `transcriptChars` rather than transcripts, so a session is
+diagnosed by shape. A run of `transcriptChars: 5` with no `/api/chat` requests means the
+wake phrase alone is being recognized (`"Rocky"` is 5 characters) and the command step is
+failing; `transcriptChars: 0` is an empty window; `transcriptChars: 10` was the
+`"Thank you."` hallucination. Exact transcripts are only in the browser's live log.
+
+### Incidental observations
+
+- Capture sample rate follows the client's `AudioContext`; one tested browser ran at
+  192 kHz, which makes uploaded windows four times the size expected at 48 kHz. Harmless,
+  but it skews any size-based reasoning about window length.
+- The deployed container binds `192.168.54.111:8094`, not `127.0.0.1`, so a localhost curl
+  on vm104 looks like a dead service when the app is healthy.
+- `npm ci` on vm104 and in CI-like containers skips devDependencies when `NODE_ENV` is
+  `production`; use `npm ci --include=dev` before running the browser suite.
