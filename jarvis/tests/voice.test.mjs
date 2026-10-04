@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, STOP_COMMANDS } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -54,6 +54,42 @@ test("the HAL profile prefers a deep English voice over a default female one", (
   assert.equal(pickSynthesisVoice(voices, voiceProfiles.hal9000).name, "Daniel");
   assert.equal(pickSynthesisVoice(voices.slice(0, 2), voiceProfiles.hal9000), null);
   assert.equal(pickSynthesisVoice(voices, voiceProfiles.browser), null);
+});
+
+test("named male and female profiles exist with matching Kokoro voices", () => {
+  for (const [id, gender, ttsVoice] of [
+    ["heart", "female", "af_heart"], ["nicole", "female", "af_nicole"], ["sarah", "female", "af_sarah"],
+    ["adam", "male", "am_adam"], ["eric", "male", "am_eric"], ["liam", "male", "am_liam"],
+  ]) {
+    assert.equal(voiceProfiles[id].gender, gender, id);
+    assert.equal(voiceProfiles[id].ttsVoice, ttsVoice, id);
+    assert.equal(voiceProfiles[id].neural, true, id);
+    assert.ok(voiceProfiles[id].voiceHints.length > 0, id);
+    assert.equal(voiceProfiles[id].group, gender, id);
+  }
+});
+
+test("female profiles pick a female browser voice, male profiles a male one", () => {
+  const voices = [
+    { name: "Microsoft George - English (United States)", lang: "en-US" },
+    { name: "Microsoft Zira - English (United States)", lang: "en-US" },
+  ];
+  assert.equal(pickSynthesisVoice(voices, voiceProfiles.heart).name, "Microsoft Zira - English (United States)");
+  assert.equal(pickSynthesisVoice(voices, voiceProfiles.adam).name, "Microsoft George - English (United States)");
+  // With only a voice of the wrong gender available, no hint-matched fallback wins.
+  assert.equal(pickSynthesisVoice([voices[0]], voiceProfiles.nicole), null);
+  assert.equal(pickSynthesisVoice([voices[1]], voiceProfiles.eric), null);
+});
+
+test("German mode picks a female German voice for female profiles", () => {
+  const voices = [
+    { name: "Google US English", lang: "en-US" },
+    { name: "Microsoft Conrad - German (Germany)", lang: "de-DE" },
+    { name: "Microsoft Katrin - German (Germany)", lang: "de-DE" },
+  ];
+  assert.equal(pickGermanSynthesisVoice(voices, "female").name, "Microsoft Katrin - German (Germany)");
+  assert.equal(pickGermanSynthesisVoice(voices, "male").name, "Microsoft Conrad - German (Germany)");
+  assert.equal(pickGermanSynthesisVoice(voices).name, "Microsoft Conrad - German (Germany)");
 });
 
 test("the speed slider is clamped and applied as a multiplier", () => {
@@ -163,6 +199,16 @@ test("Stop ends HAL playback and releases its audio context", async () => {
   await assert.rejects(speaking, { name: "AbortError" });
   assert.equal(played.length, 1);
   assert.equal(voice.context.state, "closed");
+});
+
+test("voice commands that cut spoken answers are recognized, everything else is a follow-up", () => {
+  for (const command of STOP_COMMANDS) assert.equal(isStopCommand(command), true, command);
+  assert.equal(isStopCommand("  STOP. "), true);
+  assert.equal(isStopCommand("Stopp!"), true);
+  assert.equal(isStopCommand("Das reicht."), true);
+  for (const command of ["", null, "hello", "what time is it?", "stop the car", "genug ist genug", "stop it now"]) {
+    assert.equal(isStopCommand(command), false, JSON.stringify(command));
+  }
 });
 
 test("the speaker gets plain language without markdown or special signs", () => {

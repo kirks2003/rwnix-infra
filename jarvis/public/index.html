@@ -8,7 +8,20 @@
   </head>
   <body>
     <main class="shell">
-      <section class="hero">
+      <section class="login-panel" id="loginPanel" hidden>
+        <h1>Jarvis</h1>
+        <p class="login-sub">Sign in to your shell. Every user has their own prompt history.</p>
+        <form id="loginForm" class="login-form">
+          <label for="loginUsername">Username</label>
+          <input id="loginUsername" type="text" autocomplete="username" maxlength="60" required>
+          <label for="loginPassword">Password</label>
+          <input id="loginPassword" type="password" autocomplete="current-password" maxlength="128" required>
+          <button id="loginButton" type="submit">Sign in</button>
+        </form>
+        <p id="loginStatus" class="login-status" role="status">The password is your username.</p>
+      </section>
+
+      <section class="hero app-ui">
         <div class="core-wrap">
           <div id="core" class="core standby" aria-hidden="true">
             <svg id="waveform" class="waveform" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -22,13 +35,21 @@
           <p class="eyebrow">Jarvis web assistant</p>
           <h1 id="stageTitle">Standby</h1>
           <p id="stageDetail">Click Arm Jarvis to unlock audio and start wake listening.</p>
+          <div class="user-row">
+            <span id="userLine" class="user-line"></span>
+            <button id="signOutButton" class="sign-out" type="button">Sign out</button>
+          </div>
         </div>
       </section>
 
-      <section class="transcript">
+      <section class="transcript app-ui">
         <div>
           <h2>Prompt</h2>
           <p id="promptText">—</p>
+          <form id="manualPromptForm" class="manual-prompt">
+            <textarea id="manualPrompt" rows="2" placeholder="Type a prompt here (when disarmed) and press Send..."></textarea>
+            <button id="sendManualButton" type="submit" disabled>Send</button>
+          </form>
         </div>
         <div>
           <h2>Answer</h2>
@@ -36,117 +57,152 @@
         </div>
       </section>
 
-      <section class="controls">
-        <button id="armButton" type="button">Arm Jarvis</button>
-        <button id="stopButton" type="button" disabled>Stop</button>
-        <button id="testButton" type="button">Manual prompt</button>
-        <div class="test-control">
-          <button id="signalButton" type="button" disabled
-                  title="Inject a short test peep into the live capture path: proves capture, level and the wake-probe round trip without speaking.">Test signal</button>
-          <button id="wakeTestButton" type="button" disabled
-                  title="Synthesize the wake word plus a test command with the TTS backend and inject it into the capture path, running the full pipeline hands-free.">Wake test</button>
-          <p class="test-control-help">Inject audio into the live capture path. Arm Jarvis first.</p>
-        </div>
-        <div class="language-control">
-          <button id="languageSwitch" class="lang-switch" type="button" role="switch" aria-checked="false"
-                  title="Switches Whisper, brain and spoken output between English and German, live.
-                         German answers are spoken with the browser voice (the self-hosted TTS engine is English-only)."
-                  disabled>
-            <span class="lang-option">English</span>
-            <span class="lang-option">Deutsch</span>
-            <span class="lang-knob" aria-hidden="true"></span>
-          </button>
-          <p id="languageStatus" role="status">Loading language settings.</p>
-        </div>
-        <div class="language-control mcp-control">
-          <button id="websearchSwitch" class="lang-switch" type="button" role="switch" aria-checked="false"
-                  title="Enable the Jarvis MCP web-search server: for every prompt the backend searches the web and gives the brain the results as context. Saved in this browser only."
-                  disabled>
-            <span class="lang-option">MCP off</span>
-            <span class="lang-option">MCP search</span>
-            <span class="lang-knob" aria-hidden="true"></span>
-          </button>
-          <p id="websearchStatus" role="status">Loading MCP search settings.</p>
-        </div>
-        <div class="meters">
-          <label>Mic level <progress id="micLevel" max="100" value="0"></progress></label>
-          <label>Silence <progress id="silenceLevel" max="1500" value="0"></progress></label>
-        </div>
-      </section>
+      <div class="panels-toggle-row app-ui">
+        <button id="panelsToggle" class="lang-switch" type="button" role="switch" aria-checked="true"
+                title="Show or hide every panel below: meters, pipeline, controls, settings and the live log.">
+          <span class="lang-option">Panels off</span>
+          <span class="lang-option">Panels on</span>
+          <span class="lang-knob" aria-hidden="true"></span>
+        </button>
+      </div>
 
-      <section class="stage-preview" id="stagePreview">
-        <h2>Animation preview</h2>
-        <div class="stage-preview-buttons">
-          <button type="button" data-stage="standby">Standby</button>
-          <button type="button" data-stage="wake">Wake</button>
-          <button type="button" data-stage="recording">Recording</button>
-          <button type="button" data-stage="transcribing">Transcribing</button>
-          <button type="button" data-stage="thinking">Thinking</button>
-          <button type="button" data-stage="speaking">Speaking</button>
-          <button type="button" data-stage="error">Error</button>
-        </div>
-        <p class="stage-preview-help">Preview every core animation without arming. The buttons disable while a session is running.</p>
-      </section>
+      <div id="panelsBelow" class="app-ui">
+        <section class="panel meter-panel meter-panel-mic">
+          <div class="meter-head">
+            <h2>Mic level</h2>
+            <span id="micLevelValue" class="meter-value">0%</span>
+          </div>
+          <progress id="micLevel" max="100" value="0"></progress>
+          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it.</p>
+        </section>
 
-      <form id="wakeWordForm" class="wake-settings">
-        <label for="wakeWordInput">Your wake word</label>
-        <div class="wake-word-controls">
-          <input id="wakeWordInput" type="text" maxlength="60" required autocomplete="off"
-                 placeholder="Rocky" aria-describedby="wakeWordHelp wakeWordStatus" disabled>
-          <button id="saveWakeWordButton" type="submit" disabled>Apply wake word</button>
-        </div>
-        <p id="wakeWordHelp">Saved in this browser only. Applying stops the current session; click Arm Jarvis again.</p>
-        <p id="wakeWordStatus" role="status">Loading wake-word settings.</p>
-      </form>
+        <section class="panel pipeline-panel">
+          <div class="pipeline-header">
+            <h2>Pipeline</h2>
+            <p id="pipelineStatus" class="pipeline-status" role="status">Idle. Arm Jarvis to start.</p>
+          </div>
+          <ol id="steps">
+            <li data-step="wake">
+              <span class="step-dot" aria-hidden="true"></span>
+              <span class="step-name">Wake word</span>
+              <span class="step-state">waiting</span>
+            </li>
+            <li data-step="record">
+              <span class="step-dot" aria-hidden="true"></span>
+              <span class="step-name">Record command</span>
+              <span class="step-state">waiting</span>
+            </li>
+            <li data-step="vad">
+              <span class="step-dot" aria-hidden="true"></span>
+              <span class="step-name">Stop after 1.5 s silence</span>
+              <span class="step-state">waiting</span>
+            </li>
+            <li data-step="whisper">
+              <span class="step-dot" aria-hidden="true"></span>
+              <span class="step-name">Whisper transcription</span>
+              <span class="step-state">waiting</span>
+            </li>
+            <li data-step="brain">
+              <span class="step-dot" aria-hidden="true"></span>
+              <span class="step-name">Brain</span>
+              <span class="step-state">waiting</span>
+            </li>
+            <li data-step="tts">
+              <span class="step-dot" aria-hidden="true"></span>
+              <span class="step-name">Speech output</span>
+              <span class="step-state">waiting</span>
+            </li>
+          </ol>
+        </section>
 
-      <form id="voiceForm" class="wake-settings">
-        <label for="voiceSelect">Answer voice</label>
-        <div class="wake-word-controls">
-          <select id="voiceSelect" aria-describedby="voiceHelp voiceStatus" disabled></select>
-          <button id="saveVoiceButton" type="submit" disabled>Apply voice</button>
-        </div>
-        <p id="voiceHelp">Saved in this browser only. HAL 9000 uses the self-hosted TTS backend when one is
-          configured and falls back to the browser voice otherwise. Speed is a multiplier on the voice's own
-          pace, so 1.00x is the voice as designed. Changes apply to the next answer.</p>
-        <label for="voiceSpeed">Speaking speed <output id="voiceSpeedValue">1.00x</output></label>
-        <div class="wake-word-controls">
-          <input id="voiceSpeed" type="range" min="0.6" max="1.6" step="0.05" value="1"
-                 aria-describedby="voiceHelp voiceStatus" disabled>
-        </div>
-        <p id="voiceStatus" role="status">Loading voice settings.</p>
-      </form>
+        <section class="panel meter-panel meter-panel-silence">
+          <div class="meter-head">
+            <h2>Silence</h2>
+            <span id="silenceValue" class="meter-value">0 ms</span>
+          </div>
+          <progress id="silenceLevel" max="1500" value="0"></progress>
+          <p class="meter-help">Time since the last voice. While wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the 1.5 s stop point.</p>
+        </section>
 
-      <section class="panel pipeline-panel">
-        <h2>Pipeline</h2>
-        <ol id="steps">
-          <li data-step="wake">Wake word</li>
-          <li data-step="record">Record command</li>
-          <li data-step="vad">Stop after 1.5 s silence</li>
-          <li data-step="whisper">Whisper transcription</li>
-          <li data-step="brain">a1-deepseekv4flash brain</li>
-          <li data-step="tts">Speech output</li>
-        </ol>
-      </section>
+        <section class="controls">
+          <button id="armButton" type="button">Arm Jarvis</button>
+          <button id="stopButton" type="button" disabled>Stop</button>
+          <div class="language-control">
+            <button id="languageSwitch" class="lang-switch" type="button" role="switch" aria-checked="false"
+                    title="Switches Whisper, brain and spoken output between English and German, live.
+                           German answers are spoken with the browser voice (the self-hosted TTS engine is English-only)."
+                    disabled>
+              <span class="lang-option">English</span>
+              <span class="lang-option">Deutsch</span>
+              <span class="lang-knob" aria-hidden="true"></span>
+            </button>
+            <p id="languageStatus" role="status">Loading language settings.</p>
+          </div>
+          <div class="mcp-switches" id="mcpSwitches"></div>
+        </section>
 
-      <section class="panel log-panel">
-        <div class="log-title">
-          <h2>Live log</h2>
-          <button id="clearLogButton" type="button">Clear</button>
-        </div>
-        <pre id="log"></pre>
-      </section>
+        <section class="stage-preview" id="stagePreview">
+          <h2>Animation preview</h2>
+          <div class="stage-preview-buttons">
+            <button type="button" data-stage="standby">Standby</button>
+            <button type="button" data-stage="wake">Wake</button>
+            <button type="button" data-stage="recording">Recording</button>
+            <button type="button" data-stage="transcribing">Transcribing</button>
+            <button type="button" data-stage="thinking">Thinking</button>
+            <button type="button" data-stage="speaking">Speaking</button>
+            <button type="button" data-stage="error">Error</button>
+          </div>
+          <p class="stage-preview-help">Preview every core animation without arming. The buttons disable while a session is running.</p>
+        </section>
+
+        <form id="wakeWordForm" class="wake-settings">
+          <label for="wakeWordInput">Your wake word</label>
+          <div class="wake-word-controls">
+            <input id="wakeWordInput" type="text" maxlength="60" required autocomplete="off"
+                   placeholder="Rocky" aria-describedby="wakeWordHelp wakeWordStatus" disabled>
+            <button id="saveWakeWordButton" type="submit" disabled>Apply wake word</button>
+          </div>
+          <p id="wakeWordHelp">Saved in this browser only. Applying stops the current session; click Arm Jarvis again.</p>
+          <p id="wakeWordStatus" role="status">Loading wake-word settings.</p>
+        </form>
+
+        <form id="voiceForm" class="wake-settings">
+          <label for="voiceSelect">Answer voice</label>
+          <div class="wake-word-controls">
+            <select id="voiceSelect" aria-describedby="voiceHelp voiceStatus" disabled></select>
+            <button id="saveVoiceButton" type="submit" disabled>Apply voice</button>
+          </div>
+          <p id="voiceHelp">Saved in this browser only. Character and named voices (male and female) use the
+            self-hosted TTS backend when one is configured and fall back to a matching browser voice otherwise.
+            Speed is a multiplier on the voice's own pace, so 1.00x is the voice as designed. Changes apply to
+            the next answer.</p>
+          <label for="voiceSpeed">Speaking speed <output id="voiceSpeedValue">1.00x</output></label>
+          <div class="wake-word-controls">
+            <input id="voiceSpeed" type="range" min="0.6" max="1.6" step="0.05" value="1"
+                   aria-describedby="voiceHelp voiceStatus" disabled>
+          </div>
+          <div class="voice-output-control">
+            <button id="speakSwitch" class="lang-switch" type="button" role="switch" aria-checked="true"
+                    title="Turn spoken answers off: the answer is written to the Answer panel as text only. Saved in this browser only."
+                    disabled>
+              <span class="lang-option">Text only</span>
+              <span class="lang-option">Speak</span>
+              <span class="lang-knob" aria-hidden="true"></span>
+            </button>
+            <p id="speakStatus" role="status">Loading voice output settings.</p>
+          </div>
+          <p id="voiceStatus" role="status">Loading voice settings.</p>
+        </form>
+
+        <section class="panel log-panel">
+          <div class="log-title">
+            <h2>Live log</h2>
+            <button id="clearLogButton" type="button">Clear</button>
+          </div>
+          <pre id="log"></pre>
+        </section>
+      </div>
     </main>
-
-    <dialog id="promptDialog">
-      <form method="dialog">
-        <label for="manualPrompt">Ask Jarvis</label>
-        <textarea id="manualPrompt" rows="4" placeholder="Type a prompt..."></textarea>
-        <menu>
-          <button value="cancel">Cancel</button>
-          <button id="sendManualButton" value="send">Send</button>
-        </menu>
-      </form>
-    </dialog>
 
     <script type="module" src="/app.js"></script>
   </body>

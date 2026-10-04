@@ -33,6 +33,104 @@ body {
   padding: 28px;
 }
 
+/* Multi-user: the whole app shell stays hidden until the session is
+   confirmed (a successful /api/config); then only the login panel is hidden. */
+body:not(.authenticated) .app-ui {
+  display: none;
+}
+
+.login-panel {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  width: min(440px, 100%);
+  margin: 10vh auto 0;
+  padding: 34px 30px;
+  border: 1px solid rgba(66, 217, 255, 0.3);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: 0 30px 120px rgba(0, 0, 0, 0.4);
+  text-align: center;
+}
+
+.login-panel[hidden] {
+  display: none;
+}
+
+.login-panel h1 {
+  margin: 0;
+  font-size: 2.4rem;
+  letter-spacing: 0.1em;
+}
+
+.login-sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.login-form {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  margin-top: 10px;
+  text-align: left;
+}
+
+.login-form label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.login-form input {
+  border: 1px solid rgba(66, 217, 255, 0.35);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: #02050b;
+  font: inherit;
+}
+
+.login-form button {
+  margin-top: 10px;
+}
+
+.login-status {
+  margin: 8px 0 0;
+  min-height: 1.2em;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.login-status.error {
+  color: #ff9a9a;
+}
+
+.user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.user-line {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.sign-out {
+  padding: 6px 14px;
+  color: var(--muted);
+  background: rgba(2, 5, 11, 0.4);
+  font-size: 0.8rem;
+}
+
+.sign-out:hover {
+  color: var(--text);
+}
+
 .hero, .controls, .transcript {
   display: grid;
   gap: 18px;
@@ -197,14 +295,21 @@ h2 {
   font-size: 1.15rem;
 }
 
+/* The hero shows the pipeline headline only; operational details live in the
+   pipeline status line and the Live log. Errors and stop messages still use
+   this line, so hide it only when it is empty. */
+#stageDetail:empty {
+  display: none;
+}
+
 .controls {
-  /* Row 1 holds the session buttons and the language switch; the MCP
-     web-search switch sits on its own row one below, centered. */
-  grid-template-columns: max-content max-content max-content max-content max-content 1fr;
+  /* Row 1 holds Arm/Stop and the language switch; the one switch per MCP
+     server sits on its own row one below, centered. */
+  grid-template-columns: max-content max-content max-content;
   grid-template-rows: auto auto;
   grid-template-areas:
-    "arm stop manual test language meters"
-    "mcp mcp mcp mcp mcp mcp";
+    "arm stop language"
+    "mcp mcp mcp";
   align-items: center;
   padding: 16px;
   border: 1px solid rgba(66, 217, 255, 0.18);
@@ -214,23 +319,6 @@ h2 {
 
 #armButton { grid-area: arm; }
 #stopButton { grid-area: stop; }
-#testButton { grid-area: manual; }
-.test-control { grid-area: test; }
-.meters { grid-area: meters; }
-
-.test-control {
-  display: grid;
-  gap: 8px;
-  justify-items: center;
-}
-
-.test-control-help {
-  margin: 0;
-  max-width: 200px;
-  color: var(--muted);
-  font-size: 0.75rem;
-  text-align: center;
-}
 
 button {
   border: 1px solid rgba(66, 217, 255, 0.4);
@@ -246,10 +334,43 @@ button:disabled {
   opacity: 0.45;
 }
 
-.meters {
+.meter-panel {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+  align-content: start;
+}
+
+.meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meter-head h2 {
+  margin: 0;
+}
+
+.meter-value {
+  color: var(--cyan);
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.meter-panel progress {
+  width: 100%;
+  height: 14px;
+}
+
+.meter-panel-silence .meter-value,
+.meter-panel-silence progress {
+  accent-color: var(--green);
+}
+
+.meter-help {
+  margin: 0;
   color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .stage-preview {
@@ -294,17 +415,46 @@ button:disabled {
   justify-items: center;
 }
 
-.language-control.mcp-control {
+.mcp-switches {
   grid-area: mcp;
-  justify-self: center;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px 18px;
 }
 
-#languageStatus, #websearchStatus {
+.mcp-switches .language-control {
+  grid-area: auto;
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+}
+
+#languageStatus, #mcpSwitches p {
   margin: 0;
   max-width: 220px;
   color: var(--muted);
   font-size: 0.75rem;
   text-align: center;
+}
+
+.panels-toggle-row {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0 10px;
+}
+
+.voice-output-control {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  margin-top: 12px;
+}
+
+#speakStatus {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .lang-switch {
@@ -413,7 +563,49 @@ progress {
   grid-template-columns: 1fr 1fr;
 }
 
-.transcript > div, .panel {
+.transcript > div {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-height: 260px;
+  padding: 18px;
+  border: 1px solid rgba(66, 217, 255, 0.18);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
+}
+
+.transcript p {
+  min-height: 48px;
+  max-height: 190px;
+  margin: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.manual-prompt {
+  display: grid;
+  gap: 8px;
+}
+
+.manual-prompt textarea {
+  width: 100%;
+  border: 1px solid rgba(66, 217, 255, 0.35);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: #02050b;
+  font: inherit;
+  resize: vertical;
+}
+
+.manual-prompt button {
+  justify-self: end;
+  padding: 8px 16px;
+  font-size: 0.9rem;
+}
+
+.panel {
   min-height: 138px;
   padding: 18px;
   border: 1px solid rgba(66, 217, 255, 0.18);
@@ -422,31 +614,132 @@ progress {
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
 }
 
-ol {
+.pipeline-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.pipeline-header h2 {
+  margin: 0;
+}
+
+.pipeline-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+#steps {
   display: grid;
+  grid-template-columns: repeat(6, 1fr);
   gap: 10px;
   margin: 0;
-  padding-left: 24px;
+  padding: 0;
+  list-style: none;
 }
 
-li {
+/* Each step keeps its status as its only class (tests read it), so all state
+   styling hangs off #steps li.<status>. */
+#steps li {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  text-align: center;
+  padding: 14px 8px 12px;
+  border: 1px solid rgba(66, 217, 255, 0.14);
+  border-radius: 14px;
+  background: rgba(2, 5, 11, 0.5);
+}
+
+#steps li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -10px;
+  width: 10px;
+  height: 2px;
+  background: rgba(66, 217, 255, 0.35);
+}
+
+.step-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--muted);
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+}
+
+.step-name {
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.step-state {
   color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
 }
 
-li.active {
+#steps li.active {
+  border-color: rgba(255, 192, 77, 0.5);
+  box-shadow: 0 0 18px rgba(255, 192, 77, 0.22);
+}
+
+#steps li.active .step-dot {
+  border-color: var(--amber);
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
+#steps li.active .step-state {
   color: var(--amber);
 }
 
-li.done {
+#steps li.done .step-dot {
+  border-color: var(--green);
+  background: var(--green);
+  box-shadow: 0 0 12px rgba(45, 255, 191, 0.5);
+}
+
+#steps li.done .step-name {
+  color: var(--text);
+}
+
+#steps li.done .step-state {
   color: var(--green);
 }
 
-li.skipped {
+#steps li.skipped .step-dot {
+  border-color: #789;
+  border-style: dashed;
+}
+
+#steps li.skipped .step-name {
   color: #789;
   text-decoration: line-through;
 }
 
-li.error {
+#steps li.skipped .step-state {
+  color: #789;
+}
+
+#steps li.error .step-dot {
+  border-color: var(--red);
+  background: rgba(255, 76, 106, 0.3);
+  box-shadow: 0 0 14px rgba(255, 76, 106, 0.5);
+}
+
+#steps li.error .step-name {
+  color: var(--red);
+}
+
+#steps li.error .step-state {
   color: var(--red);
 }
 
@@ -525,7 +818,15 @@ menu {
 
   .controls {
     grid-template-areas:
-      "arm" "stop" "manual" "test" "language" "mcp" "meters";
+      "arm" "stop" "language" "mcp";
+  }
+
+  #steps {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  #steps li:not(:last-child)::after {
+    display: none;
   }
 
   .core {

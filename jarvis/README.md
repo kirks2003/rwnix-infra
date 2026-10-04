@@ -1,6 +1,6 @@
 # Jarvis web assistant
 
-First-version browser Jarvis for Chrome desktop and Android Chrome.
+Multi-user browser Jarvis for Chrome desktop and Android Chrome.
 
 ## What it does
 
@@ -8,15 +8,17 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 - **Animation preview** buttons switch the core and waveform between every pipeline animation (Standby, Wake, Recording, Transcribing, Thinking, Speaking, Error) without arming; they are disabled while a session runs, so the live pipeline always owns the core.
 - Uses self-hosted Whisper wake probes for the phrase `Hey Rocky`; browser speech recognition is not used for wake or prompt STT.
 - Captures mono PCM continuously with an `AudioWorklet` while armed. Overlapping voice probes are encoded as complete WAV files, without gaps while Whisper responds.
-- Probes fire on the trailing edge of speech, about 350 ms after the talker stops, rather than on a fixed interval. A window that ends mid-word comes back from Whisper empty, which used to cost a whole probe cycle before the wake phrase was heard. If speech runs on without pausing, a probe is sent anyway once the burst reaches 3 s; that cap counts speech, not wall time, so leading silence cannot trip it mid-word.
+- Probes fire on the trailing edge of speech, about 350 ms after the talker stops, rather than on a fixed interval. A window that ends mid-word comes back from Whisper empty, which used to cost a whole probe cycle before the wake phrase was heard. Settled probes overlap the previous window by 2 s so a phrase crossing the boundary is not lost. If speech runs on without pausing, a probe is sent anyway once the burst reaches 3 s; that cap counts speech, not wall time, so leading silence cannot trip it mid-word. A forced probe covers everything since the last probe, so on a microphone that never settles a short wake phrase cannot fall into the gap between probes.
 - After wake detection, waits for the utterance to finish and sends its complete audio to Whisper. This preserves commands spoken immediately after "Hey Rocky". A wake word alone opens a separate command window with an audible beep.
 - Sends audio to one or more self-hosted Whisper endpoints through the backend, so the browser never needs cross-origin access to Whisper.
 - Sends the recognized prompt to an OpenAI-compatible self-hosted brain through the backend, so API keys never reach the browser.
 - Speaks the answer with the selected voice and writes both prompt and answer on the page. **Browser voice** uses `speechSynthesis`; **HAL 9000** uses a self-hosted neural TTS backend through the server proxy.
 - Shows a live circular waveform ring around the core: 60 spectrum bars read from a tap on the existing Web Audio graphs (microphone while listening, the shaped HAL output while speaking) with fast-attack/slow-release smoothing and a white flash on hot bars. Stages without a tappable source (browser `speechSynthesis`, Whisper/brain waiting) show deterministic synthetic motion, and the reactor's glow and size follow the overall level.
-- **Test signal** (armed only) injects a short peep into the live capture path: the level readout and waveform react and the trailing-edge probe fires on the tone, so the Live log shows the whole capture-to-Whisper round trip without anyone speaking. **Wake test** synthesizes the current wake word plus "What time is it?" with the configured TTS backend and injects that audio into the capture path, running the full pipeline hands-free (English only, needs a TTS backend). Both buttons are disabled unless a microphone session is running.
-- **MCP web search** toggle (per browser, like the wake word): when on, every `/api/chat` request carries `websearch: true` and the backend runs the `mcp/websearch.mjs` Model Context Protocol server (stdio, `web_search` tool; DuckDuckGo with a Wikipedia fallback, no API key) and hands the top results to the brain as context for that one prompt. A failed search degrades to a normal answer and is reported in the backend logs (`websearch_success` / `websearch_failure` / `websearch_skipped`). Needs outbound internet from the backend container. The brain's system prompt also carries the toggle state per request, so it knows when web search is on or off and answers capability questions ("can you search the web?", "is the MCP server available?") about the feature instead of denying it.
+- **One switch per MCP server** in the controls row (per browser, like the wake word): the backend advertises its MCP servers in `/api/config` (`mcpServers`), the UI builds one on/off switch for each, and every `/api/chat` request carries the enabled set as `mcp: { id: true }`. Today that is the **Web search** switch: when on, the backend runs the `mcp/websearch.mjs` Model Context Protocol server (stdio, `web_search` tool; DuckDuckGo with a Wikipedia fallback, no API key) and hands the top results to the brain as context for that one prompt. A failed search degrades to a normal answer and is reported in the backend logs (`websearch_success` / `websearch_failure` / `websearch_skipped`). Needs outbound internet from the backend container. The brain's system prompt also carries each server's state per request, so it knows when web search is on or off and answers capability questions ("can you search the web?", "is the MCP server available?") about the feature instead of denying it.
+- **Stop the answer by voice.** While an answer is being spoken, a parallel wake watch probes the microphone on a trailing edge (800 ms of silence, longer than the TTS clause gaps so it does not fire mid-answer). Saying the wake word plus a stop word ("stop", "stopp", "halt", "still", "quiet", "enough", "genug", "das reicht", ...) cuts the speech immediately; the Live log says so. Any other command heard while speaking ("Rocky, what time is it?") cuts the speech and starts a new brain round trip with it.
+- **Text-only mode.** The **Speak / Text only** switch in the voice settings turns spoken answers off: the answer is written to the Answer panel and the TTS step is marked skipped. The wake pipeline itself keeps running; the setting is saved per browser.
 - Spoken output is plain language only: before any TTS request or `speechSynthesis` utterance, markdown, links, code markers, URLs and special signs are stripped (`textForSpeech` in `public/voice.js`). The printed Answer panel keeps the brain's text verbatim.
+- **Multi-user login**: the shell opens on a sign-in form (users from `USERS`, default `Mila,Roman`; each user's password is their own name). A successful login sets an HttpOnly session cookie; every `/api/*` route (except login/logout/health) requires it and answers 401 otherwise, which the UI turns back into the login screen. Each user's prompt history is kept on the server **per account**, so Mila and Roman have completely separate prompt caches (shared across that user's own tabs) with no connection between users. Sign out from the hero or just close the tab (sessions live 7 days, in memory only).
 
 ## Browser limitations
 
@@ -24,9 +26,9 @@ First-version browser Jarvis for Chrome desktop and Android Chrome.
 
 Keep the HTTPS page in the foreground. Hiding it explicitly stops the microphone, speech output and pending requests; return and click **Arm Jarvis** again. Microphone denial or interrupted capture is shown as an error. Wake response time includes a roughly two-second probe interval plus Whisper latency. This consumes server inference capacity while armed; an on-device wake engine would be a future alternative, not a feature of this build.
 
-The reactor and active pipeline step follow the actual operation, not independent display timers. STT endpoint, request ID and attempt metadata appear **only in the Live log**, not in the heading. Only one pipeline runs per tab. **Stop** invalidates all callbacks, aborts requests, releases tracks and cancels TTS; **Manual prompt** is available only when disarmed.
+The reactor and active pipeline step follow the actual operation, not independent display timers. The hero heading next to the animation shows the stage name and a short caption about what is running — never endpoint URLs, host names, payload sizes or request IDs. Those appear **in the Live log and the Pipeline panel's status line only**; an error's detail (for example the failing Whisper host) stays there too, and the hero just says "Something went wrong. See the Live log for details." Only one pipeline runs per tab. **Stop** invalidates all callbacks, aborts requests, releases tracks and cancels TTS; **typing a prompt directly in the Prompt panel** (Send) is available only when disarmed.
 
-Layout: the **Prompt/Answer** panel sits above the mic-level controls, the **MCP web search** switch sits on its own row one below the main controls row, and the **Live log** is a full-width panel at the very bottom of the page.
+Layout: the **Prompt/Answer** panels sit at the top (each tall enough to hold a full answer, and the Prompt panel carries the direct prompt input). A **Panels off/on** switch below them hides or shows everything underneath — refused while a session runs, because the Stop button lives in the hidden area. Under the switch: the **Mic level** and **Silence** meters are each their own full-width panel (with a live value readout; the Silence meter fills live during wake listening, so speaking the wake word is visible), the **Pipeline** panel sits directly below the Mic level panel, and the main controls row (Arm/Stop, language switch and the per-server **MCP** switches) comes after them. The **Live log** is a full-width panel at the very bottom of the page.
 
 Set **Your wake word** and click **Apply wake word** to override the server default (`Hey Rocky`) for your browser. Applying stops any active session; click **Arm Jarvis** again. The setting is saved in local storage per browser profile and website origin (the NBG and VIE URLs have separate settings), not shared with other users. Use 1-60 characters: words/numbers, spaces, hyphens or apostrophes. If storage is blocked, the UI explicitly reports that the change applies only until reload.
 
@@ -40,9 +42,12 @@ Pick **Answer voice** in the UI; the choice is saved in local storage per browse
 
 **Speaking speed** is a slider from 0.60x to 1.60x, also saved per browser. It is a multiplier on the chosen voice's own pace, so 1.00x is the voice as designed; it scales the `speed` sent to the TTS engine and the `speechSynthesis` rate alike, clamped to the 0.5-2.0 both accept.
 
+**Speak / Text only** (in the same settings block) turns spoken answers off: the answer is written to the Answer panel as text only and the pipeline's TTS step is marked skipped. The microphone and wake listening keep running. Saved per browser; while off, the voice select and speed slider are disabled.
+
 - **Browser voice** — unchanged `speechSynthesis` behaviour, one utterance per answer, no backend needed.
 - **HAL 9000** — the answer is split into clauses on sentence punctuation. Each clause is synthesized by the TTS endpoints in `TTS_ENDPOINTS` (requested at `speed` 0.8), then played through a Web Audio chain that band-limits it to roughly 95-3800 Hz, lifts 220 Hz, compresses it flat and adds a short room tail, with a 420 ms pause between clauses. The next clause is fetched while the current one plays.
 - **Character profiles** (Commander, Android, Wizard, Newscaster) — delivery styles rather than clones of specific people. Each is a distinct pace/pitch/clause-pause shape (see `voiceProfiles` in `public/voice.js`), and the backend maps each profile to its own Kokoro voice (`profileVoices` in `server.js`: Commander `bm_daniel`, Android `bm_lewis`, Wizard `bm_fable`, Newscaster `am_michael`; HAL 9000 stays `bm_george`). The timbre comes from the self-hosted Kokoro model, so these are "in the style of" an archetype, not recordings of any real actor. Without a TTS backend they fall back to `speechSynthesis` at their delivery shape.
+- **Named male/female voices** — Heart, Nicole and Sarah (female; Kokoro `af_heart`, `af_nicole`, `af_sarah`) and Adam, Eric and Liam (male; Kokoro `am_adam`, `am_eric`, `am_liam`). The Answer-voice select is grouped Basic / Character voices / Female voices / Male voices, so switching gender is a two-level choice and the stored value is still the flat profile id. Each named voice carries its own delivery shape and a browser-voice fallback that matches its gender (the `speechSynthesis` picker boosts voices of the profile's gender and penalizes the other; German mode picks a female German voice for female profiles and a male one by default).
 
 `TTS_ENDPOINTS` must speak the OpenAI `/v1/audio/speech` protocol. The deployed backend is the `speaches` container on gpu-1, which serves both `/v1/audio/speech` (Kokoro) and `/v1/audio/transcriptions` (Whisper large-v3) behind one API key — see `DEPLOYMENT.md`. Kokoro-FastAPI and openedai-speech (which can front Piper) are drop-in alternatives. The browser only talks to `/api/speak` on this backend, so `TTS_API_KEY` stays on the host.
 
@@ -54,13 +59,23 @@ With `TTS_ENDPOINTS` empty, HAL 9000 is still selectable but degrades to `speech
 
 ## Language switch (English / Deutsch)
 
-The **Language** toggle in the top controls row (a single sliding switch next to Arm Jarvis / Stop / Manual prompt) sets the spoken language for the whole pipeline at once, per browser (saved in local storage, like the wake word). **English is the default** when a browser has not saved a choice, regardless of the server's `WHISPER_LANGUAGE`:
+The **Language** toggle in the controls row (a single sliding switch next to Arm Jarvis / Stop) sets the spoken language for the whole pipeline at once, per browser (saved in local storage, like the wake word). **English is the default** when a browser has not saved a choice, regardless of the server's `WHISPER_LANGUAGE`:
 
 - **Whisper** — each probe and command request sends the language to the STT endpoint (`/api/transcribe?language=de`); the server default is `WHISPER_LANGUAGE`.
 - **Brain** — each `/api/chat` request carries the language and the backend appends a `Language override: answer in …` directive to the system prompt, which wins over a hardcoded language in `BRAIN_SYSTEM_PROMPT`.
 - **Spoken output** — English keeps the selected profile's behaviour (neural TTS first). **German uses the browser voice with a German voice** (male preferred when the browser has one), because the self-hosted Kokoro engine on gpu-1 ships English voices only. The live log says so when it kicks in.
 
 The switch applies live from the next request and does not stop a running session; an answer already being spoken finishes in its original language.
+
+## Login (multi-user)
+
+The app opens on a sign-in form. Users come from the `USERS` environment variable (comma-separated, default `Mila,Roman`); **each user's password is their own name** — Mila signs in with username `Mila` and password `Mila`, Roman with `Roman`/`Roman`. User names are matched case-insensitively; the password must equal the name.
+
+- A successful login creates an in-memory server session (random 256-bit token) and sets it as an `HttpOnly; SameSite=Lax` cookie (`Secure` when the request arrives through an HTTPS front). Sessions live 7 days and die with a server restart, like all prompt history.
+- **Every `/api/*` route requires the cookie** (except `/api/login`, `/api/logout` and the public `/api/health` used by the container healthcheck) and answers `401` otherwise. The UI treats the 401 on `/api/config` as "show the login screen", so no API data ever reaches a signed-out tab.
+- **Per-user prompt caches**: the conversation history behind the brain is keyed by the authenticated account, not by a browser tab. Every tab signed in as Mila shares Mila's last-10-messages cache; Roman's cache is a different entry the server never mixes with it. There is no route or payload by which one user can read or influence the other's session — the client-sent session id is ignored.
+- Five failed logins from one address lock it out for 15 minutes (429).
+- **Sign out** (hero, next to "Signed in as …") stops any running session and deletes the server session; the cookie is cleared in the browser.
 
 ## Troubleshooting
 
@@ -100,6 +115,7 @@ Copy `.env.example` to `.env` on the Docker host and set:
 ```env
 PORT=8094
 PUBLIC_BASE_PATH=/
+USERS=Mila,Roman
 WAKE_PHRASE=Hey Rocky
 SILENCE_MS=1500
 WHISPER_ENDPOINTS=https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions
@@ -115,6 +131,8 @@ TTS_MODEL=speaches-ai/Kokoro-82M-v1.0-ONNX
 TTS_VOICE=bm_george
 TTS_API_KEY=
 ```
+
+`USERS` lists the login accounts (comma-separated); each one signs in with its own name as the password (see Login (multi-user)).
 
 Multiple Whisper endpoints are comma-separated and are tried round-robin with failover.
 `WHISPER_API_KEY` and `TTS_API_KEY` are sent as bearer tokens to the voice services and never reach the browser; leave them empty for a no-auth endpoint.
@@ -138,16 +156,25 @@ The compose file binds `192.168.54.111:8094` for vm104. Live STT and TTS use the
 
 ## Regression tests
 
-Requires Node 20+ (20.3+ for `AbortSignal.any`) and Chromium's system libraries:
+Requires Node 20+ (20.3+ for `AbortSignal.any`) and Chromium's system libraries.
+The browser builds themselves download for any user, but on a minimal Debian 12
+container Chromium fails to launch with `libglib-2.0.so.0: cannot open shared
+object file` — the ~20 shared libraries it links against (glib, nss, atk, cairo,
+cups, gbm, alsa, pango, the X11/xcb set, xkbcommon) must be installed **as
+root**:
 
 ```bash
 npm ci
 npm test
-npx playwright install --with-deps --no-shell chromium
+sudo npx playwright install --with-deps --no-shell chromium
 npm run test:browser
 ```
 
-Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality. `tests/voice.test.mjs` covers clause splitting, character-profile delivery, HAL playback sequencing, the German browser-voice picker and the plain-language TTS sanitizer against Web Audio stubs; `tests/visualizer.test.mjs` covers the waveform ring geometry, spectrum mapping and smoothing; `tests/mcp.test.mjs` covers the MCP web-search server's protocol (initialize, tools/list, tools/call) without touching the network; actual playback is covered by the Chromium tests.
+If `--with-deps` is unavailable, the Debian 12 (bookworm) package list is:
+`libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 libgbm1 libasound2 libpango-1.0-0 libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxcb1 libxkbcommon0`.
+Verify with `ldd ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome | grep "not found"` — it must print nothing.
+
+Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality. Because the fixture microphone keeps playing a tone, tests that let the answer speak for real (self-hosted TTS or the TTS watchdog) cap the wake phrase at the first two transcribe calls — the speech wake-watch probes the mic while speaking and would otherwise interrupt the speech under test. `tests/voice.test.mjs` covers clause splitting, character-profile delivery, HAL playback sequencing, the German browser-voice picker, the voice stop-command matcher and the plain-language TTS sanitizer against Web Audio stubs; `tests/visualizer.test.mjs` covers the waveform ring geometry, spectrum mapping and smoothing; `tests/mcp.test.mjs` covers the MCP web-search server's protocol (initialize, tools/list, tools/call) without touching the network; actual playback is covered by the Chromium tests.
 
 `wake probes end in silence rather than cutting a word in half` is a property test: it
 asserts every uploaded probe window has a near-silent tail, which is what keeps the
