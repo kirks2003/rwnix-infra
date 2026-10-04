@@ -52,7 +52,7 @@ Findings while exposing the service:
 - Personal wake override: the UI's **Your wake word** field persists locally per browser/origin. Apply aborts the active session; re-arm to use the new word. It does not change `.env` or other users' defaults.
 - Wake engine: self-hosted Whisper probes from continuous browser AudioWorklet PCM capture, triggered on the trailing edge of speech (~350 ms after the talker stops, 3 s speech cap). Measured against the gpu-1 service with four isolated "Rocky" utterances: the old fixed-interval trigger cut two of eight probe windows mid-word and returned empty for them; the trailing-edge trigger recognized all six of its probes and detected the phrase about 0.9 s sooner.
 - Command recording: complete mono WAV snapshots; capture continues during Whisper latency
-- Auto-stop: `1500 ms` continuous silence
+- Auto-stop: `1500 ms` continuous silence (server default `SILENCE_MS`; the UI's Silence stop slider overrides it per browser, 100 ms-5 s, live)
 - STT: backend proxy to `WHISPER_ENDPOINTS`
 - Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
 - Output: the selected answer voice plus prompt/result text in the UI
@@ -819,3 +819,60 @@ Verified against the running container on `192.168.54.111:8094`:
   its name`); a real-microphone "stop" while the HAL voice is mid-answer is
   the user-facing check. A hard refresh (Ctrl+Shift+R) is needed in browsers
   holding the old UI.
+
+## 2026-10-04: silence stop slider (100 ms-5 s, live) and bounded step retries (max 3)
+
+Two requested behaviours shipped together:
+
+1. **Silence stop slider.** A **Silence stop** range input (100-5000 ms, 50 ms
+   steps) in the Mic level panel sets the command silence stop. The server
+   default `SILENCE_MS` (1500 ms) is only the initial value; the value is
+   saved per browser (`jarvis.silenceMs` local storage, like the wake word)
+   and applies **live** — the VAD in `waitForCommandEnd` reads the current
+   value on every 100 ms tick, so dragging the slider mid-recording changes
+   when the pending command is submitted. The silence bar scale, the vad
+   step name and the status-line countdown follow the slider.
+2. **Bounded step retries.** `withStepRetries(session, label, run)` in
+   `public/app.js` retries a failed pipeline step up to 3 times, 1 s apart,
+   with the material already captured, instead of returning to wake
+   listening and making the user speak the input again. Covered steps:
+   wake-probe transcription, command transcription (the audio window is
+   still in the 45 s capture buffer), the brain request (prompt captured),
+   and the speech output (answer text known). Aborts (Stop, tab hidden)
+   propagate immediately; after all 3 attempts the error reaches the
+   pipeline's usual red error stage and backoff. The Live log records each
+   attempt (`<step> failed (attempt N/3): …; retrying in 1000 ms`) and the
+   pipeline status line shows the pending retry.
+
+Rolled out to vm104 from the worktree with the file-copy +
+`docker compose up -d --build` procedure. Backup first:
+`jarvis-code.bak-20261004_165059.tgz` under `/home/ubuntu/docker/`
+(code only; `.env` untouched, verified absent from the tarball). Files
+copied: `public/index.html`, `public/style.css`, `public/app.js`,
+`tests/pipeline.browser.mjs`, `README.md`, `DEPLOYMENT.md`.
+
+Verification (worktree): unit suite 60/60; Chromium suite 29/29 (2 opt-in
+live tests skipped), including the new tests `the silence slider adjusts
+the live stop delay and persists per browser` (default 250 ms ends the
+command at the fixture's 2.8 s pause; 5 s does not; dropping to 250 ms
+mid-recording submits the pending command at the next pause without
+re-arm; value survives reload), `a failed brain request is retried with
+the captured prompt`, `a failed speech output is retried and still speaks
+the answer`, `an exhausted Whisper retry is a visible error, then recovers
+sequentially` and `a transient Whisper failure recovers on the bounded
+retry without an error stage`.
+
+Verified against the running container on `192.168.54.111:8094`:
+
+- Container `healthy`, `/api/health` ok (`whisperEndpoints: 1`,
+  `brainConfigured: true`, `ttsEndpoints: 1`).
+- Served `app.js` / `index.html` / `style.css` md5 match the source
+  (`8002e5c3…`, `d92da8f3…`, `466a28a9…`); the served HTML carries the
+  `silenceDelay` slider and the served `app.js` carries
+  `withStepRetries`.
+- The slider and the retry loop are browser-side; the user-facing checks
+  are dragging the Silence stop slider while armed (the silence bar and
+  "Stop after …" step name follow) and a transient Whisper/brain blip
+  retrying without an error stage. A hard refresh (Ctrl+Shift+R) is needed
+  in browsers holding the old UI; a saved `jarvis.silenceMs` from the old
+  UI does not exist, so everyone starts from the 1500 ms server default.

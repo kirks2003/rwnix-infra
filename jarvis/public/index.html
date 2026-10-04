@@ -78,7 +78,14 @@
             <span id="silenceValue" class="meter-value">0 ms</span>
           </div>
           <progress id="silenceLevel" max="1500" value="0"></progress>
-          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it. The green silence bar shows time since the last voice: while wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the 1.5 s stop point.</p>
+          <label for="silenceDelay">Silence stop <output id="silenceDelayValue">1.5 s</output></label>
+          <div class="wake-word-controls">
+            <input id="silenceDelay" type="range" min="100" max="5000" step="50" value="1500"
+                   aria-describedby="silenceDelayHelp silenceDelayStatus" disabled>
+          </div>
+          <p id="silenceDelayHelp">How long the microphone must stay quiet before a recorded command is sent to Whisper. Adjusts live, even mid-recording. Saved in this browser only.</p>
+          <p id="silenceDelayStatus" role="status">Loading silence settings.</p>
+          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it. The green silence bar shows time since the last voice: while wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the configured silence stop point.</p>
         </section>
 
         <section class="panel pipeline-panel">

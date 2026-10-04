@@ -368,6 +368,29 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+.meter-panel label {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+#silenceDelay {
+  flex: 1 1 220px;
+  min-width: 0;
+  accent-color: var(--green);
+}
+
+#silenceDelayValue {
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+}
+
+#silenceDelayHelp, #silenceDelayStatus {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .stage-preview {
   display: grid;
   gap: 10px;
