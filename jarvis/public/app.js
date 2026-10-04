@@ -563,7 +563,7 @@ async function answer(session, prompt) {
   const speech = new AbortController();
   session.speech = speech;
   try {
-    const followUp = await speak(session, result.answer, speech.signal);
+    const followUp = await speak(session, result.answer, speech);
     check(session);
     if (followUp === null) {
       mark("tts", "done");
@@ -585,13 +585,13 @@ async function answer(session, prompt) {
   }
 }
 
-async function speak(session, text, speechSignal) {
+async function speak(session, text, speech) {
   const profile = voiceProfiles[voiceId];
   // The printed answer stays verbatim; only the speaker gets plain language
   // without special signs.
   const spoken = textForSpeech(text);
-  const signal = AbortSignal.any([session.signal, speechSignal]);
-  const watch = watchForVoiceCommand(session, signal, speechSignal);
+  const signal = AbortSignal.any([session.signal, speech.signal]);
+  const watch = watchForVoiceCommand(session, signal, speech);
   try {
     if (language === "de") {
       // The self-hosted engine (Kokoro) has no German voices, so German is
@@ -641,7 +641,9 @@ async function speak(session, text, speechSignal) {
 // non-empty command after it, aborts the speech with `speechStopped` and keeps
 // the command. Probe failures are swallowed: a bad probe must not kill the
 // answer.
-function watchForVoiceCommand(session, signal, speechSignal) {
+// `speech` is the per-answer AbortController (answer()), so the watch can
+// abort it with the speechStopped reason; its signal feeds the composite.
+function watchForVoiceCommand(session, signal, speech) {
   let command = null;
   let watching = true;
   // The manual-prompt flow has no microphone, so the watch is a no-op there.
@@ -677,7 +679,7 @@ function watchForVoiceCommand(session, signal, speechSignal) {
         if (detected && detected.trim()) {
           command = detected;
           log("wake", `Wake phrase heard while speaking: ${JSON.stringify(result.text || "")}`);
-          speechSignal.abort(speechStopped);
+          speech.abort(speechStopped);
           return;
         }
       } catch (error) {
