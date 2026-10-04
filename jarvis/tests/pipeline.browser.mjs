@@ -267,6 +267,30 @@ test("MCP web-search toggle is saved, restored and sent with brain requests", { 
   assert.deepEqual(calls.mcp, { websearch: true });
 });
 
+test("manual prompt returns the pipeline icons to waiting after the answer speaks", { timeout: 20000 }, async (t) => {
+  // The disarmed manual flow skips the audio steps and completes brain + tts.
+  // When it auto-stops, no step may keep its done (green) or skipped
+  // highlight: every icon must reset to waiting like a fresh idle pipeline.
+  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  await page.click("#stopButton");
+  // page.fill is unstable in minimal containers (see the wake-word tests);
+  // set the value directly.
+  await page.evaluate((value) => {
+    const input = document.getElementById("manualPrompt");
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, "What time is it?");
+  await page.click("#sendManualButton");
+  await page.waitForFunction(() => window.savedUtterances.length >= 1, null, { timeout: 15000 });
+  // The manual-prompt flow stops itself, so the Stop button is disabled.
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
+    null, { timeout: 15000 });
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  const classes = await page.evaluate(() =>
+    [...document.querySelectorAll("#steps li")].map((item) => item.className));
+  assert.deepEqual(classes, ["", "", "", "", "", ""]);
+});
+
 test("microphone denial leaves an actionable error and enabled Arm button", async (t) => {
   const { page, calls } = await setup(t, async () => ({ text: "" }), { denied: true });
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped after error");

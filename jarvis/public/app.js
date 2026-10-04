@@ -328,6 +328,9 @@ function stop(message = "Jarvis is disarmed.") {
   el.silenceValue.textContent = "0 ms";
   visualizer.resetLevel();
   el.levelReadout.textContent = "LEVEL 0%";
+  // A disarmed pipeline has no running session, so every step returns to
+  // waiting instead of keeping its last done/skipped/error highlight.
+  resetSteps();
   stage("standby", "Stopped", message);
 }
 
