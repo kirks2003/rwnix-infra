@@ -57,6 +57,16 @@ before(async () => {
     if (mode === "failure") {
       res.writeHead(503).end('{"error":"unavailable"}');
     } else if (req.url.endsWith("chat/completions")) {
+      if (mode === "graph-ingest") {
+        // The brain answer and the post-turn extraction call both hit this
+        // endpoint; the extraction one carries the EXTRACT_SYSTEM_PROMPT.
+        const body = JSON.parse(received.toString("utf8") || "{}");
+        const isExtraction = String(body.messages?.[0]?.content || "").includes("knowledge-graph entities");
+        res.end(isExtraction
+          ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\",\\"common\\":false},{\\"name\\":\\"Lego\\",\\"type\\":\\"thing\\",\\"common\\":true}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Lego\\",\\"type\\":\\"LIKES\\"}]}"}}]}'
+          : '{"choices":[{"message":{"content":"Noted: Lego."}}]}');
+        return;
+      }
       res.end(mode === "empty-answer"
         ? '{"choices":[{"message":{"content":null},"finish_reason":"length"}]}'
         : '{"choices":[{"message":{"content":"Hello"}}]}');
@@ -208,6 +218,29 @@ test("chat accepts the per-server mcp flag map, ignores unknown ids and defaults
   // the MCP state test below).
   await ask({ prompt: "Hello", sessionId: "mcp-absent" });
   assert.match(brainPrompt(), /Web search \(MCP web-search server\) is OFF/);
+});
+
+test("finished chat turns are ingested into the knowledge graph", async (t) => {
+  mode = "graph-ingest";
+  t.after(() => { mode = "success"; });
+  // The global backend runs without a graph store; GRAPH_MEMORY=1 swaps in
+  // the in-memory graph so the ingest path is verifiable end to end.
+  const graphBackend = await startBackend({ GRAPH_MEMORY: "1" });
+  t.after(async () => { graphBackend.process.kill(); await once(graphBackend.process, "exit"); });
+  const chat = await auth(graphBackend.origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "I like Lego." }),
+  });
+  assert.equal(chat.status, 200);
+  // Ingestion is fire-and-forget: poll until the upsert has landed.
+  let sub = { nodes: [], edges: [] };
+  for (let i = 0; i < 40; i += 1) {
+    sub = await (await auth(graphBackend.origin, "/api/graph/subgraph")).json();
+    if ((sub.edges || []).some((edge) => edge.type === "LIKES")) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.ok(sub.nodes.some((node) => node.name === "Lego" && node.type === "thing"), JSON.stringify(sub.nodes));
+  assert.ok(sub.edges.some((edge) => edge.type === "LIKES"), JSON.stringify(sub.edges));
 });
 
 test("the brain answers as the wake word's name, per request", async () => {
