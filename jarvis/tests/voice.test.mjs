@@ -58,7 +58,8 @@ test("the HAL profile prefers a deep English voice over a default female one", (
 
 test("named male and female profiles exist with matching Kokoro voices", () => {
   for (const [id, gender, ttsVoice] of [
-    ["heart", "female", "af_heart"], ["nicole", "female", "af_nicole"], ["sarah", "female", "af_sarah"],
+    ["heart", "female", "af_heart"], ["bella", "female", "af_bella"],
+    ["nicole", "female", "af_nicole"], ["sarah", "female", "af_sarah"],
     ["adam", "male", "am_adam"], ["eric", "male", "am_eric"], ["liam", "male", "am_liam"],
   ]) {
     assert.equal(voiceProfiles[id].gender, gender, id);
