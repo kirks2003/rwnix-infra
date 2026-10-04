@@ -48,8 +48,22 @@ after(async () => {
   if (temp) await rm(temp, { recursive: true, force: true });
 });
 
-async function setup(t, transcribe, options = {}) {
-  const page = await browser.newPage();
+async function launchWithFixture(t, path) {
+  // A second browser whose fake microphone plays a custom fixture, for tests
+  // that need specific loudness patterns (echo plus user burst) in the
+  // capture buffer. The shared browser's 4 s loop tone is uniform and can
+  // never produce one.
+  const instance = await chromium.launch({
+    channel: "chromium", headless: true,
+    args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+      `--use-file-for-fake-audio-capture=${path}`],
+  });
+  t.after(() => instance.close());
+  return instance;
+}
+
+async function setup(t, transcribe, options = {}, pageBrowser = browser) {
+  const page = await pageBrowser.newPage();
   t.after(() => page.close());
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -268,6 +282,48 @@ test("a bare stop word without the wake phrase cuts a speaking answer", { timeou
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Wake listening",
     null, { timeout: 10000 });
   await page.click("#stopButton");
+});
+
+test("a stop word inside the echoed window cuts a speaking answer on a loud user burst", { timeout: 45000 }, async (t) => {
+  // The speaker echo puts the answer's own words into the probe window, so the
+  // transcript is the echo plus the stop word, never a bare "stop". The
+  // fixture plays a 0.2 s loud burst (the user) against a quieter 1.2 s tone
+  // (the echo) per 6 s loop, and the slowed brain starts the speaking phase
+  // mid-loop: the watch's settled probe covers the last 2 s, so its window
+  // carries the burst as a clear minority of voice blocks; the loud-burst
+  // gate opens and the containment match cuts the speech before the TTS
+  // watchdog without a second brain round trip. (The inverse — an echoed stop word in a window without a
+  // user burst — is covered by the unit tests for hasLoudBurst and
+  // isPostSpeechStop; the fake capture's audio processing decays a steady
+  // echo tone below the voice threshold, so it cannot hold such a window.)
+  const rate = 48000;
+  const fixturePath = join(temp, "echo-burst-microphone.wav");
+  const loop = new AudioBufferWindow(rate, 6);
+  const samples = new Float32Array(rate * 6);
+  for (let i = 0; i < samples.length; i++) {
+    const inLoop = (i / rate) % 6;
+    const amplitude = inLoop < 0.2 ? 0.3 : inLoop < 1.4 ? 0.035 : 0;
+    samples[i] = amplitude * Math.sin(i * Math.PI * 2 * 440 / rate);
+  }
+  loop.push(samples);
+  await writeFile(fixturePath, Buffer.from(await loop.wav(0).arrayBuffer()));
+  const instance = await launchWithFixture(t, fixturePath);
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : n === 3 ? "Der Regen bleibt bis morgen. Stopp" : "",
+  }), {
+    hangTTS: true,
+    chat: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      return { answer: "Done.", requestId: "brain-test" };
+    },
+  }, instance);
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech stopped by voice command"),
+    null, { timeout: 30000 });
+  const log = await page.textContent("#log");
+  assert.match(log, /Stop word heard while speaking: "Der Regen bleibt bis morgen\. Stopp"/);
+  assert.match(log, /Speech stopped by voice command "stopp"/);
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["What time is it?"], "the stop word must not start a brain round trip");
 });
 
 test("a stop command right after the spoken answer is not sent to the brain", { timeout: 30000 }, async (t) => {

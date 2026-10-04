@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AudioBufferWindow, delay, wakeCommand, normalizeWakePhrase } from "../public/audio.js";
+import { AudioBufferWindow, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst } from "../public/audio.js";
 
 test("Whisper punctuation and case do not prevent wake detection", () => {
   assert.equal(wakeCommand("Hey, Jarvis! What's the time?", "hey jarvis"), "What's the time?");
@@ -71,4 +71,41 @@ test("Stop cancels waits immediately", async () => {
   const waiting = delay(60000, controller.signal);
   controller.abort();
   await assert.rejects(waiting, { name: "AbortError" });
+});
+
+function tone(rate, seconds, amplitude) {
+  const length = Math.round(rate * seconds);
+  const block = new Float32Array(length);
+  for (let i = 0; i < length; i++) block[i] = amplitude * Math.sin(i * Math.PI * 2 * 440 / rate);
+  return block;
+}
+
+test("a loud user burst is found against a quieter echo, uniform windows are not", () => {
+  const rate = 16000;
+  // 3 s of quiet echo, a 0.5 s loud burst (the user saying "stopp"), 2 s echo.
+  const mixed = new AudioBufferWindow(rate, 10);
+  mixed.push(tone(rate, 3, 0.035));
+  mixed.push(tone(rate, 0.5, 0.25));
+  mixed.push(tone(rate, 2, 0.035));
+  assert.equal(hasLoudBurst(mixed.samples, 0, mixed.end, rate), true);
+  // Pure echo: no block stands out from the rest.
+  const echo = new AudioBufferWindow(rate, 10);
+  echo.push(tone(rate, 5, 0.035));
+  assert.equal(hasLoudBurst(echo.samples, 0, echo.end, rate), false);
+  // The user speaking the whole window at one level: no burst either.
+  const uniform = new AudioBufferWindow(rate, 10);
+  uniform.push(tone(rate, 3, 0.2));
+  assert.equal(hasLoudBurst(uniform.samples, 0, uniform.end, rate), false);
+  // A 0.1 s blip is too short to be a spoken word.
+  const blip = new AudioBufferWindow(rate, 10);
+  blip.push(tone(rate, 2, 0.035));
+  blip.push(tone(rate, 0.1, 0.25));
+  blip.push(tone(rate, 2, 0.035));
+  assert.equal(hasLoudBurst(blip.samples, 0, blip.end, rate), false);
+  // Sub-threshold noise never counts as voice at all.
+  const noise = new AudioBufferWindow(rate, 10);
+  noise.push(tone(rate, 5, 0.005));
+  assert.equal(hasLoudBurst(noise.samples, 0, noise.end, rate), false);
+  // A window too short to judge is rejected, not a false positive.
+  assert.equal(hasLoudBurst(mixed.samples, 0, rate * 0.3, rate), false);
 });

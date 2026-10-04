@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, isPostSpeechStop, STOP_COMMANDS } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop, STOP_COMMANDS } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -217,6 +217,34 @@ test("a stop command right after the spoken answer stays out of the brain", () =
   assert.equal(isPostSpeechStop("stop", 1000, 11000, 10000), false, "outside the window");
   assert.equal(isPostSpeechStop("stop", 0, 5000, 10000), false, "no speech has ended");
   assert.equal(isPostSpeechStop("what time is it?", 1000, 5000, 10000), false, "not a stop command");
+});
+
+test("the stop word is found inside an echoed transcript, not inside longer words", () => {
+  assert.equal(stopCommandIn("Stopp."), "stopp");
+  assert.equal(stopCommandIn("Der Regen bleibt bis morgen. Stopp"), "stopp");
+  assert.equal(stopCommandIn("Hör auf bitte!"), "hör auf");
+  assert.equal(stopCommandIn("Lass das, danke."), "lass das");
+  assert.equal(stopCommandIn("Das reicht, danke"), "das reicht");
+  // Word boundaries: the stop word must stand alone, not inside another word.
+  assert.equal(stopCommandIn("Die Stoppuhr läuft weiter"), null);
+  assert.equal(stopCommandIn("Halten Sie die Tür"), null);
+  assert.equal(stopCommandIn("genugsam ist genug"), "genug");
+  assert.equal(stopCommandIn(""), null);
+  assert.equal(stopCommandIn(null), null);
+});
+
+test("trailing stop words are only accepted at the very end of the text", () => {
+  assert.equal(stopCommandIn("Der Regen bleibt bis morgen. Stopp", { trailing: true }), "stopp");
+  assert.equal(stopCommandIn("Stopp", { trailing: true }), "stopp");
+  assert.equal(stopCommandIn("Genug, was ist das Wetter?", { trailing: true }), null);
+  assert.equal(stopCommandIn("Genug", { trailing: true }), "genug");
+});
+
+test("an echoed stop right after the spoken answer needs a user burst in the window", () => {
+  assert.equal(isPostSpeechStop("Regen bis morgen. Stopp", 1000, 9999, 10000), false, "pure echo cannot self-trigger");
+  assert.equal(isPostSpeechStop("Regen bis morgen. Stopp", 1000, 9999, 10000, { userBurst: true }), true, "user burst unlocks the match");
+  assert.equal(isPostSpeechStop("Genug, was ist das Wetter?", 1000, 9999, 10000, { userBurst: true }), false, "the stop word must end the utterance");
+  assert.equal(isPostSpeechStop("Regen bis morgen. Stopp", 1000, 11000, 10000, { userBurst: true }), false, "outside the window");
 });
 
 test("the speaker gets plain language without markdown or special signs", () => {
