@@ -186,6 +186,37 @@ test("missing TTS onend cancels speech before the next wake", { timeout: 30000 }
   assert.equal(await page.textContent("#stageTitle"), "Stopped");
 });
 
+test("wake word plus stop cuts a speaking answer before it finishes", { timeout: 30000 }, async (t) => {
+  // The answer is left hanging (hangTTS), so the speech wake-watch is the
+  // only thing that can end it: it probes the fixture tone, hears the stop
+  // command and must cut the speech without a second brain round trip.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : "Rocky stop",
+  }), { hangTTS: true });
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech stopped by voice command"),
+    null, { timeout: 20000 });
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  // The hung utterance was cancelled by the cut, not left to the TTS watchdog.
+  assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Wake listening",
+    null, { timeout: 10000 });
+  await page.click("#stopButton");
+});
+
+test("a stop command right after the spoken answer is not sent to the brain", { timeout: 30000 }, async (t) => {
+  // The answer speaks and finishes on its own (25 ms mock). The next wake
+  // cycle then hears "Rocky stop"; inside the post-speech window it must be
+  // treated as a speech stop, not as a prompt for the brain.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : "Rocky stop",
+  }));
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("after the spoken answer"),
+    null, { timeout: 20000 });
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  assert.equal(await page.textContent("#stageTitle"), "Wake listening");
+  await page.click("#stopButton");
+});
+
 test("wake-only response waits for new speech, then transcribes the command", { timeout: 30000 }, async (t) => {
   const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky." : "What time is it?" }));
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Speak after the beep");

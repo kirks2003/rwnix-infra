@@ -73,7 +73,12 @@
             <span id="micLevelValue" class="meter-value">0%</span>
           </div>
           <progress id="micLevel" max="100" value="0"></progress>
-          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it.</p>
+          <div class="meter-head">
+            <h2>Silence</h2>
+            <span id="silenceValue" class="meter-value">0 ms</span>
+          </div>
+          <progress id="silenceLevel" max="1500" value="0"></progress>
+          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it. The green silence bar shows time since the last voice: while wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the 1.5 s stop point.</p>
         </section>
 
         <section class="panel pipeline-panel">
@@ -113,15 +118,6 @@
               <span class="step-state">waiting</span>
             </li>
           </ol>
-        </section>
-
-        <section class="panel meter-panel meter-panel-silence">
-          <div class="meter-head">
-            <h2>Silence</h2>
-            <span id="silenceValue" class="meter-value">0 ms</span>
-          </div>
-          <progress id="silenceLevel" max="1500" value="0"></progress>
-          <p class="meter-help">Time since the last voice. While wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the 1.5 s stop point.</p>
         </section>
 
         <section class="controls">

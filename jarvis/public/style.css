@@ -303,13 +303,9 @@ h2 {
 }
 
 .controls {
-  /* Row 1 holds Arm/Stop and the language switch; the one switch per MCP
-     server sits on its own row one below, centered. */
-  grid-template-columns: max-content max-content max-content;
-  grid-template-rows: auto auto;
-  grid-template-areas:
-    "arm stop language"
-    "mcp mcp mcp";
+  /* One row: Arm/Stop, the language switch and the per-MCP-server switches. */
+  grid-template-columns: max-content max-content max-content minmax(0, 1fr);
+  grid-template-areas: "arm stop language mcp";
   align-items: center;
   padding: 16px;
   border: 1px solid rgba(66, 217, 255, 0.18);
@@ -362,8 +358,7 @@ button:disabled {
   height: 14px;
 }
 
-.meter-panel-silence .meter-value,
-.meter-panel-silence progress {
+#silenceLevel {
   accent-color: var(--green);
 }
 
@@ -419,7 +414,8 @@ button:disabled {
   grid-area: mcp;
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-end;
+  align-items: center;
   gap: 12px 18px;
 }
 

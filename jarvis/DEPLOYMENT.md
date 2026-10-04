@@ -415,8 +415,11 @@ Verified against the running container on `192.168.54.111:8094`:
 
 ## Multi-user login + per-user prompt cache (2026-10-04)
 
-Change set (not yet deployed — roll out with the usual file-copy +
-`docker compose up -d --build` procedure, back up first):
+Change set, rolled out to vm104 on 2026-10-04 with the usual file-copy +
+`docker compose up -d --build` procedure. Backup first:
+`jarvis-code.bak-20261004_100943.tgz` under `/home/ubuntu/docker/`
+(code only; `.env` untouched — `USERS` is not set there, so the default
+`Mila,Roman` applies):
 
 - `USERS` env var (default `Mila,Roman`) defines the login accounts; each
   user's password is their own name. `server.js` validates with
@@ -448,5 +451,68 @@ Change set (not yet deployed — roll out with the usual file-copy +
 
 Note for the live gateways: Authelia + Basic Auth stay in front as before;
 the app-level login is the second layer and is what separates the Mila and
-Roman prompt caches. After deploy, add `USERS=Mila,Roman` (or the desired
-list) to `.env` on the host — it is already in `.env.example`.
+Roman prompt caches. `USERS` is not in the host `.env` — the default
+`Mila,Roman` applies; add it explicitly (with the desired list) if that
+ever changes — it is already in `.env.example`.
+
+Verified on 2026-10-04 against the running container:
+
+- Login `Roman`/`Roman` (field `username`) → 200 with session cookie;
+  `/api/config` reports `user: "Roman"`; `/api/chat` answered through the
+  brain.
+- `/api/health` ok: `whisperEndpoints: 1`, `brainConfigured: true`,
+  `ttsEndpoints: 1`; container `healthy` after the rebuild.
+- Both public gateways still answer `401` (Basic Auth layer) from outside;
+  the served HTML is the new build (new panel markup present in the page
+  source). Browsers holding a cached copy of the old UI need a hard
+  refresh (Ctrl+Shift+R); the login panel appears on first load of the
+  new version.
+
+## 2026-10-04: UI round, layout pass and voice-stop hardening
+
+PR #11 (commit 1908a57) shipped the 2026-10-04 UI round on top of the
+multi-user login: taller Prompt/Answer panels with the direct prompt input,
+the Panels off/on switch, short hero captions only, one switch per MCP
+server, removed test-signal/wake-test buttons, the Speak / Text-only switch,
+the live Silence meter and the original stop-by-voice watch. It was rolled
+out to vm104 on 2026-10-04 with the usual file-copy + `docker compose up -d
+--build` procedure (backup `jarvis-code.bak-20261004_100943.tgz` under
+`/home/ubuntu/docker/`; `.env` untouched).
+
+Layout pass on 2026-10-04 (same day, user request): the Silence meter moved
+into the Mic level panel (one panel, two bars — mic cyan, silence green) and
+the controls panel became a single row (Arm Jarvis, Stop, language switch,
+per-MCP-server switches; mobile still stacks). Rolled out with the same
+procedure (backup `jarvis-code.bak-20261004_101553.tgz`). Unit suite 49/49;
+served HTML/CSS verified on the running container.
+
+Voice-stop hardening on 2026-10-04 (user request: "Hey <wake word>, stop"
+must cut the speaking answer in the browser):
+
+- The speech wake-watch now uses the wake probes' trailing-edge trigger
+  (350 ms of silence after voice, plus the 3 s forced speech cap) instead of
+  a single 800 ms settle. The old settle could never fire for the default
+  browser voice, whose clause pauses are 150-450 ms, so a stop command said
+  while the answer spoke was neither cut nor recognized. A stop command is
+  now cut within at most 3 s of being said for every voice profile; the
+  watch only interrupts on a non-empty command, so the assistant's own text
+  mentioning the wake phrase without a command cannot cut the speech.
+- Post-speech stop window: `speak()` timestamps `session.lastSpeechEndedAt`;
+  the wake pipeline checks `isPostSpeechStop` (new in `public/voice.js`) and
+  treats a stop command heard up to 10 s after the answer's speech finished
+  as a speech stop — beep, Live log line, back to wake listening, no brain
+  round trip. This is the fallback for the case where the audio already
+  ended (or the browser-voice gaps never let the watch probe in time);
+  without it, "stop" went to the brain as a normal prompt.
+
+Verification:
+
+- Unit suite 50/50 (new test: the post-speech stop window).
+- Two new Playwright browser tests: `wake word plus stop cuts a speaking
+  answer before it finishes` (hung TTS, the watch must cut it, no second
+  brain prompt, utterance cancelled) and `a stop command right after the
+  spoken answer is not sent to the brain` (natural TTS end, next cycle hears
+  "Rocky stop", stays out of the brain). They cannot run in the dev
+  container (Chromium's system libraries are missing, as before) — run
+  `npx playwright install --with-deps chromium && npm run test:browser` on a
+  proper host.

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, STOP_COMMANDS } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, isPostSpeechStop, STOP_COMMANDS } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -209,6 +209,14 @@ test("voice commands that cut spoken answers are recognized, everything else is 
   for (const command of ["", null, "hello", "what time is it?", "stop the car", "genug ist genug", "stop it now"]) {
     assert.equal(isStopCommand(command), false, JSON.stringify(command));
   }
+});
+
+test("a stop command right after the spoken answer stays out of the brain", () => {
+  assert.equal(isPostSpeechStop("stop", 1000, 9999, 10000), true, "inside the window");
+  assert.equal(isPostSpeechStop("  STOP. ", 1000, 5000, 10000), true, "punctuation");
+  assert.equal(isPostSpeechStop("stop", 1000, 11000, 10000), false, "outside the window");
+  assert.equal(isPostSpeechStop("stop", 0, 5000, 10000), false, "no speech has ended");
+  assert.equal(isPostSpeechStop("what time is it?", 1000, 5000, 10000), false, "not a stop command");
 });
 
 test("the speaker gets plain language without markdown or special signs", () => {

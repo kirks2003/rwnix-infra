@@ -225,6 +225,14 @@ export function isStopCommand(command) {
   return STOP_COMMANDS.includes(normalized);
 }
 
+// The speech wake-watch cuts the audio while it plays; this is the fallback
+// for the wake pipeline: a stop command heard within `windowMs` after the
+// answer's speech finished (lastSpeechEndedAt, same clock as `now`) still
+// counts as a speech stop and is not sent to the brain.
+export function isPostSpeechStop(command, lastSpeechEndedAt, now, windowMs) {
+  return isStopCommand(command) && lastSpeechEndedAt > 0 && now - lastSpeechEndedAt < windowMs;
+}
+
 export const voiceSpeedRange = { min: 0.6, max: 1.6, step: 0.05, default: 1 };
 
 // The slider is a multiplier on the profile's own speed, so "1.00" always means

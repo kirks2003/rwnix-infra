@@ -1,7 +1,7 @@
 import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase } from "./audio.js";
 import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
   pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError,
-  textForSpeech, isStopCommand } from "./voice.js";
+  textForSpeech, isStopCommand, isPostSpeechStop } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
 
 const el = Object.fromEntries([
@@ -62,10 +62,14 @@ const stageCaptions = {
 const VOICE_THRESHOLD = 0.012;
 // While an answer is being spoken, a parallel watch listens for the wake
 // phrase; saying wake word + "stop" (or another command) cuts the speech.
-// The settle is longer than the main probe (350 ms) so it does not fire on
-// the short gaps between TTS clauses.
-const SPEECH_WATCH_SETTLE_MS = 800;
+// Like the wake probes it fires on the trailing edge of mic voice (350 ms
+// settle) and on the 3 s forced speech cap, so a stop command does not wait
+// longer than 3 s even when the speaker echo keeps the microphone active.
 const speechStopped = Symbol("speech stopped by voice");
+// A stop command heard within this window after an answer's speech finished
+// still counts as a speech stop: the wake pipeline is the fallback for the
+// cut the speech wake-watch could not make while the audio was playing.
+const STOP_AFTER_SPEECH_MS = 10000;
 
 const visualizer = new CoreVisualizer(el.waveform, el.core);
 visualizer.pickAnalyser = () => {
@@ -507,6 +511,14 @@ async function listen(session) {
         }
         if (!prompt) throw new Error("Whisper returned no command. Please speak after the beep.");
         mark("whisper", "done");
+        // A stop command heard shortly after a spoken answer is not a prompt
+        // for the brain; it just confirms the speech is over.
+        if (isPostSpeechStop(prompt, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS)) {
+          log("tts", `Stop command ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer; staying in wake listening.`);
+          session.mic.beep();
+          session.lastSpeechEndedAt = 0;
+          break;
+        }
         await answer(session, prompt);
         // Let the spoken answer die down, then exclude confirmation sounds from
         // the next wake window.
@@ -616,18 +628,25 @@ async function speak(session, text, speechSignal) {
     throw error;
   } finally {
     watch.stop();
+    // Timestamps the end of the spoken answer (natural or cut) so the wake
+    // pipeline can still treat a following "stop" command as a speech stop.
+    session.lastSpeechEndedAt = performance.now();
   }
 }
 
-// Parallel wake watch for the duration of the speech: on a trailing edge
-// (800 ms of silence) it transcribes the window and, if the wake phrase is in
-// there, aborts the speech with `speechStopped` and keeps the command. Probe
-// failures are swallowed: a bad probe must not kill the answer.
+// Parallel wake watch for the duration of the speech: like the wake probes it
+// fires on the trailing edge of mic voice (350 ms of silence) and, when voice
+// never settles (speaker echo plus the user talking), on the 3 s forced speech
+// cap. It transcribes the window and, if the wake phrase is in there with a
+// non-empty command after it, aborts the speech with `speechStopped` and keeps
+// the command. Probe failures are swallowed: a bad probe must not kill the
+// answer.
 function watchForVoiceCommand(session, signal, speechSignal) {
   let command = null;
   let watching = true;
   // The manual-prompt flow has no microphone, so the watch is a no-op there.
   let probedThrough = session.mic ? session.mic.buffer.end : 0;
+  let speechFrom = null;
   const runner = (async () => {
     if (!session.mic) return;
     while (watching && !signal.aborted) {
@@ -635,17 +654,27 @@ function watchForVoiceCommand(session, signal, speechSignal) {
       if (!watching || signal.aborted) return;
       const buffer = session.mic.buffer;
       if (buffer.lastVoice <= probedThrough) continue;
-      const silentMs = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000;
-      if (silentMs < SPEECH_WATCH_SETTLE_MS) continue;
+      speechFrom ??= buffer.lastVoice;
+      const settled = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000 >= 350;
+      const forced = !settled && buffer.end - speechFrom >= buffer.sampleRate * 3;
+      if (!settled && !forced) continue;
       probedThrough = buffer.end;
-      const start = Math.max(probedThrough - buffer.sampleRate * 2, buffer.end - buffer.sampleRate * 15);
+      speechFrom = null;
+      // Settled probes overlap the previous window by 2 s so a phrase crossing
+      // the boundary is not lost; a forced probe covers everything since the
+      // last probe, so a short stop command cannot fall into the gap.
+      const start = settled
+        ? Math.max(probedThrough - buffer.sampleRate * 2, buffer.end - buffer.sampleRate * 15)
+        : Math.max(probedThrough, buffer.end - buffer.sampleRate * 15);
       try {
         const blob = buffer.wav(start);
         const result = await request(session, `/api/transcribe?language=${language}`, {
           method: "POST", headers: { "content-type": blob.type }, body: blob, signal,
         });
         const detected = wakeCommand(result.text || "", config.wakePhrase);
-        if (detected !== null) {
+        // The assistant's own text may contain the wake phrase without a
+        // command after it; only a non-empty command interrupts the speech.
+        if (detected && detected.trim()) {
           command = detected;
           log("wake", `Wake phrase heard while speaking: ${JSON.stringify(result.text || "")}`);
           speechSignal.abort(speechStopped);
