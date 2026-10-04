@@ -958,3 +958,74 @@ Verified against the running container on `192.168.54.111:8094`:
   stop still does not trigger, the Live log now shows the probe transcript
   so the actual window content can be seen. A hard refresh (Ctrl+Shift+R)
   is needed in browsers holding the old UI.
+
+## 2026-10-04: Bella (af_bella) female voice
+
+New named female answer voice **Bella** backed by Kokoro `af_bella` — the
+second-highest-graded female voice in the deployed Kokoro-82M v1.0 model
+(A- per the official voice grades; `af_heart` is A). Chosen from internet
+research of popular free female TTS voices: it ships with the model already
+running on gpu-1, so no backend or model change was needed.
+
+Research finding (user request "find some popular free female voice for our
+tts", 2026-10-04):
+
+- The deployed engine is **Kokoro-82M v1.0** (Apache-2.0; ranked #1 in the
+  Hugging Face TTS Spaces Arena at release). The official per-voice grades
+  (target quality × training duration) short-list the free female voices
+  *already available on gpu-1* — exposing one is a Jarvis code-only change:
+  - en_US: `af_heart` **A** (Heart), `af_bella` **A-** (Bella, added by this
+    change), `af_nicole` B- (Nicole), `af_aoede` C+, `af_kore` C+,
+    `af_sarah` C+ (Sarah), `af_sky` C-, `af_nova` C, `af_alloy` C,
+    `af_jessica` D, `af_river` D
+  - en_GB: `bf_emma` B-, `bf_isabella` C, `bf_alice` D, `bf_lily` D
+- The `speaches` backend (MIT, 3.7k stars) also supports **Piper** models
+  with dynamic loading — e.g. `en_US-lessac-medium` (the most popular Piper
+  female), `en_US-amy-medium`, `en_GB-alba-medium`, `en_GB-cori-high`. A
+  future option with no Jarvis code change, just a new model in the gpu-1
+  container; quality below Kokoro.
+- Other popular free/open engines with female voices, **not deployed**:
+  - **Orpheus-TTS** (canopyai; Llama-3b based, open weights, popular via
+    Poe/ComfyUI) — 8 voices, female **Tara, Leah, Jess, Mia, Zoe**, with
+    phrase-level emotion tags (excited, happy, sad, angry, ...). Would need
+    a new gpu-1 service.
+  - **Chatterbox** (ResembleAI; MIT, big 2025 release) — natural female
+    voices plus zero-shot cloning from a short sample. Also a new service.
+  - **XTTS-v2** (Coqui) — cloning, but non-commercial license.
+- Cloud-only, not self-hostable (listed for completeness, not candidates):
+  ElevenLabs free tier (Rachel, Emma, ... — the most popular female voices
+  overall), Azure Jenny/Sara.
+- Decision: expose `af_bella` — the best unexposed female in the model
+  already running, zero infra work. Next-cheapest step if more variety is
+  wanted: a Piper female voice via the same speaches container; then
+  Orpheus-TTS (Tara/Mia) as a second TTS backend.
+
+- `public/voice.js`: new `bella` profile (Female voices group, delivery
+  shape rate 0.95 / pitch 1.0 / 220 ms clause pause / 280-char chunks /
+  speed 0.98, browser-voice fallback hints matching the other female
+  profiles).
+- `server.js`: `profileVoices.bella = "af_bella"`.
+- `tests/voice.test.mjs` and `tests/server.test.mjs` extend the
+  profile→voice mapping assertions; `README.md` lists the voice.
+
+Tests: unit 64/64; Chromium 30/30 (2 opt-in live skips).
+
+Rolled out to vm104 with the file-copy + `docker compose up -d --build`
+procedure. Backup first: `jarvis-code.bak-20261004_184242.tgz` under
+`/home/ubuntu/docker/` (code only; `.env` untouched — the only `*env*`
+entry in the tarball is `.env.example`). Files copied:
+`public/voice.js`, `server.js`, `tests/voice.test.mjs`,
+`tests/server.test.mjs`, `README.md`, `DEPLOYMENT.md`.
+
+Verified against the running container on `192.168.54.111:8094`:
+
+- Container `healthy`, `/api/health` ok (`whisperEndpoints: 1`,
+  `brainConfigured: true`, `ttsEndpoints: 1`).
+- In-container `server.js` / `public/voice.js` / `public/app.js` md5 match
+  the worktree; the served `/voice.js` and `/app.js` md5 match the source
+  and the served `/voice.js` carries `af_bella`.
+- Live round trip: login, then `POST /api/speak` with
+  `{"profile":"bella"}` answered 200 with a 24 kHz mono WAV from the gpu-1
+  Kokoro engine.
+- Browsers holding the old UI need a hard refresh (Ctrl+Shift+R) to see
+  the new voice in the Answer-voice select.

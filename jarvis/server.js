@@ -133,6 +133,7 @@ const profileVoices = {
   wizard: "bm_fable",
   newscaster: "am_michael",
   heart: "af_heart",
+  bella: "af_bella",
   nicole: "af_nicole",
   sarah: "af_sarah",
   adam: "am_adam",
