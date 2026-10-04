@@ -463,15 +463,18 @@ async function waitForCommandEnd(session, start, needsSpeech) {
       if (silentMs >= config.silenceMs) {
         mark("record", "done");
         mark("vad", "done");
-        return;
+        return true;
       }
     } else if (performance.now() - started > 10000) {
-      throw new Error("No command heard within 10 seconds. Returning to wake listening.");
+      // No voice after the beep: let the caller return to wake listening
+      // instead of surfacing a dead-end pipeline error.
+      return false;
     }
   }
   log("record", "15-second command limit reached; transcribing captured speech");
   mark("record", "done");
   mark("vad", "done");
+  return true;
 }
 
 // After an answer, let the assistant's own voice (speaker echo) die down
@@ -532,16 +535,32 @@ async function listen(session) {
         await waitForCommandEnd(session, start, false);
         const fullText = await transcribe(session, start, "command");
         let prompt = wakeCommand(fullText, config.wakePhrase);
+        // The probe heard the wake phrase but the completed-utterance
+        // transcription came back empty (the VAD filter drops short bursts):
+        // treat it as a wake-only utterance and ask for the command after the
+        // beep instead of failing the pipeline.
+        if (prompt === null && !fullText.trim()) {
+          log("wake", "Completed utterance came back empty; waiting for the command after the beep.");
+          prompt = "";
+        }
         if (prompt === null) throw new Error("Whisper did not confirm the wake phrase in the completed utterance.");
         if (!prompt) {
           const commandStart = buffer.end;
-          await waitForCommandEnd(session, commandStart, true);
-          const commandText = await transcribe(session, commandStart, "command");
-          prompt = wakeCommand(commandText, config.wakePhrase) ?? commandText.trim();
+          const commandCaptured = await waitForCommandEnd(session, commandStart, true);
+          if (commandCaptured) {
+            const commandText = await transcribe(session, commandStart, "command");
+            prompt = wakeCommand(commandText, config.wakePhrase) ?? commandText.trim();
+          }
         } else {
           session.mic.beep();
         }
-        if (!prompt) throw new Error("Whisper returned no command. Please speak after the beep.");
+        if (!prompt) {
+          // The command was spoken with the wake word and transcription lost
+          // it, or nothing came after the beep: a red error here is a dead
+          // end, so return to wake listening and let the next attempt retry.
+          log("wake", "No command captured with or after the wake word; returning to wake listening.");
+          break;
+        }
         mark("whisper", "done");
         // A stop command heard shortly after a spoken answer is not a prompt
         // for the brain; it just confirms the speech is over.
