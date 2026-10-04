@@ -2,10 +2,15 @@
 // prefers the self-hosted neural TTS backend and shapes it into a slow, deadpan,
 // band-limited delivery. Without a configured TTS backend, hal9000 degrades to
 // speechSynthesis with HAL's cadence but none of the filtering.
+// group drives the optgroups of the Answer-voice select ("basic",
+// "character", "female", "male"); gender steers the browser-voice fallback;
+// ttsVoice is the Kokoro voice id the backend maps the profile to (see
+// profileVoices in server.js).
 export const voiceProfiles = {
   browser: {
     id: "browser",
     label: "Browser voice",
+    group: "basic",
     neural: false,
     rate: 1,
     pitch: 1,
@@ -15,7 +20,10 @@ export const voiceProfiles = {
   hal9000: {
     id: "hal9000",
     label: "HAL 9000",
+    group: "character",
+    gender: "male",
     neural: true,
+    ttsVoice: "bm_george",
     // speechSynthesis fallback: slow and flat, the only HAL traits it can reproduce.
     rate: 0.88,
     pitch: 0.5,
@@ -36,7 +44,10 @@ export const voiceProfiles = {
   commander: {
     id: "commander",
     label: "Commander",
+    group: "character",
+    gender: "male",
     neural: true,
+    ttsVoice: "bm_daniel",
     rate: 0.85,
     pitch: 0.45,
     pauseMs: 400,
@@ -49,7 +60,10 @@ export const voiceProfiles = {
   android: {
     id: "android",
     label: "Android",
+    group: "character",
+    gender: "male",
     neural: true,
+    ttsVoice: "bm_lewis",
     rate: 0.95,
     pitch: 0.8,
     pauseMs: 250,
@@ -62,7 +76,10 @@ export const voiceProfiles = {
   wizard: {
     id: "wizard",
     label: "Wizard",
+    group: "character",
+    gender: "male",
     neural: true,
+    ttsVoice: "bm_fable",
     rate: 0.82,
     pitch: 0.7,
     pauseMs: 450,
@@ -75,7 +92,10 @@ export const voiceProfiles = {
   newscaster: {
     id: "newscaster",
     label: "Newscaster",
+    group: "character",
+    gender: "male",
     neural: true,
+    ttsVoice: "am_michael",
     rate: 1.12,
     pitch: 1.0,
     pauseMs: 150,
@@ -85,6 +105,104 @@ export const voiceProfiles = {
     voiceHints: ["michael", "ryan", "adam"],
     langHints: ["en-US", "en-GB", "en"],
   },
+  // Named male/female voices: one Kokoro voice each, with a delivery shape and
+  // browser-voice hints of the matching gender for the no-backend fallback.
+  heart: {
+    id: "heart",
+    label: "Heart (female)",
+    group: "female",
+    gender: "female",
+    neural: true,
+    ttsVoice: "af_heart",
+    rate: 1.05,
+    pitch: 1.05,
+    pauseMs: 180,
+    chunkChars: 280,
+    speed: 1.05,
+    playbackRate: 1.0,
+    voiceHints: ["samantha", "zira", "jenny", "aria", "sonia", "victoria", "karen", "amelie", "female"],
+    langHints: ["en-US", "en-GB", "en"],
+  },
+  nicole: {
+    id: "nicole",
+    label: "Nicole (female)",
+    group: "female",
+    gender: "female",
+    neural: true,
+    ttsVoice: "af_nicole",
+    rate: 1.1,
+    pitch: 1.0,
+    pauseMs: 150,
+    chunkChars: 300,
+    speed: 1.1,
+    playbackRate: 1.0,
+    voiceHints: ["nicole", "samantha", "zira", "jenny", "aria", "victoria", "female"],
+    langHints: ["en-US", "en-GB", "en"],
+  },
+  sarah: {
+    id: "sarah",
+    label: "Sarah (female)",
+    group: "female",
+    gender: "female",
+    neural: true,
+    ttsVoice: "af_sarah",
+    rate: 1.0,
+    pitch: 1.1,
+    pauseMs: 200,
+    chunkChars: 260,
+    speed: 1.0,
+    playbackRate: 1.0,
+    voiceHints: ["sarah", "samantha", "zira", "aria", "sonia", "victoria", "female"],
+    langHints: ["en-US", "en-GB", "en"],
+  },
+  adam: {
+    id: "adam",
+    label: "Adam (male)",
+    group: "male",
+    gender: "male",
+    neural: true,
+    ttsVoice: "am_adam",
+    rate: 1.0,
+    pitch: 0.9,
+    pauseMs: 180,
+    chunkChars: 280,
+    speed: 1.0,
+    playbackRate: 1.0,
+    voiceHints: ["adam", "david", "mark", "george", "daniel", "male"],
+    langHints: ["en-US", "en-GB", "en"],
+  },
+  eric: {
+    id: "eric",
+    label: "Eric (male)",
+    group: "male",
+    gender: "male",
+    neural: true,
+    ttsVoice: "am_eric",
+    rate: 1.05,
+    pitch: 0.85,
+    pauseMs: 160,
+    chunkChars: 280,
+    speed: 1.05,
+    playbackRate: 1.0,
+    voiceHints: ["eric", "david", "mark", "george", "alex", "male"],
+    langHints: ["en-US", "en-GB", "en"],
+  },
+  liam: {
+    id: "liam",
+    label: "Liam (male)",
+    group: "male",
+    gender: "male",
+    neural: true,
+    ttsVoice: "am_liam",
+    rate: 0.95,
+    pitch: 0.95,
+    pauseMs: 220,
+    chunkChars: 260,
+    speed: 0.98,
+    playbackRate: 0.98,
+    voiceHints: ["liam", "daniel", "george", "james", "matthew", "male"],
+    langHints: ["en-GB", "en-US", "en"],
+  },
 };
 
 export function normalizeVoiceId(value) {
@@ -93,6 +211,18 @@ export function normalizeVoiceId(value) {
     throw new Error(`Unknown voice "${id}". Use one of: ${Object.keys(voiceProfiles).join(", ")}.`);
   }
   return id;
+}
+
+// While an answer is being spoken, saying the wake phrase plus one of these
+// words cuts the speech instead of starting a brain round trip.
+export const STOP_COMMANDS = [
+  "stop", "stopp", "stop it", "halt", "still", "quiet", "enough",
+  "genug", "genugsam", "das reicht", "reicht", "schweig", "schweigen",
+];
+
+export function isStopCommand(command) {
+  const normalized = String(command || "").trim().toLowerCase().replace(/[.!?,;:]+$/g, "");
+  return STOP_COMMANDS.includes(normalized);
 }
 
 export const voiceSpeedRange = { min: 0.6, max: 1.6, step: 0.05, default: 1 };
@@ -136,16 +266,29 @@ export function splitForSpeech(text, maxChars = 240) {
   return chunks;
 }
 
+// Browser voices rarely advertise a gender in their name, but the common ones
+// do ("Microsoft Zira", "Google US English (female)", ...). The scoring below
+// follows the profile's gender: the matching gender is boosted, the other is
+// pushed out, so a female profile never lands on a male voice and vice versa.
+const MALE_VOICE_RE = /\bmale\b|david\b|mark\b|george|daniel|james|matthew|thomas|fred\b|guy\b|alex\b|eric\b|adam\b|ryan\b/i;
+const FEMALE_VOICE_RE = /female|woman|zira|samantha|jenny|aria|sonia|victoria|karen|amelie|heera|moira|tessa|libby|susan|catherine|joanna|ivy\b/i;
+
 export function pickSynthesisVoice(voices, profile) {
   if (!profile.voiceHints) return null;
   const candidates = voices.filter((voice) => profile.langHints.some((lang) => voice.lang?.startsWith(lang.slice(0, 2))));
+  const female = profile.gender === "female";
   const scored = (candidates.length ? candidates : voices).map((voice) => {
     const name = `${voice.name} ${voice.voiceURI || ""}`.toLowerCase();
     let score = 0;
     const hint = profile.voiceHints.findIndex((value) => name.includes(value));
     if (hint >= 0) score += 100 - hint;
-    if (/\bmale\b/.test(name)) score += 40;
-    if (/female|woman|zira|samantha|karen|victoria/.test(name)) score -= 60;
+    if (female) {
+      if (FEMALE_VOICE_RE.test(name)) score += 40;
+      if (MALE_VOICE_RE.test(name)) score -= 60;
+    } else {
+      if (MALE_VOICE_RE.test(name)) score += 40;
+      if (FEMALE_VOICE_RE.test(name)) score -= 60;
+    }
     score += Math.max(0, profile.langHints.length - profile.langHints.findIndex((lang) => voice.lang === lang)) * 5;
     return { voice, score };
   }).filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score);
@@ -153,20 +296,26 @@ export function pickSynthesisVoice(voices, profile) {
 }
 
 // German mode: the self-hosted TTS engine is English-only, so German answers
-// are spoken by the browser voice. Prefer a male German voice by name, and
+// are spoken by the browser voice. Prefer a German voice of the profile's
+// gender by name (male by default, keeping the original behaviour), and
 // always fall back to *some* German voice rather than the browser default,
 // which may be English.
-export const germanSynthesisHints = ["conrad", "michael", "thomas", "markus", "stefan"];
+export const germanSynthesisHints = {
+  male: ["conrad", "michael", "thomas", "markus", "stefan"],
+  female: ["anna", "katrin", "vivienne", "hanna", "marlene", "female"],
+};
 
-export function pickGermanSynthesisVoice(voices) {
+export function pickGermanSynthesisVoice(voices, gender = "male") {
+  const female = gender === "female";
+  const hints = female ? germanSynthesisHints.female : germanSynthesisHints.male;
   const german = (voices || []).filter((voice) => (voice.lang || "").toLowerCase().startsWith("de"));
   if (!german.length) return null;
   const scored = german.map((voice) => {
     const name = `${voice.name} ${voice.voiceURI || ""}`.toLowerCase();
     let score = 0;
-    const hint = germanSynthesisHints.findIndex((value) => name.includes(value));
+    const hint = hints.findIndex((value) => name.includes(value));
     if (hint >= 0) score += 100 - hint;
-    if (/\bmale\b|conrad|michael|thomas|markus|stefan/.test(name)) score += 40;
+    if (female ? FEMALE_VOICE_RE.test(name) : /\bmale\b|conrad|michael|thomas|markus|stefan/.test(name)) score += 40;
     return { voice, score };
   }).sort((a, b) => b.score - a.score);
   return scored[0].voice;

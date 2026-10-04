@@ -14,6 +14,31 @@ let receivedAuth;
 let disconnected;
 let received;
 let logs = "";
+
+// Session cookies per origin (the backend gates every /api route on login).
+const authCookies = new Map();
+
+// Log in as `user` (the password is the username) and cache the session
+// cookie for that origin.
+async function login(target, user = "Mila") {
+  const response = await fetch(`${target}/api/login`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: user, password: user }),
+  });
+  assert.equal(response.status, 200, `login as ${user} should succeed`);
+  const session = response.headers.getSetCookie().find((cookie) => cookie.startsWith("jarvis_session="));
+  assert.ok(session, "login should issue a jarvis_session cookie");
+  const cookie = session.split(";")[0];
+  authCookies.set(target, cookie);
+  return cookie;
+}
+
+// fetch() with the cached session cookie (logged in on demand); pass an
+// explicit cookie to talk as a second user on the same origin.
+async function auth(target, pathname, init = {}, cookie) {
+  const value = cookie || (await login(target));
+  return fetch(`${target}${pathname}`, { ...init, headers: { cookie: value, ...(init.headers || {}) } });
+}
 before(async () => {
   upstream = createServer(async (req, res) => {
     receivedAuth = req.headers.authorization || "";
@@ -77,7 +102,7 @@ async function wavBuffer(seconds) {
 async function transcribe(signal, path = "/api/transcribe") {
   const audio = new AudioBufferWindow(16000, 1);
   audio.push(new Float32Array(16000).fill(0.2));
-  return fetch(`${origin}${path}`, {
+  return auth(origin, path, {
     method: "POST", headers: { "content-type": "audio/wav" }, body: audio.wav(0), signal,
   });
 }
@@ -151,7 +176,7 @@ test("the language switch reaches Whisper per request and invalid codes fall bac
 
 test("the language switch overrides the brain answer language", async () => {
   mode = "success";
-  const ask = (language) => fetch(`${origin}/api/chat`, {
+  const ask = (language) => auth(origin, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ prompt: "Hello", sessionId: `lang-${language}`, language }),
   });
@@ -159,6 +184,25 @@ test("the language switch overrides the brain answer language", async () => {
   assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Language override: answer in German \(Deutsch\)/);
   assert.equal((await ask("en")).status, 200);
   assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Language override: answer in English/);
+});
+
+test("chat accepts the per-server mcp flag map, ignores unknown ids and defaults to off", async () => {
+  mode = "success";
+  const config = await (await auth(origin, "/api/config")).json();
+  assert.deepEqual(config.mcpServers, [{ id: "websearch", label: "Web search" }]);
+  const ask = (body) => auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const brainPrompt = () => JSON.parse(received.toString("utf8")).messages[0].content;
+  await ask({ prompt: "Hello", sessionId: "mcp-map-off", mcp: { websearch: false } });
+  assert.match(brainPrompt(), /Web search \(MCP web-search server\) is OFF/);
+  await ask({ prompt: "Hello", sessionId: "mcp-map-unknown", mcp: { other: true } });
+  assert.match(brainPrompt(), /Web search \(MCP web-search server\) is OFF/);
+  // No flags at all means everything off (the legacy boolean is covered by
+  // the MCP state test below).
+  await ask({ prompt: "Hello", sessionId: "mcp-absent" });
+  assert.match(brainPrompt(), /Web search \(MCP web-search server\) is OFF/);
 });
 
 test("the brain system prompt reports the MCP web-search state per request", async (t) => {
@@ -186,7 +230,7 @@ test("the brain system prompt reports the MCP web-search state per request", asy
   const failScript = join(dir, "mcp-fail.mjs");
   await writeFile(okScript, mock(false));
   await writeFile(failScript, mock(true));
-  const ask = (backendOrigin, body) => fetch(`${backendOrigin}/api/chat`, {
+  const ask = (backendOrigin, body) => auth(backendOrigin, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -214,7 +258,7 @@ test("the brain system prompt reports the MCP web-search state per request", asy
 
 test("the TTS proxy rejects non-English languages instead of mispronouncing", async () => {
   mode = "success";
-  const response = await fetch(`${origin}/api/speak`, {
+  const response = await auth(origin, "/api/speak", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "Hallo", language: "de" }),
   });
@@ -226,7 +270,7 @@ test("the TTS proxy rejects non-English languages instead of mispronouncing", as
 
 test("brain proxy still returns the upstream answer", async () => {
   mode = "success";
-  const response = await fetch(`${origin}/api/chat`, {
+  const response = await auth(origin, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ prompt: "Hello", sessionId: "test" }),
   });
@@ -236,10 +280,10 @@ test("brain proxy still returns the upstream answer", async () => {
 
 test("TTS proxy returns upstream audio and reports configuration", async () => {
   mode = "success";
-  const config = await (await fetch(`${origin}/api/config`)).json();
+  const config = await (await auth(origin, "/api/config")).json();
   assert.equal(config.ttsConfigured, true);
   assert.deepEqual(config.ttsEndpoints, [speechEndpoint]);
-  const response = await fetch(`${origin}/api/speak`, {
+  const response = await auth(origin, "/api/speak", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "I am completely operational.", profile: "hal9000", speed: 0.8 }),
   });
@@ -256,9 +300,13 @@ test("TTS proxy returns upstream audio and reports configuration", async () => {
 
 test("each character profile maps to its own Kokoro voice, unknown ones fall back", async () => {
   mode = "success";
-  const cases = { commander: "bm_daniel", android: "bm_lewis", wizard: "bm_fable", newscaster: "am_michael", hal9000: "bm_george", default: "bm_george" };
+  const cases = {
+    commander: "bm_daniel", android: "bm_lewis", wizard: "bm_fable", newscaster: "am_michael", hal9000: "bm_george",
+    heart: "af_heart", nicole: "af_nicole", sarah: "af_sarah", adam: "am_adam", eric: "am_eric", liam: "am_liam",
+    default: "bm_george",
+  };
   for (const [profile, voice] of Object.entries(cases)) {
-    const response = await fetch(`${origin}/api/speak`, {
+    const response = await auth(origin, "/api/speak", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "Hello", profile, speed: 1 }),
     });
@@ -269,13 +317,13 @@ test("each character profile maps to its own Kokoro voice, unknown ones fall bac
 
 test("TTS requests are validated and clamped before reaching the engine", async () => {
   mode = "success";
-  const empty = await fetch(`${origin}/api/speak`, {
+  const empty = await auth(origin, "/api/speak", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "   " }),
   });
   assert.equal(empty.status, 400);
   assert.equal((await empty.json()).error, "missing_text");
-  await fetch(`${origin}/api/speak`, {
+  await auth(origin, "/api/speak", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "Hello", speed: 99 }),
   });
@@ -284,7 +332,7 @@ test("TTS requests are validated and clamped before reaching the engine", async 
 
 test("TTS upstream failure is HTTP 502 with attempt details, not silent audio", async () => {
   mode = "failure";
-  const response = await fetch(`${origin}/api/speak`, {
+  const response = await auth(origin, "/api/speak", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "Hello" }),
   });
@@ -297,8 +345,8 @@ test("TTS upstream failure is HTTP 502 with attempt details, not silent audio", 
 test("without TTS endpoints the backend reports it instead of pretending to speak", async (t) => {
   const { process: child, origin: plain } = await startBackend({ TTS_ENDPOINTS: "" });
   t.after(async () => { child.kill(); await once(child, "exit"); });
-  assert.equal((await (await fetch(`${plain}/api/config`)).json()).ttsConfigured, false);
-  const response = await fetch(`${plain}/api/speak`, {
+  assert.equal((await (await auth(plain, "/api/config")).json()).ttsConfigured, false);
+  const response = await auth(plain, "/api/speak", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "Hello" }),
   });
@@ -310,9 +358,103 @@ test("upstream voice services receive their configured bearer keys", async () =>
   mode = "success";
   await transcribe();
   assert.equal(receivedAuth, "Bearer stt-secret");
-  await fetch(`${origin}/api/speak`, {
+  await auth(origin, "/api/speak", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "Hello" }),
   });
   assert.equal(receivedAuth, "Bearer tts-secret");
+});
+
+test("login issues a session cookie and rejects wrong credentials", async () => {
+  const ok = await fetch(`${origin}/api/login`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "Mila", password: "Mila" }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).user, "Mila");
+  assert.ok(ok.headers.getSetCookie().some((cookie) => cookie.startsWith("jarvis_session=")));
+  // The password is the username itself; anything else, and every user that
+  // is not in USERS at all, is rejected.
+  for (const body of [
+    { username: "Mila", password: "Roman" },
+    { username: "Roman", password: "wrong" },
+    { username: "Stranger", password: "Stranger" },
+    { username: "", password: "" },
+  ]) {
+    const bad = await fetch(`${origin}/api/login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(bad.status, 401, JSON.stringify(body));
+    await bad.json();
+  }
+});
+
+test("api routes require the session cookie; health stays public", async () => {
+  assert.equal((await fetch(`${origin}/api/config`)).status, 401);
+  for (const [pathname, body] of [
+    ["/api/chat", JSON.stringify({ prompt: "Hello" })],
+    ["/api/speak", JSON.stringify({ text: "Hello" })],
+    ["/api/transcribe", ""],
+  ]) {
+    const response = await fetch(`${origin}${pathname}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    });
+    assert.equal(response.status, 401, pathname);
+    await response.json();
+  }
+  assert.equal((await fetch(`${origin}/api/health`)).status, 200);
+});
+
+test("repeated failed logins lock the address out", async (t) => {
+  const { process: child, origin: localOrigin } = await startBackend({});
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const attempts = [];
+  for (let i = 0; i < 5; i += 1) {
+    const bad = await fetch(`${localOrigin}/api/login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "Mila", password: "nope" }),
+    });
+    attempts.push(bad.status);
+    await bad.json();
+  }
+  assert.deepEqual(attempts, [401, 401, 401, 401, 401]);
+  // The sixth attempt is locked out even with the right password.
+  const locked = await fetch(`${localOrigin}/api/login`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "Mila", password: "Mila" }),
+  });
+  assert.equal(locked.status, 429);
+  await locked.json();
+});
+
+test("logout invalidates the session cookie", async (t) => {
+  const { process: child, origin: localOrigin } = await startBackend({});
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const cookie = await login(localOrigin, "Roman");
+  assert.equal((await auth(localOrigin, "/api/config", {}, cookie)).status, 200);
+  const out = await fetch(`${localOrigin}/api/logout`, { method: "POST", headers: { cookie } });
+  assert.equal(out.status, 200);
+  assert.equal((await out.json()).user, "Roman");
+  assert.equal((await fetch(`${localOrigin}/api/config`, { headers: { cookie } })).status, 401);
+});
+
+test("each user keeps an isolated prompt history", async () => {
+  mode = "success";
+  const mila = await login(origin, "Mila");
+  const roman = await login(origin, "Roman");
+  const ask = (cookie, prompt) => auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, sessionId: "isolated" }),
+  }, cookie);
+  const brainMessages = () => JSON.parse(received.toString("utf8")).messages;
+  assert.equal((await ask(mila, "Mila secret plan")).status, 200);
+  assert.equal((await ask(roman, "Roman weather question")).status, 200);
+  const romanView = JSON.stringify(brainMessages());
+  assert.ok(!romanView.includes("Mila secret plan"), "Roman must not see Mila's history");
+  assert.ok(romanView.includes("Roman weather question"));
+  assert.equal((await ask(mila, "Mila follow up")).status, 200);
+  const milaAgain = JSON.stringify(brainMessages());
+  assert.ok(milaAgain.includes("Mila secret plan"), "Mila's own history is still hers");
+  assert.ok(!milaAgain.includes("Roman weather question"), "still no cross-user leakage");
 });

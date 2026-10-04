@@ -26,22 +26,137 @@ const config = {
   ttsModel: process.env.TTS_MODEL || "speaches-ai/Kokoro-82M-v1.0-ONNX",
   ttsVoice: process.env.TTS_VOICE || "bm_george",
   ttsApiKey: process.env.TTS_API_KEY || "",
+  // Multi-user login: comma-separated user names. Each user's password is
+  // their own name (Mila signs in with "Mila"/"Mila").
+  users: splitCsv(process.env.USERS || "Mila,Roman"),
 };
 
 let whisperCursor = 0;
 let ttsCursor = 0;
+// Per-user prompt history: authenticated username -> last 10 messages. Each
+// user's cache is fully isolated from every other user's.
 const conversations = new Map();
 
-// Per-profile Kokoro voice. All ids are in the en_GB set of Kokoro-82M-v1.0,
-// which the deployed gpu-1 model serves. Unknown profiles fall back to the
-// configured TTS_VOICE.
+// --- Login sessions ---------------------------------------------------------
+// In-memory sessions: token -> { user, createdAt }. The token travels as an
+// HttpOnly cookie; every /api route except /api/login, /api/logout and
+// /api/health requires a valid one.
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const LOGIN_LOCK_MS = 15 * 60 * 1000;
+const sessions = new Map();
+const loginAttempts = new Map(); // client address -> { failures, blockedUntil }
+
+function canonicalUser(name) {
+  const wanted = String(name || "").trim().toLowerCase();
+  for (const user of config.users) if (user.toLowerCase() === wanted) return user;
+  return null;
+}
+
+function sameSecret(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+function clientAddress(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) return forwarded.split(",")[0].trim();
+  return req.socket.remoteAddress || "unknown";
+}
+
+function sessionToken(req) {
+  const match = String(req.headers.cookie || "").match(/(?:^|;\s*)jarvis_session=([a-f0-9]{64})(?=(?:;|\s|$))/);
+  return match ? match[1] : null;
+}
+
+function sessionUser(req) {
+  const token = sessionToken(req);
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
+    if (session) sessions.delete(token);
+    return null;
+  }
+  return session.user;
+}
+
+function issueSession(user, req, res) {
+  if (sessions.size > 1000) {
+    for (const [token, session] of sessions) {
+      if (Date.now() - session.createdAt > SESSION_TTL_MS) sessions.delete(token);
+    }
+  }
+  const token = crypto.randomBytes(32).toString("hex");
+  sessions.set(token, { user, createdAt: Date.now() });
+  // Secure when the request arrived over a TLS front (the app needs HTTPS for
+  // microphone access anyway); plain LAN http stays usable.
+  const secure = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https" ? "; Secure" : "";
+  res.setHeader("set-cookie", `jarvis_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secure}`);
+}
+
+function endSession(req, res) {
+  const token = sessionToken(req);
+  if (token) sessions.delete(token);
+  res.setHeader("set-cookie", "jarvis_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+}
+
+function loginBlocked(address) {
+  const entry = loginAttempts.get(address);
+  if (!entry) return false;
+  if (entry.blockedUntil > Date.now()) return true;
+  // A past blockedUntil is an expired lockout (0 means "never blocked");
+  // drop it, but keep the failure counter while it is still accumulating.
+  if (entry.blockedUntil > 0) loginAttempts.delete(address);
+  return false;
+}
+
+function recordLoginFailure(address) {
+  const entry = loginAttempts.get(address) || { failures: 0, blockedUntil: 0 };
+  entry.failures += 1;
+  if (entry.failures >= 5) {
+    entry.failures = 0;
+    entry.blockedUntil = Date.now() + LOGIN_LOCK_MS;
+    console.log(JSON.stringify({ level: "warn", msg: "login_locked_out", address, lockMs: LOGIN_LOCK_MS }));
+  }
+  loginAttempts.set(address, entry);
+}
+
+// Per-profile Kokoro voice. Character profiles use the en_GB set of
+// Kokoro-82M-v1.0; the named male/female voices use the en_US set (am_*/af_*).
+// All of them are served by the deployed gpu-1 model. Unknown profiles fall
+// back to the configured TTS_VOICE.
 const profileVoices = {
   hal9000: "bm_george",
   commander: "bm_daniel",
   android: "bm_lewis",
   wizard: "bm_fable",
   newscaster: "am_michael",
+  heart: "af_heart",
+  nicole: "af_nicole",
+  sarah: "af_sarah",
+  adam: "am_adam",
+  eric: "am_eric",
+  liam: "am_liam",
 };
+
+// MCP servers the backend can run on demand. Each entry gets its own switch
+// in the UI; /api/chat carries the enabled set as `mcp: { id: true }` (a bare
+// `websearch` boolean from older clients is still accepted).
+const mcpServers = [
+  { id: "websearch", label: "Web search" },
+];
+
+function normalizeMcpFlags(payload) {
+  const flags = {};
+  for (const server of mcpServers) flags[server.id] = false;
+  if (payload && typeof payload.mcp === "object" && payload.mcp !== null) {
+    for (const server of mcpServers) flags[server.id] = Boolean(payload.mcp[server.id]);
+  } else if (payload && typeof payload.websearch === "boolean") {
+    flags.websearch = payload.websearch;
+  }
+  return flags;
+}
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -74,8 +189,43 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (req.method === "POST" && pathname === "/api/login") {
+      const payload = JSON.parse((await readBody(req, 4096)).toString("utf8") || "{}");
+      const username = String(payload.username || "").trim();
+      const password = String(payload.password || "");
+      const address = clientAddress(req);
+      if (loginBlocked(address)) {
+        return json(res, 429, { error: "too_many_attempts", requestId });
+      }
+      // The password is the username itself; compare it constant-time.
+      const user = canonicalUser(username);
+      if (!user || !sameSecret(password, user)) {
+        recordLoginFailure(address);
+        return json(res, 401, { error: "unauthorized", requestId });
+      }
+      loginAttempts.delete(address);
+      issueSession(user, req, res);
+      console.log(JSON.stringify({ level: "info", requestId, msg: "login_ok", user }));
+      return json(res, 200, { user, requestId });
+    }
+
+    if (req.method === "POST" && pathname === "/api/logout") {
+      const user = sessionUser(req);
+      endSession(req, res);
+      return json(res, 200, { user: user || null, requestId });
+    }
+
+    // Every other /api route requires a session; the UI treats the 401 on
+    // /api/config as "show the login form".
+    if (pathname.startsWith("/api/")) {
+      const user = sessionUser(req);
+      if (!user) return json(res, 401, { error: "unauthorized", requestId });
+      req.user = user;
+    }
+
     if (req.method === "GET" && pathname === "/api/config") {
       return json(res, 200, {
+        user: req.user,
         wakePhrase: config.wakePhrase,
         silenceMs: config.silenceMs,
         whisperEndpoints: config.whisperEndpoints.map(redactUrl),
@@ -88,6 +238,7 @@ const server = http.createServer(async (req, res) => {
         ttsConfigured: config.ttsEndpoints.length > 0,
         ttsModel: config.ttsModel,
         ttsVoice: config.ttsVoice,
+        mcpServers: mcpServers.map(({ id, label }) => ({ id, label })),
       });
     }
 
@@ -104,9 +255,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && pathname === "/api/chat") {
       const payload = JSON.parse((await readBody(req, 1024 * 1024)).toString("utf8") || "{}");
       const prompt = String(payload.prompt || "").trim();
-      const sessionId = String(payload.sessionId || "default").slice(0, 128);
       if (!prompt) return json(res, 400, { error: "missing_prompt", requestId });
-      const result = await chat(prompt, sessionId, normalizeLanguage(payload.language) || "en", requestId, controller.signal, Boolean(payload.websearch));
+      // The prompt history is keyed by the authenticated user, not by a
+      // client-chosen id: every tab of Mila shares Mila's cache and no
+      // other user can read or write it.
+      const result = await chat(prompt, req.user, normalizeLanguage(payload.language) || "en", requestId, controller.signal, normalizeMcpFlags(payload));
       return json(res, 200, result);
     }
 
@@ -491,43 +644,42 @@ function withAbort(promise, signal) {
   });
 }
 
-async function chat(prompt, sessionId, language, requestId, signal, websearch) {
+async function chat(prompt, user, language, requestId, signal, mcpFlags) {
   if (!isBrainConfigured()) {
     throw new Error("Brain endpoint/model is not configured");
   }
 
-  const history = conversations.get(sessionId) || [];
+  const history = conversations.get(user) || [];
   const now = new Date();
   // The override wins over a hardcoded answer language in BRAIN_SYSTEM_PROMPT,
   // which is how the UI language switch reaches the brain.
   const answerLanguage = language === "de" ? "German (Deutsch)" : "English";
   // Fresh per request: search results are context for this prompt only and are
-  // never stored in the per-session conversation history. The state line tells
-  // the brain whether the browser's MCP web-search toggle is on, so it does not
-  // deny the feature when it is on (it answered "No MCP server available") or
-  // claim web results when it is off.
+  // never stored in the per-session conversation history. One state line per
+  // MCP server tells the brain which of the browser's MCP switches are on, so
+  // it does not deny an enabled feature or claim results for a disabled one.
   let searchMessage = null;
-  let websearchState;
-  if (websearch) {
+  const mcpStates = [];
+  if (mcpFlags.websearch) {
     try {
       const results = await webSearch(prompt, requestId, signal);
       searchMessage = {
         role: "system",
         content: `Web search results for this prompt (use them if relevant, keep the answer short and spoken):\n${results}`,
       };
-      websearchState = "Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.";
+      mcpStates.push("Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.");
     } catch (error) {
       if (signal.aborted) throw error;
       console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_skipped", error: error.message }));
-      websearchState = "Web search (MCP web-search server) is ON, but the search for this prompt returned no results; answer from your own knowledge and do not mention the search.";
+      mcpStates.push("Web search (MCP web-search server) is ON, but the search for this prompt returned no results; answer from your own knowledge and do not mention the search.");
     }
   } else {
-    websearchState = "Web search (MCP web-search server) is OFF in the user's browser for this request, so no web results are available. If the user asks about web search or MCP, say it is switched off and can be enabled with the MCP search toggle in the UI.";
+    mcpStates.push("Web search (MCP web-search server) is OFF in the user's browser for this request, so no web results are available. If the user asks about web search or MCP, say it is switched off and can be enabled with the MCP search toggle in the UI.");
   }
   const messages = [
     {
       role: "system",
-      content: `${config.brainSystemPrompt}\n${websearchState}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
+      content: `${config.brainSystemPrompt}\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
     },
     ...(searchMessage ? [searchMessage] : []),
     ...history,
@@ -555,7 +707,7 @@ async function chat(prompt, sessionId, language, requestId, signal, websearch) {
   if (!answer) throw new Error("Brain returned no answer text");
 
   const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-10);
-  conversations.set(sessionId, nextHistory);
+  conversations.set(user, nextHistory);
   return { requestId, answer, configured: true, model: config.brainModel };
 }
 

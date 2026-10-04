@@ -412,3 +412,41 @@ Verified against the running container on `192.168.54.111:8094`:
 - Browser suite 17/22: the 3 wake-word `page.fill` tests fail identically in this container
   environment (see `README.md`), including on unmodified `main`.
 - Container `healthy` after the rebuild.
+
+## Multi-user login + per-user prompt cache (2026-10-04)
+
+Change set (not yet deployed — roll out with the usual file-copy +
+`docker compose up -d --build` procedure, back up first):
+
+- `USERS` env var (default `Mila,Roman`) defines the login accounts; each
+  user's password is their own name. `server.js` validates with
+  `timingSafeEqual`, issues a 256-bit token as an `HttpOnly; SameSite=Lax`
+  cookie (`Secure` behind the HTTPS gateways), keeps sessions in memory for
+  7 days, and locks an address out for 15 min after five failed logins.
+- Every `/api/*` route except `/api/login`, `/api/logout`, `/api/health`
+  now answers `401` without a valid session; `/api/config` additionally
+  reports the signed-in `user`. The UI shows the login panel on the 401 and
+  the whole app shell stays hidden until a config request succeeds;
+  "Signed in as …" + Sign out live in the hero.
+- The brain conversation cache (`conversations`) is keyed by the
+  authenticated account instead of the client-sent session id, so every tab
+  of one user shares that user's last-10-messages cache and no other user
+  can read or write it. The client-sent `sessionId` is now ignored.
+- New server tests: login success/wrong password/unknown user, the 401
+  gate, the lockout, logout, and a Mila/Roman history-isolation test
+  (unit suite 49/49).
+- Test environment: the dev container (Debian 12, user `kandev` uid 1000
+  without sudo) could not run `npm run test:browser` — Playwright's
+  Chromium build downloads fine, but the ~20 shared libraries it links
+  against (libglib-2.0.so.0, libnss3, libgbm1, libasound2, …) are missing
+  and installing them needs root. A Kandev task (nbg instance) was created
+  to run `npx playwright install-deps chromium` as root in that container;
+  once the libraries resolve, the full browser suite (18 tests + 2 opt-in
+  skips) should be runnable there.
+- The opt-in `candidate backend` browser test logs in first via
+  `page.request` so the shared cookie jar authenticates the page load.
+
+Note for the live gateways: Authelia + Basic Auth stay in front as before;
+the app-level login is the second layer and is what separates the Mila and
+Roman prompt caches. After deploy, add `USERS=Mila,Roman` (or the desired
+list) to `.env` on the host — it is already in `.env.example`.

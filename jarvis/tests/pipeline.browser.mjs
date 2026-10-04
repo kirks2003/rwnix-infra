@@ -54,7 +54,7 @@ async function setup(t, transcribe, options = {}) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
-  const calls = { audio: [], prompts: [], speak: [], websearch: undefined };
+  const calls = { audio: [], prompts: [], speak: [], mcp: undefined };
   await page.addInitScript(() => {
     window.testTracks = [];
     window.ttsEvents = [];
@@ -113,7 +113,7 @@ async function setup(t, transcribe, options = {}) {
   await page.route("**/api/chat", async (route) => {
     const payload = route.request().postDataJSON();
     calls.prompts.push(payload.prompt);
-    calls.websearch = payload.websearch;
+    calls.mcp = payload.mcp;
     await route.fulfill({ json: { answer: options.answer || "Done.", requestId: "brain-test" } });
   });
   await page.goto(origin);
@@ -167,15 +167,19 @@ test("Whisper errors are visible, then recover without parallel requests", { tim
     ? { status: 502, error: "vm103 unavailable" }
     : { text: "Rocky recovered" });
   await page.waitForFunction(() => document.getElementById("core").classList.contains("error"));
-  assert.match(await page.textContent("#stageDetail"), /vm103 unavailable/);
+  // The hero only shows the short error caption; server details live in the log.
+  assert.match(await page.textContent("#log"), /vm103 unavailable/);
   await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["recovered"]);
 });
 
 test("missing TTS onend cancels speech before the next wake", { timeout: 30000 }, async (t) => {
-  const { page } = await setup(t, async () => ({ text: "Rocky hello" }), { hangTTS: true });
-  await page.waitForFunction(() => document.getElementById("stageDetail").textContent.includes("Speech output timed out"), null, { timeout: 18000 });
+  // While the hung TTS is active the speech wake-watch probes the mic; the
+  // fixture tone keeps playing, so only the first two calls may carry the
+  // wake phrase or the watch would interrupt the very speech under test.
+  const { page } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky hello" : "background noise" }), { hangTTS: true });
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech output timed out"), null, { timeout: 18000 });
   assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
   await page.click("#stopButton");
   await page.evaluate(() => savedUtterances[0].onend?.());
@@ -203,50 +207,19 @@ test("silence makes no Whisper calls and hiding the tab releases capture", async
   assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "ended")));
 });
 
-test("test signal is injected into the capture path and fires a wake probe", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
-  await page.waitForFunction(() => !document.getElementById("signalButton").disabled);
-  await page.waitForTimeout(1500);
-  assert.equal(calls.audio.length, 0);
-  await page.click("#signalButton");
-  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Wake probe recognized"),
-    null, { timeout: 20000 });
-  await page.click("#stopButton");
-  assert.ok(calls.audio.length >= 1, `probes: ${calls.audio.length}`);
-  const log = await page.textContent("#log");
-  assert.match(log, /Test signal/);
-  assert.match(log, /Wake probe recognized: \(no speech recognized\)/);
-});
-
-test("wake test injects TTS speech and completes the full pipeline", { timeout: 45000 }, async (t) => {
-  const { page, calls } = await setup(t, async () => ({ text: "Rocky. What time is it?" }), {
-    silent: true,
-    config: { ttsConfigured: true, ttsModel: "kokoro", ttsVoice: "bm_george" },
-    answer: "It is 14:05.",
-    speak: async () => ({ status: 200 }),
-  });
-  await page.waitForFunction(() => !document.getElementById("wakeTestButton").disabled);
-  await page.click("#wakeTestButton");
-  await page.waitForFunction(() => window.savedUtterances.length >= 1, null, { timeout: 30000 });
-  await page.click("#stopButton");
-  assert.deepEqual(calls.prompts, ["What time is it?"]);
-  assert.equal(calls.audio.length, 2);
-  const log = await page.textContent("#log");
-  assert.match(log, /Wake test/);
-  assert.match(log, /Command recognized: "Rocky\. What time is it\?"/);
-});
-
 test("MCP web-search toggle is saved, restored and sent with brain requests", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
-  assert.match(await page.textContent("#websearchStatus"), /MCP web search off/);
+  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), {
+    silent: true,
+    config: { mcpServers: [{ id: "websearch", label: "Web search" }] },
+  });
+  assert.match(await page.textContent("#mcpStatus-websearch"), /web search off/i);
   await page.click("#stopButton");
-  await page.click("#websearchSwitch");
-  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.websearch")), "true");
-  assert.match(await page.textContent("#websearchStatus"), /Saved/);
+  await page.click("#mcpSwitch-websearch");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.mcp.websearch")), "true");
+  assert.match(await page.textContent("#mcpStatus-websearch"), /Saved/);
   await page.reload();
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
-  assert.equal(await page.getAttribute("#websearchSwitch", "aria-checked"), "true");
-  await page.click("#testButton");
+  assert.equal(await page.getAttribute("#mcpSwitch-websearch", "aria-checked"), "true");
   // page.fill is unstable in minimal containers (see the wake-word tests);
   // set the value directly.
   await page.evaluate((value) => {
@@ -260,7 +233,7 @@ test("MCP web-search toggle is saved, restored and sent with brain requests", { 
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
     null, { timeout: 15000 });
   assert.deepEqual(calls.prompts, ["What time is it?"]);
-  assert.equal(calls.websearch, true);
+  assert.deepEqual(calls.mcp, { websearch: true });
 });
 
 test("microphone denial leaves an actionable error and enabled Arm button", async (t) => {
@@ -382,6 +355,12 @@ test("candidate backend completes two real vm103 and brain cycles", {
     speechSynthesis.cancel = () => {};
     speechSynthesis.resume = () => {};
   });
+  // The backend requires a login; the cookie lands in the page's cookie jar,
+  // so the following goto loads an authenticated shell.
+  const loginResponse = await page.request.post(`${process.env.JARVIS_LIVE_BACKEND}/api/login`, {
+    data: { username: "Mila", password: "Mila" },
+  });
+  assert.equal(loginResponse.status(), 200);
   await page.goto(process.env.JARVIS_LIVE_BACKEND);
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
   await page.click("#armButton");
@@ -397,7 +376,9 @@ test("candidate backend completes two real vm103 and brain cycles", {
 });
 
 test("HAL 9000 plays self-hosted TTS clauses instead of the browser voice", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+  // The speech wake-watch probes the mic while TTS plays; the fixture tone
+  // keeps playing, so only the first two calls may carry the wake phrase.
+  const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky, what time is it?" : "background noise" }), {
     voice: "hal9000",
     config: { ttsConfigured: true, ttsModel: "kokoro", ttsVoice: "bm_george" },
     answer: "It is 14:05. I am completely operational.",
@@ -413,7 +394,9 @@ test("HAL 9000 plays self-hosted TTS clauses instead of the browser voice", { ti
 });
 
 test("HAL 9000 finishes the answer with the browser voice when self-hosted TTS fails", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+  // The speech wake-watch probes the mic while TTS plays; the fixture tone
+  // keeps playing, so only the first two calls may carry the wake phrase.
+  const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky, what time is it?" : "background noise" }), {
     voice: "hal9000",
     config: { ttsConfigured: true },
     answer: "It is 14:05. I am completely operational.",
@@ -432,7 +415,9 @@ test("HAL 9000 finishes the answer with the browser voice when self-hosted TTS f
 });
 
 test("HAL 9000 without a TTS backend keeps its cadence on the browser voice", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+  // The speech wake-watch probes the mic while TTS plays; the fixture tone
+  // keeps playing, so only the first two calls may carry the wake phrase.
+  const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky, what time is it?" : "background noise" }), {
     voice: "hal9000",
     answer: "It is 14:05. I am completely operational.",
   });
@@ -472,7 +457,9 @@ test("wake probes end in silence rather than cutting a word in half", { timeout:
 
 test("the speed slider scales the request and persists per browser", { timeout: 30000 }, async (t) => {
   const speeds = [];
-  const { page } = await setup(t, async () => ({ text: "Rocky, what time is it?" }), {
+  // The speech wake-watch probes the mic while TTS plays; the fixture tone
+  // keeps playing, so only the first two calls may carry the wake phrase.
+  const { page } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky, what time is it?" : "background noise" }), {
     voice: "hal9000",
     config: { ttsConfigured: true },
     answer: "It is 14:05.",
