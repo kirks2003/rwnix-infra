@@ -93,6 +93,28 @@ test("memory store: status, context, upsert, shared flag and neighbourhood", asy
   assert.equal(sub.nodes.find((node) => node.name === "Amelie").common, true);
 });
 
+test("memory store: the signed-in user is one node (no duplicate person, no self-KNOWS)", async () => {
+  const store = graphdb.createMemoryStore();
+  await store.upsertTurn({
+    user: "Mila",
+    // The extraction always lists the user themselves as a person entity.
+    entities: [
+      { name: "Mila", type: "person", common: false, props: {} },
+      { name: "Lego", type: "thing", common: true, props: {} },
+    ],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+  });
+  const sub = await store.subgraph({ limit: 60 });
+  assert.equal(sub.nodes.filter((node) => node.name === "Mila").length, 1, "exactly one Mila node");
+  assert.ok(sub.nodes.some((node) => node.name === "Lego" && node.type === "thing"));
+  const milaId = sub.nodes.find((node) => node.name === "Mila").id;
+  const legoId = sub.nodes.find((node) => node.name === "Lego").id;
+  // The LIKES edge goes straight from the single (user) Mila to Lego.
+  assert.ok(sub.edges.some((edge) => edge.source === milaId && edge.target === legoId && edge.type === "LIKES"));
+  assert.ok(sub.edges.some((edge) => edge.source === milaId && edge.target === legoId && edge.type === "KNOWS"));
+  assert.ok(!sub.edges.some((edge) => edge.source === edge.target), "no self-edge");
+});
+
 // --- neo4j store (mock driver) --------------------------------------------------
 
 test("neo4j store: subgraph LIMIT is an integer parameter (the JS driver sends plain numbers as floats and Neo4j rejects them)", async () => {
@@ -157,6 +179,45 @@ test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", asy
   assert.ok(calls.length >= 3, "entity MERGE, shared-knowledge and relation MERGE must all run");
   assert.ok(calls.every((cypher) => !/-\[:[A-Z_]+<-\]/.test(cypher)), JSON.stringify(calls));
   assert.ok(calls.some((cypher) => cypher.includes("(:User)-[:KNOWS]->(e:Entity)")), JSON.stringify(calls));
+});
+
+test("neo4j store: the user's own person is not MERGEd as an :Entity and user relations target the :User node", async () => {
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
+        async run(cypher, params) { calls.push({ cypher, params }); return { records: [] }; },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+  });
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [
+      { name: "Mila", type: "person", common: false, props: {} },
+      { name: "Lego", type: "thing", common: true, props: {} },
+    ],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+  });
+  const entityMerge = calls.find((call) => call.cypher.includes("MERGE (e:Entity"));
+  assert.ok(entityMerge, "expected the entity MERGE");
+  // The user's own person must not be part of the entity rows (that would
+  // create the duplicate "Mila" node the panel used to show).
+  assert.ok(!JSON.stringify(entityMerge.params.rows).includes("Mila"), JSON.stringify(entityMerge.params.rows));
+  // The LIKES relation named after the user must target their :User node.
+  const likes = calls.find((call) => call.cypher.includes("r:LIKES"));
+  assert.ok(likes, "expected the LIKES MERGE");
+  assert.ok(likes.cypher.includes("MATCH (a:User {name: $user})"), likes.cypher);
+  assert.ok(likes.cypher.includes("MATCH (b:Entity {name: row.to})"), likes.cypher);
 });
 
 // --- backend integration -------------------------------------------------------

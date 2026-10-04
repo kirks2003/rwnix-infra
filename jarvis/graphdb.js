@@ -221,11 +221,17 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
     // relations (see parseExtraction).
     async upsertTurn({ user, entities = [], relations = [] }) {
       const now = new Date().toISOString();
-      let upserted = 0;
-      if (entities.length) {
+      // The signed-in user is ONE node: their :User account doubles as the
+      // person entity, so the model's own-person entity (same name, type
+      // person) must not become a second, same-named :Entity — that is what
+      // used to render as "Mila -> Mila -> Lego".
+      const ownEntity = entities.find((entity) => entity.name === user && entity.type === "person");
+      const otherEntities = entities.filter((entity) => entity !== ownEntity);
+      await run(writeClient, "MERGE (u:User {name: $user})", { user });
+      if (otherEntities.length) {
         await run(writeClient,
           "UNWIND $rows AS row " +
-          "MERGE (u:User {name: $user}) " +
+          "MATCH (u:User {name: $user}) " +
           "MERGE (e:Entity {name: row.name, type: row.type}) " +
           "ON CREATE SET e.first_seen = row.now " +
           "SET e.last_seen = row.now, " +
@@ -233,31 +239,36 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
           "    e.common = coalesce(row.common, e.common, false) " +
           "SET e += row.props " +
           "MERGE (u)-[:KNOWS]->(e)",
-          { rows: entities.map((entity) => ({ name: entity.name, type: entity.type, common: entity.common, props: entity.props || {}, now })), user },
+          { rows: otherEntities.map((entity) => ({ name: entity.name, type: entity.type, common: entity.common, props: entity.props || {}, now })), user },
         );
-        upserted = entities.length;
         // An entity known by two or more users is shared knowledge.
         await run(writeClient,
           "MATCH (:User)-[:KNOWS]->(e:Entity) WITH e, count(*) AS knownBy " +
           "SET e.common = e.common OR knownBy >= 2",
         );
       }
-      const byType = new Map();
+      const upserted = otherEntities.length;
+      // An endpoint named after the signed-in user is their :User node; every
+      // other endpoint is an :Entity. Group relations by which endpoint is the
+      // user so the MERGE targets the right labels (the parser already drops
+      // from === to, so a user->user relation cannot occur).
+      const buckets = new Map();
       for (const relation of relations) {
-        const list = byType.get(relation.type) || [];
+        if (!RELATION_TYPES.has(relation.type)) continue;
+        const bucket = relation.from === user ? "userEntity" : relation.to === user ? "entityUser" : "entityEntity";
+        const key = `${relation.type}|${bucket}`;
+        const list = buckets.get(key) || [];
         list.push({ from: relation.from, to: relation.to });
-        byType.set(relation.type, list);
+        buckets.set(key, list);
       }
       let linked = 0;
-      for (const [type, list] of byType) {
-        if (!RELATION_TYPES.has(type)) continue;
+      for (const [key, list] of buckets) {
+        const [type, bucket] = key.split("|");
+        const fromPattern = bucket === "userEntity" ? "MATCH (a:User {name: $user})" : "MATCH (a:Entity {name: row.from})";
+        const toPattern = bucket === "entityUser" ? "MATCH (b:User {name: $user})" : "MATCH (b:Entity {name: row.to})";
         await run(writeClient,
-          `UNWIND $rows AS row ` +
-          "MATCH (a:Entity {name: row.from}) " +
-          "MATCH (b:Entity {name: row.to}) " +
-          `MERGE (a)-[r:${type}]->(b) ` +
-          "SET r.last_seen = row.now",
-          { rows: list.map((relation) => ({ ...relation, now })) },
+          `UNWIND $rows AS row ${fromPattern} ${toPattern} MERGE (a)-[r:${type}]->(b) SET r.last_seen = row.now`,
+          { rows: list.map((relation) => ({ ...relation, now })), user },
         );
         linked += list.length;
       }
@@ -378,7 +389,12 @@ function createMemoryStore() {
 
     async upsertTurn({ user, entities = [], relations = [] }) {
       const userNode = [...nodes.values()].find((node) => node.name === user && node.type === "person" && node.props.role === "user") || addUser(user);
+      // The signed-in user's own person is the user node itself: skip it so
+      // there is no duplicate node and no self-KNOWS edge (same rule as the
+      // Neo4j store).
+      let upserted = 0;
       for (const entity of entities) {
+        if (entity.name === user && entity.type === "person") continue;
         const node = addNode({ name: entity.name, type: entity.type, common: entity.common, props: entity.props || {} });
         node.mentionCount += 1;
         node.lastSeen = new Date().toISOString();
@@ -386,17 +402,19 @@ function createMemoryStore() {
         if (!node.users.includes(user)) node.users.push(user);
         if (node.users.length >= 2) node.common = true;
         addEdge(userNode.id, node.id, "KNOWS");
+        upserted += 1;
       }
       let linked = 0;
       for (const relation of relations) {
-        const from = [...nodes.values()].find((node) => node.name === relation.from);
-        const to = [...nodes.values()].find((node) => node.name === relation.to);
+        // An endpoint named after the signed-in user is the user node.
+        const from = relation.from === user ? userNode : [...nodes.values()].find((node) => node.name === relation.from);
+        const to = relation.to === user ? userNode : [...nodes.values()].find((node) => node.name === relation.to);
         if (from && to && from !== to && RELATION_TYPES.has(relation.type)) {
           addEdge(from.id, to.id, relation.type);
           linked += 1;
         }
       }
-      return { upserted: entities.length, relations: linked };
+      return { upserted, relations: linked };
     },
 
     async close() {},
