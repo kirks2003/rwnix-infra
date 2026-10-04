@@ -781,3 +781,41 @@ matches the fixed source. A hard refresh (Ctrl+Shift+R) is needed in
 browsers holding the old UI. Note: the behavioural fix itself is covered by
 the two new Chromium tests; a real-microphone occurrence could not be
 reproduced on demand.
+
+## 2026-10-04: the brain answers as the wake word's name, and a bare "stop" cuts the speech
+
+Two requested behaviours shipped together:
+
+1. **Wake-word name.** The browser now sends the active wake phrase (server
+   default or the personal per-browser override) with every `/api/chat`
+   request. The server derives the name from it (`wakeNameFromPhrase`: last
+   word after dropping a leading "Hey/Hi/Hallo" filler, capitalized) and the
+   system prompt tells the brain "Your name is …". "Hey Rocky" → Rocky,
+   "Kaya" → Kaya, no phrase → Jarvis fallback.
+2. **Bare stop word.** The speech wake-watch now also cuts a speaking answer
+   when the probe window transcribes exactly a stop word, with or without the
+   wake phrase — the escape hatch for answers that run too long. The match is
+   exact over the whole window (`isStopCommand`), so a longer speaker-echo
+   sentence does not self-trigger. The post-speech fallback in the wake
+   pipeline accepts the bare stop word too (up to 10 s after the speech),
+   instead of the old "Whisper did not confirm the wake phrase" dead end.
+
+Rolled out to vm104 from main with the file-copy + `docker compose up -d
+--build` procedure. Backup first: `jarvis-code.bak-20261004_160523.tgz` under
+`/home/ubuntu/docker/` (code only; `.env` untouched). Files copied:
+`server.js`, `public/app.js`.
+
+Verified against the running container on `192.168.54.111:8094`:
+
+- Container `healthy`, `/api/health` ok (`whisperEndpoints: 1`,
+  `brainConfigured: true`, `ttsEndpoints: 1`), served `/app.js` md5 matches
+  the source, and it carries both new code paths.
+- Signed in as Mila: `/api/chat` with `wakePhrase: "Hey Rocky"` and prompt
+  "What is your name?" → **"My name is Rocky, Mila."**; the same prompt with
+  no `wakePhrase` → **"My name is Jarvis, Mila."** (fallback).
+- The bare-stop behaviour is browser-side and covered by the new Chromium
+  test `a bare stop word without the wake phrase cuts a speaking answer`
+  (plus `chat requests carry the active wake phrase so the brain answers as
+  its name`); a real-microphone "stop" while the HAL voice is mid-answer is
+  the user-facing check. A hard refresh (Ctrl+Shift+R) is needed in browsers
+  holding the old UI.
