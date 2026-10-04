@@ -198,10 +198,15 @@ const server = http.createServer(async (req, res) => {
         return json(res, 429, { error: "too_many_attempts", requestId });
       }
       // The password is the username itself; compare it constant-time.
+      // 403, not 401: the app sits behind the gateway's Basic Auth layer, and
+      // any 401 that arrives on a request carrying those credentials makes the
+      // browser treat them as rejected and clear its cached Basic
+      // credentials — the next request then triggers a second Basic Auth
+      // prompt. A bare 403 never does that.
       const user = canonicalUser(username);
       if (!user || !sameSecret(password, user)) {
         recordLoginFailure(address);
-        return json(res, 401, { error: "unauthorized", requestId });
+        return json(res, 403, { error: "forbidden", requestId });
       }
       loginAttempts.delete(address);
       issueSession(user, req, res);
@@ -215,11 +220,13 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { user: user || null, requestId });
     }
 
-    // Every other /api route requires a session; the UI treats the 401 on
-    // /api/config as "show the login form".
+    // Every other /api route requires a session; the UI treats the 403 on
+    // /api/config as "show the login form". 403 (not 401) for the same reason
+    // as the login failure above: a 401 would make the browser drop its cached
+    // gateway Basic Auth credentials and re-prompt on the next request.
     if (pathname.startsWith("/api/")) {
       const user = sessionUser(req);
-      if (!user) return json(res, 401, { error: "unauthorized", requestId });
+      if (!user) return json(res, 403, { error: "forbidden", requestId });
       req.user = user;
     }
 

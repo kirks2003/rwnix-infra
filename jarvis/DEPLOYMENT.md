@@ -610,3 +610,59 @@ Verified against the running container on `192.168.54.111:8094` after the rollou
 - Served `/app.js` carries the new beeps (`sentBeep`/`probeBeep`); the container has
   `mcp/engines.mjs` plus the multi-engine `websearch.mjs`.
 - Browsers holding a cached copy of the old UI need a hard refresh (Ctrl+Shift+R).
+
+## 2026-10-04: double Basic Auth prompt (and why the app no longer answers 401)
+
+Reported: the browser asks for the gateway's Basic Auth (mesh-admin) twice —
+once before the Jarvis sign-in form and once after. Reproduced from the
+VIE-1 NPM access log (`proxy-host-56_access.log`, log format
+`[authelia_user] [final_status] [upstream_status]`; `- - 401` = rejected by
+the Basic Auth layer, the backend never saw it; `- 401 401` = the backend
+itself answered 401). Phone session on 2026-10-04, client 46.125.139.172:
+
+```text
+12:39:16  - - 401  GET  /            -> Basic Auth prompt #1 (no credentials yet)
+12:39:17  - 200 200 GET  /           -> page loads, credentials now cached
+12:39:18  - 401 401 GET  /api/config -> app 403-flow probe: no session yet (normal)
+12:39:36  - - 401  POST /api/login   -> challenged: sent WITHOUT the credentials
+12:39:37  - 401 401 POST /api/login  -> reached the app, app rejected it
+12:39:46  - - 401  POST /api/login   -> challenged again (credentials cleared again)
+12:39:47  - 200 200 POST /api/login  -> signed in
+13:07:55  - 401 401 GET  /api/config -> app session gone (the 13:05 deploy
+                                         restarted the container; sessions are
+                                         in memory only)
+13:08:09  - - 401  POST /api/login   -> Basic Auth prompt #2
+13:08:10  - 200 200 POST /api/login  -> re-signed in
+```
+
+Root cause: the app itself answered **401** for "no session" (`/api/config`
+probe on every page load) and for a wrong password (`/api/login`). A 401 that
+arrives on a request that *carried* the gateway's Basic credentials makes the
+browser treat those credentials as rejected and **clears its cached Basic
+credentials for the origin** — even though the app's 401 is a bare JSON body
+with no `WWW-Authenticate` header (verified: the gateway does not add one;
+`proxy_intercept_errors` is off, so the app's 401 passes through untouched).
+The next request then goes out without the Authorization header, the nginx
+`auth_basic` layer challenges it (the 578-byte response in the log), and the
+browser shows the Basic Auth dialog again. So every app-level 401 — the
+normal pre-login `/api/config` probe and every wrong-password attempt —
+caused a second (third, ...) Basic Auth prompt. The 13:08 instance happened
+because the 13:05 vm104 deploy wiped the in-memory app sessions, not because
+of anything wrong with the Basic layer.
+
+Fix: the app never answers 401. It is not a Basic Auth endpoint — it sits
+*behind* one — so its "no session" and "wrong password" responses are now
+**403** (`error: "forbidden"`), which the browser's auth machinery ignores
+(only 401/407 trigger credential handling). The 429 login lockout is
+unchanged. The UI now treats a 403 on `/api/config` as "show the login form"
+(`loadConfig` in `public/app.js`); the login form already handled any non-OK
+status generically. Updated: `server.js` (login failure + API gate),
+`public/app.js` (config probe), `tests/server.test.mjs` (401 -> 403 in the
+login, gate, lockout and logout tests), README.
+
+Net effect: one Basic Auth prompt per browser session per gateway origin
+(Chrome keeps the credentials in memory while the browser is alive; the two
+gateway URLs remain separate origins), and Jarvis sign-in/out no longer
+triggers a gateway re-prompt. Note that deploys/restarts still wipe app
+sessions (in memory by design), so after a deploy users re-enter the
+*Mila/Roman* login — but not the mesh-admin one.
