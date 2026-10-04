@@ -226,6 +226,36 @@ test("wake-only response waits for new speech, then transcribes the command", { 
   assert.equal(calls.audio.length, 3);
 });
 
+test("an empty completed utterance after a wake probe asks for the command instead of erroring", { timeout: 30000 }, async (t) => {
+  // The probe heard the wake word but the completed-utterance transcription
+  // came back empty (the VAD filter drops short bursts). The pipeline must
+  // treat that as wake-only and take the command after the beep, not fail.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n === 1 ? "Rocky" : n === 2 ? "" : "What time is it?",
+  }));
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 25000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+});
+
+test("an empty command window after the beep returns to wake listening without an error", { timeout: 30000 }, async (t) => {
+  // The user spoke the command with the wake word and transcription lost it;
+  // nothing comes after the beep. The old behaviour was a dead-end red error
+  // ("Whisper returned no command"); now the pipeline returns to wake
+  // listening and the next attempt retries.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n === 1 ? "Rocky" : n === 2 ? "Rocky." : "",
+  }));
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("No command captured"),
+    null, { timeout: 25000 });
+  const logText = await page.textContent("#log");
+  assert.doesNotMatch(logText, /Whisper returned no command/);
+  assert.equal(await page.evaluate(() => document.getElementById("core").classList.contains("error")), false);
+  assert.equal(await page.textContent("#stageTitle"), "Wake listening");
+  assert.deepEqual(calls.prompts, []);
+  await page.click("#stopButton");
+});
+
 test("silence makes no Whisper calls and hiding the tab releases capture", async (t) => {
   const { page, calls } = await setup(t, async () => ({ text: "" }), { silent: true });
   await page.waitForTimeout(4500);
