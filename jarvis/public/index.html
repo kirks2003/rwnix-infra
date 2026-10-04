@@ -61,10 +61,17 @@
         <div class="graph-head">
           <h2>Knowledge graph</h2>
           <span id="graphStatus" class="pipeline-status" role="status">Loading…</span>
+          <div class="graph-views" role="group" aria-label="Graph view">
+            <button id="graphView3dButton" type="button" disabled>3D</button>
+            <button id="graphView2dButton" type="button" disabled>2D</button>
+          </div>
           <button id="graphRefreshButton" type="button" disabled>Refresh</button>
         </div>
         <div class="graph-body">
-          <svg id="graphCanvas" class="graph-canvas" viewBox="0 0 640 320" role="img" aria-label="Knowledge graph visualization"></svg>
+          <div class="graph-canvas-wrap">
+            <svg id="graphCanvas" class="graph-canvas" viewBox="0 0 640 320" role="img" aria-label="Knowledge graph visualization (2D)" hidden></svg>
+            <div id="graph3dStage" class="graph-3d-stage" role="img" aria-label="Knowledge graph visualization (3D)"></div>
+          </div>
           <div class="graph-side">
             <div id="graphSchema" class="graph-schema" role="status">—</div>
             <div class="graph-activity">

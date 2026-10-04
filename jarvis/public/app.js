@@ -3,6 +3,7 @@ import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, split
   pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError,
   textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
+import { createGraph3D } from "./graph3d.js";
 
 const el = Object.fromEntries([
   "core", "waveform", "levelReadout", "stageTitle", "stageDetail", "armButton", "stopButton",
@@ -14,7 +15,8 @@ const el = Object.fromEntries([
   "languageSwitch", "languageStatus",
   "mcpSwitches",
   "speakSwitch", "speakStatus",
-  "graphStatus", "graphRefreshButton", "graphCanvas", "graphSchema", "graphActivity",
+  "graphStatus", "graphRefreshButton", "graphCanvas", "graph3dStage",
+  "graphView2dButton", "graphView3dButton", "graphSchema", "graphActivity",
   "panelsToggle", "panelsBelow",
   "loginPanel", "loginForm", "loginUsername", "loginPassword", "loginButton", "loginStatus",
   "userLine", "signOutButton",
@@ -300,6 +302,43 @@ el.panelsToggle.addEventListener("click", () => setPanelsVisible(!panelsVisible,
 // the brain can only run read-only Cypher through the MCP graph server.
 
 let graphCenter = null;
+let graphView = "3d"; // "3d" is the default; "2d" is the static SVG view.
+let graph3d = null; // created lazily on first switch to the 3D view
+let graph3dFailed = false; // WebGL unavailable -> stick to 2D
+let lastSubgraph = null; // kept so the 3D scene can be (re)filled on view switch
+
+function setGraphView(view) {
+  graphView = view;
+  const use3d = view === "3d" && !graph3dFailed && Boolean(config?.graphConfigured);
+  // toggleAttribute, not the .hidden property: on SVG elements the property
+  // does not reflect the attribute, so the [hidden] CSS would never lift.
+  el.graph3dStage.toggleAttribute("hidden", !use3d);
+  el.graphCanvas.toggleAttribute("hidden", use3d);
+  el.graphView3dButton.classList.toggle("active", use3d);
+  el.graphView2dButton.classList.toggle("active", !use3d);
+  el.graphView3dButton.disabled = !config?.graphConfigured || graph3dFailed;
+  el.graphView2dButton.disabled = !config?.graphConfigured;
+  if (use3d && !graph3d) {
+    graph3d = createGraph3D(el.graph3dStage, {
+      userName: config?.user || null,
+      onNodeClick: (nodeId) => loadGraph(nodeId),
+      onFallback: () => {
+        // No WebGL in this browser: fall back to the static 2D view.
+        graph3dFailed = true;
+        if (graph3d) { graph3d.dispose(); graph3d = null; }
+        el.graphView3dButton.disabled = true;
+        el.graphView3dButton.title = "WebGL is not available in this browser";
+        setGraphView("2d");
+      },
+    });
+  }
+  // Fill the active view with the newest data (the other view is stale or
+  // empty until its next loadGraph).
+  if (lastSubgraph) {
+    if (use3d && graph3d) graph3d.update(lastSubgraph);
+    else if (!use3d) renderGraph(lastSubgraph);
+  }
+}
 
 async function loadGraph(center) {
   if (center !== undefined) graphCenter = center;
@@ -307,6 +346,7 @@ async function loadGraph(center) {
   if (!config.graphConfigured) {
     el.graphStatus.textContent = "Not configured on this server";
     el.graphCanvas.replaceChildren();
+    el.graph3dStage.hidden = true;
     el.graphSchema.textContent = "The backend has no NEO4J_* settings, so the panel is idle.";
     el.graphActivity.replaceChildren();
     return;
@@ -323,7 +363,9 @@ async function loadGraph(center) {
       return;
     }
     el.graphStatus.textContent = `${status.nodes} nodes · ${status.edges} links${graphCenter ? " · neighbourhood" : ""}`;
-    renderGraph(subgraph);
+    lastSubgraph = subgraph;
+    if (graphView === "3d" && graph3d) graph3d.update(subgraph);
+    else renderGraph(subgraph);
     el.graphSchema.textContent = [
       schema.labels?.length ? `Labels: ${schema.labels.join(", ")}` : "",
       schema.relTypes?.length ? `Links: ${schema.relTypes.join(", ")}` : "",
@@ -445,6 +487,8 @@ function renderGraph(subgraph) {
 // Refresh resets to the full (newest) view; the background poll keeps the
 // current centre (e.g. after clicking a node) stable.
 el.graphRefreshButton.addEventListener("click", () => loadGraph(null));
+el.graphView3dButton.addEventListener("click", () => setGraphView("3d"));
+el.graphView2dButton.addEventListener("click", () => setGraphView("2d"));
 
 function log(scope, message, data) {
   const line = `[${new Date().toLocaleTimeString()}] ${scope}: ${message}`;
@@ -1369,6 +1413,7 @@ async function loadConfig(userFromLogin) {
       document.getElementById(`mcpSwitch-${server.id}`).disabled = false;
     }
     el.graphRefreshButton.disabled = false;
+    setGraphView("3d"); // the live 3D view is the default panel view
     loadGraph();
     setInterval(() => { if (!document.hidden) loadGraph(); }, 15000);
     let savedPanels = null;

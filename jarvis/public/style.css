@@ -638,6 +638,10 @@ progress {
   align-items: start;
 }
 
+.graph-canvas-wrap {
+  position: relative;
+}
+
 .graph-canvas {
   width: 100%;
   height: 320px;
@@ -647,8 +651,73 @@ progress {
   background: #02050b;
 }
 
+.graph-canvas[hidden] {
+  display: none;
+}
+
 .graph-canvas circle {
   cursor: pointer;
+}
+
+.graph-views {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.graph-views button {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  opacity: 0.55;
+}
+
+.graph-views button.active {
+  opacity: 1;
+}
+
+/* The live 3D view: the canvas fills the stage, labels float on top. */
+.graph-3d-stage {
+  position: absolute;
+  inset: 0;
+  height: 320px;
+  border: 1px solid rgba(66, 217, 255, 0.12);
+  border-radius: 12px;
+  background: #02050b;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.graph-3d-stage:active {
+  cursor: grabbing;
+}
+
+.graph-3d-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-3d-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.graph-3d-labels span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: auto;
+  cursor: pointer;
+  transform: translate(-50%, -160%);
+}
+
+.graph-3d-labels span.user {
+  color: var(--cyan);
 }
 
 .graph-side {
