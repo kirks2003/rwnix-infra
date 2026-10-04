@@ -388,9 +388,9 @@ function isGraphConfigured() {
 // Knowledge graph store (null when unconfigured). GRAPH_MEMORY=1 swaps in the
 // in-memory store with a small starter graph for tests and demos.
 const graphStore = (() => {
+  if (process.env.GRAPH_MEMORY === "1") return graphdb.createMemoryStore();
   if (!isGraphConfigured()) return null;
   try {
-    if (process.env.GRAPH_MEMORY === "1") return graphdb.createMemoryStore();
     return graphdb.createGraphStore({
       uri: config.graph.uri,
       database: config.graph.database,
@@ -955,9 +955,12 @@ Rules:
 - "name" is a short canonical name (e.g. "Mila", "Berlin", "Kokoro-82M"), at most a few words.
 - type must be exactly one of: person, place, organization, event, topic, thing.
 - "common" is true only for general knowledge shared by everyone (public people, cities, products, concepts); false for personal data (family, friends, routines, preferences, private plans).
-- Always include the signed-in user as a person entity with common false and their exact name.
+- Always include the signed-in user (the name on the "user:" line) as a person entity with common false and their exact name.
+- First-person statements in the prompt are facts to store, never skip them: "I like X" -> LIKES, "I own X" or "I have X" -> OWNS, "I live in X" -> LIVES_IN, "I work at X" -> WORKS_AT, "my friend/mother/family is Y" -> FRIEND_OF/FAMILY_OF, always with "from" set to the user's entity name.
+- Example: user "Mila", prompt "I like Lego." ->
+  {"entities":[{"name":"Mila","type":"person","common":false},{"name":"Lego","type":"thing","common":true}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES"}]}
 - relations use UPPERCASE_SNAKE types, one of: WORKS_AT, LIVES_IN, STUDIES_AT, BORN_IN, FRIEND_OF, FAMILY_OF, PART_OF, LOCATED_IN, RELATED_TO, MENTIONED_IN, LIKES, WENT_TO, OWNS, USES. "from" and "to" must be entity names from your entities list.
-- At most 12 entities and 15 relations. Prefer a few high-confidence facts over many guesses; if nothing is worth storing, return {"entities":[],"relations":[]}.`;
+- At most 12 entities and 15 relations. Prefer a few high-confidence facts over many guesses; return {"entities":[],"relations":[]} only for turns that carry no facts at all (e.g. "thanks").`;
 
 // Runs after a finished turn: one cheap structured LLM call over the prompt,
 // the search results (if any) and the answer, then an idempotent MERGE upsert
@@ -988,7 +991,7 @@ async function ingestTurn({ user, prompt, searchResults, answer, requestId }) {
     if (!response.ok) throw new Error(`Brain HTTP ${response.status}: ${text.slice(0, 300)}`);
     const extraction = graphdb.parseExtraction(extractAnswer(JSON.parse(text)) || text);
     if (!extraction.entities.length && !extraction.relations.length) {
-      console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_empty", ms: Date.now() - started }));
+      console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_empty", ms: Date.now() - started, raw: text.slice(0, 300) }));
       return;
     }
     await graphStore.upsertTurn({ user, ...extraction });

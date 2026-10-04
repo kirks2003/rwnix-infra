@@ -126,6 +126,39 @@ test("neo4j store: subgraph LIMIT is an integer parameter (the JS driver sends p
   assert.ok(neo4j.isInt(limitCall.params.limit), "limit must be a neo4j.int, not a float");
 });
 
+test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", async () => {
+  // Neo4j rejects reversed patterns written as -[:KNOWS<-] (parse error at
+  // the "<"); the shared-knowledge step used to do exactly that, which made
+  // every ingestion fail after the entity MERGE and silently dropped all
+  // relations. The mock driver accepts anything, so pin the pattern shape.
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
+        async run(cypher, params) { calls.push(cypher); return { records: [] }; },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+  });
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+  });
+  assert.ok(calls.length >= 3, "entity MERGE, shared-knowledge and relation MERGE must all run");
+  assert.ok(calls.every((cypher) => !/-\[:[A-Z_]+<-\]/.test(cypher)), JSON.stringify(calls));
+  assert.ok(calls.some((cypher) => cypher.includes("(:User)-[:KNOWS]->(e:Entity)")), JSON.stringify(calls));
+});
+
 // --- backend integration -------------------------------------------------------
 
 let upstream;

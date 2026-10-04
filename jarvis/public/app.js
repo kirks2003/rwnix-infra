@@ -417,12 +417,15 @@ function renderGraph(subgraph) {
     svg.appendChild(line);
   }
   for (const node of nodes) {
+    // :User nodes carry no type: the account the knowledge belongs to, so
+    // render them distinctly instead of as an untyped grey blob.
+    const isUser = !node.type;
     const point = position.get(node.id);
     const circle = document.createElementNS(NS, "circle");
     circle.setAttribute("cx", String(point.x));
     circle.setAttribute("cy", String(point.y));
-    circle.setAttribute("r", "7");
-    circle.style.fill = colors[node.type] || "var(--muted)";
+    circle.setAttribute("r", isUser ? "9" : "7");
+    circle.style.fill = isUser ? "var(--cyan)" : (colors[node.type] || "var(--muted)");
     circle.style.fillOpacity = node.common ? "0.9" : "0.65";
     // Click a node to re-centre the panel on its neighbourhood.
     circle.addEventListener("click", () => loadGraph(node.id));
@@ -432,7 +435,8 @@ function renderGraph(subgraph) {
     label.setAttribute("text-anchor", "middle");
     label.setAttribute("font-size", "10");
     label.style.fill = "var(--muted)";
-    label.textContent = String(node.name || node.type).slice(0, 24);
+    const suffix = isUser && config?.user === node.name ? " (you)" : "";
+    label.textContent = `${String(node.name || node.type).slice(0, 24)}${suffix}`;
     svg.appendChild(circle);
     svg.appendChild(label);
   }

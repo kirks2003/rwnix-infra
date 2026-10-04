@@ -238,7 +238,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         upserted = entities.length;
         // An entity known by two or more users is shared knowledge.
         await run(writeClient,
-          "MATCH (e:Entity)-[:KNOWS<-](:User) WITH e, count(*) AS knownBy " +
+          "MATCH (:User)-[:KNOWS]->(e:Entity) WITH e, count(*) AS knownBy " +
           "SET e.common = e.common OR knownBy >= 2",
         );
       }

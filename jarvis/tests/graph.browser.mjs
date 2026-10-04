@@ -29,12 +29,15 @@ after(async () => {
 
 const GRAPH_FIXTURE = {
   nodes: [
+    // :User nodes carry no type: the account the knowledge belongs to.
+    { id: "n0", name: "Mila", common: false },
     { id: "n1", name: "Mila", type: "person", common: false },
     { id: "n2", name: "Rocky", type: "thing", common: true },
     { id: "n3", name: "Berlin", type: "place", common: true },
     { id: "n4", name: "Kokoro-82M", type: "thing", common: true },
   ],
   edges: [
+    { source: "n0", target: "n1", type: "KNOWS" },
     { source: "n1", target: "n2", type: "USES" },
     { source: "n1", target: "n3", type: "LIVES_IN" },
     { source: "n2", target: "n4", type: "USES" },
@@ -67,7 +70,7 @@ async function openPanel(t, { configured = true } = {}) {
     graphConfigured: configured,
   } }));
   if (configured) {
-    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 4, edges: 3, labels: ["User", "Entity"], relTypes: ["LIVES_IN", "USES"] } }));
+    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 5, edges: 4, labels: ["User", "Entity"], relTypes: ["KNOWS", "LIVES_IN", "USES"] } }));
     await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: GRAPH_FIXTURE }));
     await page.route("**/api/graph/schema", (route) => route.fulfill({ json: { labels: ["User", "Entity"], relTypes: ["LIVES_IN", "USES"], propertyKeys: ["name", "type"] } }));
     await page.route("**/api/graph/activity", (route) => route.fulfill({ json: { entries: [
@@ -82,10 +85,12 @@ async function openPanel(t, { configured = true } = {}) {
 test("the graph panel renders the graph, schema and activity", async (t) => {
   const page = await openPanel(t);
   await page.waitForSelector("#graphCanvas circle");
-  assert.match(await page.textContent("#graphStatus"), /4 nodes · 3 links/);
-  assert.equal(await page.locator("#graphCanvas circle").count(), 4);
+  assert.match(await page.textContent("#graphStatus"), /5 nodes · 4 links/);
+  assert.equal(await page.locator("#graphCanvas circle").count(), 5);
   const labels = await page.locator("#graphCanvas text").allTextContents();
   assert.ok(labels.includes("Mila"), "node labels should be drawn");
+  // The signed-in user's account node is drawn distinctly from the person entity.
+  assert.ok(labels.includes("Mila (you)"), "the :User node should be labelled as the signed-in user");
   assert.match(await page.textContent("#graphSchema"), /Labels: User, Entity/);
   const activity = await page.locator("#graphActivity li").allTextContents();
   assert.equal(activity.length, 2);
