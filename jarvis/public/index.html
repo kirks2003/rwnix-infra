@@ -57,6 +57,25 @@
         </div>
       </section>
 
+      <section class="graph-panel app-ui">
+        <div class="graph-head">
+          <h2>Knowledge graph</h2>
+          <span id="graphStatus" class="pipeline-status" role="status">Loading…</span>
+          <button id="graphRefreshButton" type="button" disabled>Refresh</button>
+        </div>
+        <div class="graph-body">
+          <svg id="graphCanvas" class="graph-canvas" viewBox="0 0 640 320" role="img" aria-label="Knowledge graph visualization"></svg>
+          <div class="graph-side">
+            <div id="graphSchema" class="graph-schema" role="status">—</div>
+            <div class="graph-activity">
+              <h3>Recent activity</h3>
+              <ul id="graphActivity" class="graph-activity-list"></ul>
+            </div>
+          </div>
+        </div>
+        <p class="graph-help">Read-only view. The brain queries this graph through the read-only MCP graph server (toggle in the controls below); nothing in the app can delete graph data. Facts are stored automatically after every answered conversation turn.</p>
+      </section>
+
       <div class="panels-toggle-row app-ui">
         <button id="panelsToggle" class="lang-switch" type="button" role="switch" aria-checked="true"
                 title="Show or hide every panel below: meters, pipeline, controls, settings and the live log.">

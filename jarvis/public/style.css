@@ -600,6 +600,101 @@ progress {
   overflow-wrap: anywhere;
 }
 
+/* Knowledge graph: its own panel between the Prompt/Answer row and the
+   panels toggle, always visible like the transcript. Display only — the
+   backend is read-only against the graph. */
+.graph-panel {
+  margin: 18px 0;
+  padding: 18px;
+  border: 1px solid rgba(66, 217, 255, 0.18);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
+  display: grid;
+  gap: 12px;
+}
+
+.graph-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.graph-head h2 {
+  margin: 0;
+}
+
+.graph-head button {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+}
+
+.graph-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 14px;
+  align-items: start;
+}
+
+.graph-canvas {
+  width: 100%;
+  height: 320px;
+  display: block;
+  border: 1px solid rgba(66, 217, 255, 0.12);
+  border-radius: 12px;
+  background: #02050b;
+}
+
+.graph-canvas circle {
+  cursor: pointer;
+}
+
+.graph-side {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+
+.graph-schema {
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  min-height: 1.2em;
+}
+
+.graph-activity h3 {
+  margin: 0 0 6px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.graph-activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  max-height: 190px;
+  overflow: auto;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.graph-activity-list li {
+  overflow-wrap: anywhere;
+}
+
+.graph-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
 .manual-prompt {
   display: grid;
   gap: 8px;
@@ -830,6 +925,10 @@ menu {
   }
 
   .hero, .transcript {
+    grid-template-columns: 1fr;
+  }
+
+  .graph-body {
     grid-template-columns: 1fr;
   }
 

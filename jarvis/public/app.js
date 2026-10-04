@@ -14,6 +14,7 @@ const el = Object.fromEntries([
   "languageSwitch", "languageStatus",
   "mcpSwitches",
   "speakSwitch", "speakStatus",
+  "graphStatus", "graphRefreshButton", "graphCanvas", "graphSchema", "graphActivity",
   "panelsToggle", "panelsBelow",
   "loginPanel", "loginForm", "loginUsername", "loginPassword", "loginButton", "loginStatus",
   "userLine", "signOutButton",
@@ -292,6 +293,154 @@ function setPanelsVisible(value, persist) {
   }
 }
 el.panelsToggle.addEventListener("click", () => setPanelsVisible(!panelsVisible, true));
+
+// --- Knowledge graph panel ---------------------------------------------------
+// Its own panel below the Prompt/Answer row (always visible, like the
+// transcript). Display only: the backend is read-only against the graph, and
+// the brain can only run read-only Cypher through the MCP graph server.
+
+let graphCenter = null;
+
+async function loadGraph(center) {
+  if (center !== undefined) graphCenter = center;
+  if (!config) return;
+  if (!config.graphConfigured) {
+    el.graphStatus.textContent = "Not configured on this server";
+    el.graphCanvas.replaceChildren();
+    el.graphSchema.textContent = "The backend has no NEO4J_* settings, so the panel is idle.";
+    el.graphActivity.replaceChildren();
+    return;
+  }
+  try {
+    const [status, subgraph, schema, activity] = await Promise.all([
+      fetch("/api/graph/status", { cache: "no-store" }).then((response) => response.json()),
+      fetch(`/api/graph/subgraph?limit=60${graphCenter ? `&center=${encodeURIComponent(graphCenter)}` : ""}`, { cache: "no-store" }).then((response) => response.json()),
+      fetch("/api/graph/schema", { cache: "no-store" }).then((response) => response.json()),
+      fetch("/api/graph/activity", { cache: "no-store" }).then((response) => response.json()),
+    ]);
+    if (status.error) {
+      el.graphStatus.textContent = status.error === "graph_unavailable" ? `Unreachable: ${status.message || "database down"}` : "Not available";
+      return;
+    }
+    el.graphStatus.textContent = `${status.nodes} nodes · ${status.edges} links${graphCenter ? " · neighbourhood" : ""}`;
+    renderGraph(subgraph);
+    el.graphSchema.textContent = [
+      schema.labels?.length ? `Labels: ${schema.labels.join(", ")}` : "",
+      schema.relTypes?.length ? `Links: ${schema.relTypes.join(", ")}` : "",
+    ].filter(Boolean).join(" · ") || "Empty graph.";
+    const entries = (activity.entries || []).slice(0, 8);
+    if (entries.length) {
+      el.graphActivity.replaceChildren(...entries.map((entry) => {
+        const item = document.createElement("li");
+        const when = new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        item.textContent = entry.kind === "ingest"
+          ? `${when} · stored ${entry.entities} entit${entry.entities === 1 ? "y" : "ies"}${entry.relations ? ` + ${entry.relations} link${entry.relations === 1 ? "" : "s"}` : ""} (${entry.user})`
+          : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.cypher ? `: ${entry.cypher}` : entry.error ? `: ${entry.error}` : ""}`;
+        return item;
+      }));
+    } else {
+      const item = document.createElement("li");
+      item.textContent = "No activity yet.";
+      el.graphActivity.replaceChildren(item);
+    }
+  } catch (error) {
+    el.graphStatus.textContent = `Unreachable: ${error.message}`;
+  }
+}
+
+// Small force-directed layout in plain JS (no dependencies): repulsion, link
+// springs and centering, then static SVG. Bounded to keep it cheap.
+function renderGraph(subgraph) {
+  const svg = el.graphCanvas;
+  svg.replaceChildren();
+  const nodes = (subgraph.nodes || []).slice(0, 80);
+  if (!nodes.length) return;
+  const ids = new Set(nodes.map((node) => node.id));
+  const edges = (subgraph.edges || []).filter((edge) => ids.has(edge.source) && ids.has(edge.target)).slice(0, 160);
+  const width = 640;
+  const height = 320;
+  const position = new Map();
+  nodes.forEach((node, index) => {
+    const angle = (index / nodes.length) * Math.PI * 2;
+    position.set(node.id, {
+      x: width / 2 + Math.cos(angle) * (90 + (index % 5) * 24),
+      y: height / 2 + Math.sin(angle) * (70 + (index % 4) * 18),
+    });
+  });
+  for (let step = 0; step < 90; step += 1) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = position.get(nodes[i].id);
+        const b = position.get(nodes[j].id);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const distance = Math.max(12, Math.hypot(dx, dy));
+        const force = 1400 / (distance * distance);
+        a.x -= (dx / distance) * force;
+        a.y -= (dy / distance) * force;
+        b.x += (dx / distance) * force;
+        b.y += (dy / distance) * force;
+      }
+    }
+    for (const edge of edges) {
+      const a = position.get(edge.source);
+      const b = position.get(edge.target);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const force = ((distance - 70) / distance) * 0.04;
+      a.x += dx * force;
+      a.y += dy * force;
+      b.x -= dx * force;
+      b.y -= dy * force;
+    }
+    for (const node of nodes) {
+      const point = position.get(node.id);
+      point.x += (width / 2 - point.x) * 0.015;
+      point.y += (height / 2 - point.y) * 0.015;
+      point.x = Math.min(width - 24, Math.max(24, point.x));
+      point.y = Math.min(height - 24, Math.max(24, point.y));
+    }
+  }
+  const NS = "http://www.w3.org/2000/svg";
+  const colors = { person: "var(--green)", place: "var(--amber)", organization: "var(--blue)", event: "var(--purple)", topic: "var(--cyan)", thing: "var(--muted)" };
+  for (const edge of edges) {
+    const a = position.get(edge.source);
+    const b = position.get(edge.target);
+    const line = document.createElementNS(NS, "line");
+    line.setAttribute("x1", String(a.x));
+    line.setAttribute("y1", String(a.y));
+    line.setAttribute("x2", String(b.x));
+    line.setAttribute("y2", String(b.y));
+    line.style.stroke = "rgba(66, 217, 255, 0.25)";
+    line.setAttribute("stroke-width", "1");
+    svg.appendChild(line);
+  }
+  for (const node of nodes) {
+    const point = position.get(node.id);
+    const circle = document.createElementNS(NS, "circle");
+    circle.setAttribute("cx", String(point.x));
+    circle.setAttribute("cy", String(point.y));
+    circle.setAttribute("r", "7");
+    circle.style.fill = colors[node.type] || "var(--muted)";
+    circle.style.fillOpacity = node.common ? "0.9" : "0.65";
+    // Click a node to re-centre the panel on its neighbourhood.
+    circle.addEventListener("click", () => loadGraph(node.id));
+    const label = document.createElementNS(NS, "text");
+    label.setAttribute("x", String(point.x));
+    label.setAttribute("y", String(point.y - 11));
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("font-size", "10");
+    label.style.fill = "var(--muted)";
+    label.textContent = String(node.name || node.type).slice(0, 24);
+    svg.appendChild(circle);
+    svg.appendChild(label);
+  }
+}
+
+// Refresh resets to the full (newest) view; the background poll keeps the
+// current centre (e.g. after clicking a node) stable.
+el.graphRefreshButton.addEventListener("click", () => loadGraph(null));
 
 function log(scope, message, data) {
   const line = `[${new Date().toLocaleTimeString()}] ${scope}: ${message}`;
@@ -703,6 +852,9 @@ async function answer(session, prompt) {
   log("brain", `Request ${result.requestId} completed`);
   mark("brain", "done");
   el.answerText.textContent = result.answer;
+  // Ingestion of this turn runs server-side after the response; give it a
+  // moment, then refresh the graph panel so the new facts show up.
+  if (mcpFlags.graph) setTimeout(() => loadGraph(), 4000);
   if (!speakEnabled) {
     mark("tts", "skipped");
     log("tts", "Voice output is switched off; the answer stays text only.");
@@ -1212,6 +1364,9 @@ async function loadConfig(userFromLogin) {
       setMcpFlag(server.id, saved === "true", false);
       document.getElementById(`mcpSwitch-${server.id}`).disabled = false;
     }
+    el.graphRefreshButton.disabled = false;
+    loadGraph();
+    setInterval(() => { if (!document.hidden) loadGraph(); }, 15000);
     let savedPanels = null;
     try {
       savedPanels = localStorage.getItem(panelsStorageKey);
