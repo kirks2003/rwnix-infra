@@ -205,6 +205,26 @@ test("chat accepts the per-server mcp flag map, ignores unknown ids and defaults
   assert.match(brainPrompt(), /Web search \(MCP web-search server\) is OFF/);
 });
 
+test("the brain knows the signed-in user's first name and is honest about live data while web search is off", async () => {
+  mode = "success";
+  const brainPrompt = () => JSON.parse(received.toString("utf8")).messages[0].content;
+  await auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Hello", sessionId: "fname-roman" }),
+  }, await login(origin, "Roman"));
+  assert.match(brainPrompt(), /signed in as Roman/);
+  await auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "What is the weather?", sessionId: "fname-mila", mcp: { websearch: false } }),
+  }, await login(origin, "Mila"));
+  const prompt = brainPrompt();
+  assert.match(prompt, /signed in as Mila/);
+  assert.match(prompt, /Web search \(MCP web-search server\) is OFF/);
+  // The brain must be told that live data (weather and friends) needs the toggle.
+  assert.match(prompt, /weather/i);
+  assert.match(prompt, /MCP web search toggle/);
+});
+
 test("the brain system prompt reports the MCP web-search state per request", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-mcp-mock-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

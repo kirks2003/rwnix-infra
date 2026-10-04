@@ -131,7 +131,7 @@ The UI's **MCP web search** toggle (per browser, saved in local storage like the
 
 - The browser sends `websearch: true/false` with every `/api/chat` request.
 - When on, the backend spawns `mcp/websearch.mjs` (a Model Context Protocol server, JSON-RPC 2.0 over stdio, reused as one child process across requests) and calls its `web_search` tool with the user prompt.
-- The search itself needs no API key: DuckDuckGo HTML first (with one retry; result links are unwrapped from the `//duckduckgo.com/l/?uddg=…` redirect form), Wikipedia search API as fallback. Top 5 results (title, URL, snippet) are added to the brain request as one extra system message — fresh per prompt, never stored in the per-session conversation history.
+- The search itself needs no API key: **DuckDuckGo** (HTML endpoint with one retry; result links unwrapped from the `//duckduckgo.com/l/?uddg=…` redirect form, ad links dropped), **Bing** (HTML endpoint; `bing.com/ck/a` redirect links unwrapped to the real target) and the **Wikipedia** search API are queried in **parallel**, and the **DuckDuckGo Instant Answer API** (abstract/definition/direct answer + related topics) runs alongside as an "instant answer" block. The results are merged round-robin across engines, deduplicated by URL (scheme/www/trailing-slash insensitive) and each is tagged with its source engine. Top 5 merged results (title, URL, snippet) are added to the brain request as one extra system message — fresh per prompt, never stored in the per-session conversation history. A walled or down engine degrades to zero results without failing the search. Measured engine availability from server IPs: see "Multi-engine web search findings" below.
 - A failed or empty search degrades to a normal brain answer; the backend JSON logs record `websearch_success` (chars, ms), `websearch_failure`, and `websearch_skipped` (request aborted).
 - Requirement: outbound internet from the backend container (the container egresses to DuckDuckGo/Wikipedia; the browser is unaffected). No new `.env` entries — the toggle is the only control.
 - Spoken answers are sanitized in the browser before any TTS request or `speechSynthesis` utterance (`textForSpeech` in `public/voice.js`): markdown, links, code markers, URLs and special signs are stripped, so the speaker says normal language only. The printed Answer panel is unchanged.
@@ -516,3 +516,83 @@ Verification:
   container (Chromium's system libraries are missing, as before) — run
   `npx playwright install --with-deps chromium && npm run test:browser` on a
   proper host.
+
+## 2026-10-04: voice-pipeline fixes, beeps, first name and multi-engine web search
+
+A batch of user-reported fixes plus the web search becoming multi-engine. Not yet
+rolled out to vm104 at the time of writing; the usual file-copy + `docker compose up
+-d --build` procedure applies (copy `server.js`, `mcp/`, `public/`, `tests/`, docs;
+`.env` untouched — no new `.env` entries).
+
+### Stop-by-voice was broken by a swallowed abort
+
+`watchForVoiceCommand` called `speechSignal.abort(speechStopped)` on an **AbortSignal**
+— only the **AbortController** has `.abort()`. The resulting `TypeError` was caught by
+the watch's own catch block and dropped, so the stop-during-speech path (the whole
+point of the trailing-edge speech wake-watch) had **never actually cut the speech**; the
+5 s TTS watchdog ended the utterance instead, and the reported symptom was that saying
+"stop" did nothing while the answer spoke. The fix passes the controller (not the
+signal) down through `answer()` → `speak()` → `watchForVoiceCommand`, which now aborts
+the real controller. This is why the two stop browser tests that "cannot run in the dev
+container" now pass on a host with Chromium's libraries installed.
+
+### Meters froze, then jumped to full
+
+The mic-level and silence bars were driven from the pipeline loop, which suspends for
+the whole Whisper/brain round trip; the bars froze at their last value (usually ~400 ms
+of silence) and jumped straight to full when the round trip returned. Both meters now
+run on their own 100 ms `setInterval` (`startMeters`/`stopMeters`/`updateMeters` in
+`public/app.js`), independent of the pipeline loop, so they fill in real time while
+audio is in flight. The silence bar still tracks trailing silence during wake listening.
+
+### WAV encoding blocked the main thread
+
+`AudioBufferWindow.wav()` wrote each PCM sample with an individual
+`DataView.setUint16` call. At a 192 kHz `AudioContext` a 25 s window is up to ~9.6 MB;
+the per-sample DataView loop stalled the main thread long enough to visibly freeze the
+UI. It now fills a single `Int16Array` over the PCM region in one pass (little-endian
+hosts only, like every target browser). Measured: 960 000 samples encode in ~4 ms.
+
+### Audible upload beeps
+
+Two new distinct tones join the 880→1320 Hz wake/speak sweep (`Microphone` in
+`public/audio.js`): a soft 660 Hz `probeBeep()` the moment a wake-probe window is sent
+to Whisper, and a higher 1760 Hz `sentBeep()` the moment the command audio is sent and
+transcription starts. Every upload is now audible even if the UI looks idle.
+
+### Jarvis knows who is signed in
+
+The brain's system prompt now carries the authenticated user's name and is told it is
+their first name, so answers address the user by name (Mila → "Mila, …"). While web
+search is **off**, the prompt additionally tells the brain that live data (the weather
+now, news, prices, scores) needs the **MCP web search** toggle, so it answers a weather
+question honestly instead of denying the feature or guessing.
+
+### Multi-engine web search findings
+
+The search now queries DuckDuckGo (HTML), Bing (HTML), Wikipedia (API) in parallel plus
+the DuckDuckGo Instant Answer API, merges round-robin and dedupes by URL. Measured
+engine availability **from a server/datacenter IP** (the dev container's egress; the
+vm104 container egresses from its own IP, which may differ):
+
+| Engine | From server IP | Notes |
+|---|---|---|
+| DuckDuckGo HTML | flaky | intermittent `202` anomaly challenge; retry helps. Ad links are double-wrapped (`/l/?uddg=<encoded duckduckgo.com/y.js?ad_…>`) and are dropped by checking the final target's hostname, not the redirect's. |
+| Bing HTML | works | result links are `bing.com/ck/a` redirects; the real URL is the base64url value of the `u=a1…` parameter. |
+| Wikipedia API | works | structured, no bot wall. |
+| DuckDuckGo Instant Answer API | works | keyless; abstract/definition/answer + related topics. |
+| Mojeek, Startpage, Ecosia, Yahoo, SearXNG instances | blocked | bot wall (403/429/captcha/JS) from datacenter IPs — not used. |
+
+A failed or walled engine degrades to zero results; the merged list stands on its own.
+`tests/mcp.test.mjs` covers the pure engine helpers (redirect unwrapping, ad filtering,
+dedupe, merge, formatting) and the stdio protocol without network.
+
+### Verification
+
+- Unit suite **58/58** (was 50): new tests for the 192 kHz bulk WAV fill, the six
+  search-engine helpers, the first-name + MCP-off brain prompt, and the stop-by-voice
+  abort.
+- Browser suite **20 pass / 2 opt-in skip** on a host with Chromium's libraries:
+  previously-failing `wake word plus stop cuts a speaking answer before it finishes`
+  now passes, along with `a stop command right after the spoken answer is not sent to
+  the brain`.
