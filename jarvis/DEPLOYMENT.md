@@ -287,7 +287,8 @@ Rolled out to vm104 from this branch using the same file-copy + `docker compose 
 - `jarvis-code.bak-20261003_223857.tgz` — before the language toggle switch
 - `jarvis-code.bak-20261003_230701.tgz` — before the realtime level ring, LEVEL % readout and faster stage animations
 - `jarvis-code.bak-20261003_231630.tgz` — before the longer bar break-out and the ~30% smaller animation panel
-- `jarvis-code.bak-20261003_232149.tgz` — before the `Hey Rocky` default wake word and English default language (current state)
+- `jarvis-code.bak-20261003_232149.tgz` — before the `Hey Rocky` default wake word and English default language
+- `jarvis-code.bak-20261004_071206.tgz` — before the test-signal/wake-test, MCP web search, plain-speech TTS and smaller core (current state)
 
 Features shipped:
 
@@ -330,3 +331,35 @@ Verified against the running container:
 - `/api/config` on the live instance reports `wakePhrase: "Hey Rocky"` and
   `whisperLanguage: "en"` after the final rollout.
 - Container reported `healthy` after every rebuild, including the last one.
+
+## MCP web search + test-signal rollout (2026-10-04)
+
+Rolled out to vm104 from main (PR #7) with the same file-copy + `docker compose up -d
+--build` procedure. Backup first: `jarvis-code.bak-20261004_071206.tgz` under
+`/home/ubuntu/docker/` on vm104 (code only; `.env` untouched, unchanged). Files copied:
+`server.js`, `mcp/`, `public/`, `Dockerfile`, `docker-compose.yml`, docs.
+
+Shipped:
+
+- **MCP web search**: the backend now spawns `mcp/websearch.mjs` (JSON-RPC 2.0 over stdio,
+  DuckDuckGo with one retry, Wikipedia fallback) and, when the browser's **MCP search**
+  toggle is on, sends the top-5 results to the brain per prompt. No `.env` changes; the
+  container's outbound internet is the only requirement — confirmed live below.
+- **Test signal / Wake test** buttons in the controls row (armed only): the test signal
+  injects an 880→1320 Hz peep into the live capture mix so the capture-to-Whisper round
+  trip can be checked without a microphone; the wake test speaks the wake word through the
+  speaker and runs the full hands-free pipeline.
+- **Plain-speech TTS**: spoken output is sanitized in the browser (`textForSpeech`) so the
+  speaker says normal language only; the printed answer and the answer prompt are unchanged.
+- Core animation 30% smaller (224px → 157px desktop, 175px → 122px mobile).
+
+Verified against the running container on `192.168.54.111:8094`:
+
+- `/api/health` ok: `whisperEndpoints: 1`, `brainConfigured: true`, `ttsEndpoints: 1`.
+- `/api/chat` (no search) answered `"Jarvis online"`.
+- `/api/chat` with `websearch: true` answered from real search results (Kokoro-82M facts);
+  backend log shows `websearch_success` (747 ms, 1554 chars) — the MCP server runs inside
+  the container and vm104 has working egress to DuckDuckGo.
+- Both public gateways (`gw-1-vie-1-at-netcup`, `gw-1-nbg-1-de-netcup`) answer `401` from
+  outside — the existing Basic Auth layer, not an app error.
+- Container `healthy` after the rebuild.
