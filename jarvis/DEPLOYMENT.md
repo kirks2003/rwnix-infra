@@ -740,3 +740,44 @@ Rolled out to vm104 on 2026-10-04 with the usual file-copy +
 `192.168.54.111:8094`: container `healthy`, and the reporter's exact request
 — signed in as Mila, `Wetter Wien` with `websearch: true` — returned a real
 answer in 10.0 s (`websearch_success` 843 ms, no `brain_empty_answer`).
+
+## 2026-10-04: "Whisper returned no command" red error after wake word + command
+
+Reported: saying the wake word **and** the command in one phrase ended in a red
+pipeline error `Whisper returned no command. Please speak after the beep.`
+
+Reconstructed from the vm104 log (15:00-15:02 CEST session, `language=de`):
+
+- Every Whisper request succeeded (HTTP 200, 264-1706 ms) — the gpu-1 service
+  was healthy; the brain was never reached (no `/api/chat` in the session).
+- The failing shape: wake probe heard the phrase -> completed-utterance
+  transcription (48 chars) carried the wake phrase but **not the command**
+  (Whisper/VAD dropped it) -> pipeline beeps and waits for a separate command
+  -> the user had already spoken, the post-beep window came back
+  `whisper_no_speech` (0 chars) -> hard error. A dead end: the only recovery
+  was saying the whole phrase again.
+
+Fix (PR #19) in `public/app.js`:
+
+- Completed-utterance transcription empty (no-speech) after a wake-detecting
+  probe is now treated as a wake-only utterance (beep + command window)
+  instead of the `Whisper did not confirm the wake phrase...` error.
+- Empty command window after the beep (and the 10 s no-voice timeout) no
+  longer throws: `waitForCommandEnd` returns `false` and the pipeline logs
+  `No command captured with or after the wake word; returning to wake
+  listening.` and retries on the next wake word — no red error, no backoff.
+- New browser tests: `an empty completed utterance after a wake probe asks
+  for the command instead of erroring` and `an empty command window after the
+  beep returns to wake listening without an error`. Unit 59/59, browser 23
+  pass / 2 opt-in skip.
+
+Rolled out to vm104 on 2026-10-04 with the usual file-copy +
+`docker compose up -d --build` procedure. Backup first:
+`jarvis-code.bak-20261004_152030.tgz` under `/home/ubuntu/docker/`
+(code only; `.env` untouched). Files synced: `public/app.js`,
+`tests/pipeline.browser.mjs`, `README.md`. Verified against the running
+container: container `healthy`, `/api/health` ok, served `/app.js` md5
+matches the fixed source. A hard refresh (Ctrl+Shift+R) is needed in
+browsers holding the old UI. Note: the behavioural fix itself is covered by
+the two new Chromium tests; a real-microphone occurrence could not be
+reproduced on demand.
