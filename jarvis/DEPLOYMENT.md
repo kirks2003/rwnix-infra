@@ -611,6 +611,37 @@ Verified against the running container on `192.168.54.111:8094` after the rollou
   `mcp/engines.mjs` plus the multi-engine `websearch.mjs`.
 - Browsers holding a cached copy of the old UI need a hard refresh (Ctrl+Shift+R).
 
+## 2026-10-04: pipeline icons stay green after a manual prompt
+
+Reported: after a typed (manual) prompt, the brain ("DeepSeek brain") and
+speech output steps kept their green `done` highlight instead of returning to
+waiting once the spoken answer finished.
+
+Root cause: the step icons are `<li>` elements whose `className` is the status
+(`done` = green, `skipped` = gray, `active` = amber, none = waiting).
+`stage()` only ever removes the `active` class, and `stop()` — which the manual
+flow (and every disarmed state) ends in — never reset the steps. The voice flow
+only looked right because `listen()` calls `resetSteps()` at the top of each
+loop. So a manual prompt (brain + tts marked `done`, the four audio steps
+`skipped`) and any mid-run Stop left the icons frozen.
+
+Fix: `stop()` in `public/app.js` now calls `resetSteps()` before moving to
+standby — a disarmed pipeline has no running session, so every step returns to
+waiting. Regression test: `manual prompt returns the pipeline icons to waiting
+after the answer speaks` in `tests/pipeline.browser.mjs` (fails on the old
+code with `['skipped','skipped','skipped','skipped','done','done']`, passes
+with the fix). Unit suite 58/58, browser suite 21 pass / 2 opt-in skip.
+
+Rolled out to vm104 on 2026-10-04 with the usual file-copy +
+`docker compose up -d --build` procedure. Backup first:
+`jarvis-code.bak-20261004_143153.tgz` under `/home/ubuntu/docker/`
+(code only; `.env` untouched). Files synced: `public/app.js`,
+`tests/pipeline.browser.mjs`. Verified against the running container on
+`192.168.54.111:8094`: `/api/health` ok (`whisperEndpoints: 1`,
+`brainConfigured: true`, `ttsEndpoints: 1`), container `healthy` after the
+rebuild, and the served `/app.js` md5 matches the fixed source (browsers
+holding a cached copy of the old UI need a hard refresh, Ctrl+Shift+R).
+
 ## 2026-10-04: double Basic Auth prompt (and why the app no longer answers 401)
 
 Reported: the browser asks for the gateway's Basic Auth (mesh-admin) twice —
