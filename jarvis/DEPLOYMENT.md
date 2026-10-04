@@ -1118,11 +1118,65 @@ apt, pip `--break-system-packages`); the APOC jar download on first container
 start (needs internet on vm104); `tools` support of the `a1-dsv4f`
 `deepseek-v4-flash` endpoint (if it does not honour tools, the loop makes one
 plain call and degrades to context injection only — the pre-graph behaviour
-plus the context block), and tool-loop latency vs the 60 s browser request
-timeout (3-round cap, 50 s total deadline).
+plus the context block) — verified live on 2026-10-04: the endpoint honours
+`tools` and the `get-schema`/`read-cypher` loop completes — and tool-loop
+latency vs the 60 s browser request timeout (3-round cap, 50 s total
+deadline).
 
 **Rollback:** restore the backup tarball, remove the `NEO4J_*` lines from
 `.env`, `docker compose up -d --build` (or `docker compose rm -s neo4j` to
 drop the DB service too). The app runs fully without the graph — endpoints
 answer 503, the panel shows "Not configured on this server". The `neo4j_data`
 volume can be kept or deleted; deleting it is the only destructive step.
+
+**Fixes and live migration after rollout (2026-10-04, PRs #25–#26).** The
+first real chat turns exposed latent bugs that the mock-based tests could not
+see; all were fixed, re-deployed (backups
+`jarvis-code.bak-20261004_213626.tgz`, `jarvis-code.bak-20261004_220031.tgz`)
+and verified against the running containers:
+
+1. **The MCP `read-cypher` tool takes a `query` parameter, not `cypher`**
+   (verified against the server binary's own `tools/list` schema) — the first
+   live tool loop failed every read with "Query parameter is required and
+   cannot be empty". The tool schema, mock and tests were updated to `query`.
+2. **The JS neo4j-driver encodes plain numbers as floats** and Neo4j rejects
+   them for `LIMIT` (`'60.0' is not a valid value`) — the subgraph limit is
+   now wrapped in `neo4j.int()`; a mock-driver regression test pins it.
+3. **Invalid Cypher silently dropped every relation.** The shared-knowledge
+   step used `MATCH (e:Entity)-[:KNOWS<-](:User)` — a reversed arrow written
+   inside the brackets is not valid Cypher (`Invalid input '<'`). It threw
+   after the entity `MERGE` and before the relation `MERGE`s, and the
+   fire-and-forget catch swallowed the error, so entities landed but no
+   `LIKES`/`FRIEND_OF`/… edge was ever written. Fixed to
+   `MATCH (:User)-[:KNOWS]->(e:Entity)`; a regression test pins the pattern
+   shape because the mock driver accepts any Cypher (which is how this one got
+   through).
+4. **The extraction returned empty for "I like Lego."** First-person
+   statements (likes, ownership, family, home, work) are now explicit
+   must-store facts in the extraction prompt, with a concrete example;
+   `graph_ingest_empty` logs the model's raw output (truncated) so empty
+   extractions are debuggable. Related: `GRAPH_MEMORY=1` was gated behind the
+   `NEO4J_*` configuration (dead, contradicting its comment) and now swaps in
+   the memory store on its own — the end-to-end ingestion test uses it.
+5. **The signed-in user was stored as two nodes** (the account `:User`, a
+   same-named `:Entity` person and a self-`KNOWS` edge — the panel rendered
+   "Mila → Mila → Lego"). The `:User` account is now the person: ingestion
+   skips the extractor's own-person entity, and relation endpoints named after
+   the user target the `:User` node (Neo4j and memory stores). The panel
+   draws `:User` nodes larger, in the accent colour, labelled `(you)` for the
+   signed-in user.
+
+**Live data migration (2026-10-04).** The pre-fix graph contained the stale
+duplicate `:Entity{Mila, person}` with its self-`KNOWS` edge. A one-shot
+migration via `POST /db/neo4j/tx/commit` (run from inside the jarvis
+container with the `jarvis_write` credentials; note the request body must be
+`{"statements": [...]}` — a bare array is rejected with `InvalidFormat`)
+removed the duplicate with `DETACH DELETE` and re-pointed the `LIKES` edge at
+`:User{Mila}`. Graph after migration: `Mila(:User) -KNOWS-> Lego(:Entity)`
+and `Mila(:User) -LIKES-> Lego(:Entity)`; a fresh "I like Lego." turn
+ingests cleanly without recreating the duplicate. Known simplification for a
+future multi-user deployment: when another user mentions the name of an
+existing account holder, the Neo4j store still creates a separate `:Entity`
+for them (only the current user resolves to `:User`); it does not occur in
+the current single-user deployment, and the memory store dedupes by name and
+is unaffected.
