@@ -6,7 +6,8 @@ import { CoreVisualizer } from "./visualizer.js";
 
 const el = Object.fromEntries([
   "core", "waveform", "levelReadout", "stageTitle", "stageDetail", "armButton", "stopButton",
-  "clearLogButton", "micLevel", "micLevelValue", "silenceLevel", "silenceValue", "promptText", "answerText",
+  "clearLogButton", "micLevel", "micLevelValue", "silenceLevel", "silenceValue",
+  "silenceDelay", "silenceDelayValue", "silenceDelayStatus", "promptText", "answerText",
   "log", "steps", "pipelineStatus", "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
@@ -25,12 +26,14 @@ const voiceSpeedStorageKey = "jarvis.voiceSpeed";
 const languageStorageKey = "jarvis.language";
 const speakEnabledStorageKey = "jarvis.speakEnabled";
 const panelsStorageKey = "jarvis.panelsVisible";
+const silenceStorageKey = "jarvis.silenceMs";
 let config;
 let authedUser = null;
 let voiceId = "browser";
 let voiceSpeed = voiceSpeedRange.default;
 let language = "en";
 let speakEnabled = true;
+let silenceMs = 1500;
 let panelsVisible = true;
 const mcpServers = [];
 const mcpFlags = {};
@@ -129,6 +132,52 @@ el.languageSwitch.addEventListener("click", () => {
   if (el.languageSwitch.disabled) return;
   setLanguage(language === "de" ? "en" : "de", true);
 });
+
+// Silence-stop slider: how long the microphone must stay quiet before a
+// recorded command is sent to Whisper. The server default (SILENCE_MS) is only
+// the initial value; the per-browser slider wins and applies live, even while
+// a command is already being recorded (the VAD reads the value on every tick).
+const SILENCE_MIN_MS = 100;
+const SILENCE_MAX_MS = 5000;
+
+function normalizeSilenceMs(value) {
+  const ms = Number(value);
+  return Number.isFinite(ms)
+    ? Math.round(Math.min(SILENCE_MAX_MS, Math.max(SILENCE_MIN_MS, ms)))
+    : 1500;
+}
+
+function silenceStopLabel(ms) {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1).replace(/\.0$/, "")} s`;
+}
+
+function applySilenceDelay(value, persist) {
+  silenceMs = normalizeSilenceMs(value);
+  el.silenceDelay.value = String(silenceMs);
+  el.silenceDelayValue.textContent = silenceStopLabel(silenceMs);
+  // The green silence bar fills to the stop point, so its scale follows.
+  el.silenceLevel.max = silenceMs;
+  el.steps.querySelector('[data-step="vad"] .step-name').textContent =
+    `Stop after ${silenceStopLabel(silenceMs)} silence`;
+  if (persist) {
+    try {
+      localStorage.setItem(silenceStorageKey, String(silenceMs));
+      el.silenceDelayStatus.textContent = `Saved: commands stop after ${silenceStopLabel(silenceMs)} of silence.`;
+    } catch (error) {
+      el.silenceDelayStatus.textContent = `Silence stop ${silenceStopLabel(silenceMs)} for this tab only; browser storage is unavailable.`;
+      log("settings", "Could not save silence stop", { message: error.message });
+    }
+  } else {
+    el.silenceDelayStatus.textContent = `Active: commands stop after ${silenceStopLabel(silenceMs)} of silence.`;
+  }
+  log("settings", `Silence stop ${silenceStopLabel(silenceMs)}`);
+}
+el.silenceDelay.addEventListener("input", () => {
+  silenceMs = normalizeSilenceMs(el.silenceDelay.value);
+  el.silenceDelayValue.textContent = silenceStopLabel(silenceMs);
+  el.silenceLevel.max = silenceMs;
+});
+el.silenceDelay.addEventListener("change", () => applySilenceDelay(el.silenceDelay.value, true));
 
 // One switch per MCP server (the backend advertises the list in /api/config).
 // Each flag is sent with every /api/chat request as `mcp: { id: bool }` and is
@@ -312,6 +361,34 @@ function check(session) {
   if (session !== current) throw abortError();
 }
 
+// A failed pipeline step is retried with the material already captured (the
+// recorded audio window, the prompt, the answer text) up to MAX_STEP_ATTEMPTS
+// times instead of returning to wake listening and making the user speak the
+// input again. Only transient failures (upstream errors, timeouts) are
+// retried: aborts from Stop / tab hidden propagate immediately, and once the
+// attempts are exhausted the error reaches the pipeline's usual error stage.
+const MAX_STEP_ATTEMPTS = 3;
+const STEP_RETRY_DELAY_MS = 1000;
+
+async function withStepRetries(session, label, run) {
+  let lastError;
+  for (let attempt = 1; attempt <= MAX_STEP_ATTEMPTS; attempt += 1) {
+    check(session);
+    try {
+      return await run(attempt);
+    } catch (error) {
+      lastError = error;
+      if (error?.name === "AbortError" || error === speechStopped) throw error;
+      if (attempt >= MAX_STEP_ATTEMPTS) throw error;
+      log("retry", `${label} failed (attempt ${attempt}/${MAX_STEP_ATTEMPTS}): ${error.message}; retrying in ${STEP_RETRY_DELAY_MS} ms`);
+      pipelineStatusOverride = `${label}: retry ${attempt + 1}/${MAX_STEP_ATTEMPTS} after failure (${error.message})`;
+      el.pipelineStatus.textContent = pipelineStatus();
+      await delay(STEP_RETRY_DELAY_MS, session.signal);
+    }
+  }
+  throw lastError;
+}
+
 function stop(message = "Jarvis is disarmed.") {
   const old = current;
   current = null;
@@ -426,7 +503,7 @@ function updateMeters() {
   let silence = 0;
   if (kind === "wake" || kind === "transcribing" || kind === "thinking"
     || ((kind === "recording" || kind === "prompting") && session.commandHeard)) {
-    silence = Math.min(config.silenceMs, silentMs);
+    silence = Math.min(silenceMs, silentMs);
   }
   el.silenceLevel.value = silence;
   el.silenceValue.textContent = `${Math.round(silence)} ms`;
@@ -438,7 +515,7 @@ async function waitForCommandEnd(session, start, needsSpeech) {
   const buffer = session.mic.buffer;
   const started = performance.now();
   stage(needsSpeech ? "prompting" : "recording", needsSpeech ? "Speak after the beep" : "Listening for command",
-    `Stops after ${config.silenceMs} ms of silence.`, "record");
+    `Stops after ${silenceStopLabel(silenceMs)} of silence.`, "record");
   if (needsSpeech) session.mic.beep();
   const speechAfter = start + (needsSpeech ? buffer.sampleRate * 0.3 : 0);
   session.commandHeard = !needsSpeech;
@@ -454,13 +531,13 @@ async function waitForCommandEnd(session, start, needsSpeech) {
     if (elapsed - shown >= 500) {
       shown = elapsed;
       pipelineStatusOverride = session.commandHeard
-        ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(config.silenceMs - silentMs))} ms more silence, or at the 15 s limit.`
+        ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(silenceMs - silentMs))} ms more silence, or at the 15 s limit.`
         : `Waiting for speech: ${(elapsed / 1000).toFixed(1)} s of 10 s. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
       el.pipelineStatus.textContent = pipelineStatus();
     }
     if (session.commandHeard) {
       mark("vad", "active");
-      if (silentMs >= config.silenceMs) {
+      if (silentMs >= silenceMs) {
         mark("record", "done");
         mark("vad", "done");
         return true;
@@ -523,7 +600,7 @@ async function listen(session) {
         probedThrough = buffer.end;
         speechFrom = null;
         log("wake", forced ? "Probe triggered by the 3 s speech cap (microphone never settled)" : "Probe triggered after speech settled");
-        const text = await transcribe(session, start, "wake");
+        const text = await withStepRetries(session, "wake probe", () => transcribe(session, start, "wake"));
         failures = 0;
         if (wakeCommand(text, config.wakePhrase) === null) {
           stage("wake", "Wake listening", `No wake phrase heard. Say "${config.wakePhrase}".`, "wake");
@@ -533,7 +610,7 @@ async function listen(session) {
         log("wake", "Detected; completing the buffered utterance");
         // Capture continues during the Whisper request, including command tails.
         await waitForCommandEnd(session, start, false);
-        const fullText = await transcribe(session, start, "command");
+        const fullText = await withStepRetries(session, "command transcription", () => transcribe(session, start, "command"));
         let prompt = wakeCommand(fullText, config.wakePhrase);
         // The probe heard the wake phrase but the completed-utterance
         // transcription came back empty (the VAD filter drops short bursts):
@@ -559,7 +636,7 @@ async function listen(session) {
           const commandStart = buffer.end;
           const commandCaptured = await waitForCommandEnd(session, commandStart, true);
           if (commandCaptured) {
-            const commandText = await transcribe(session, commandStart, "command");
+            const commandText = await withStepRetries(session, "command transcription", () => transcribe(session, commandStart, "command"));
             prompt = wakeCommand(commandText, config.wakePhrase) ?? commandText.trim();
           }
         } else {
@@ -607,14 +684,17 @@ async function answer(session, prompt) {
   check(session);
   el.promptText.textContent = prompt;
   el.answerText.textContent = "";
-  stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
-  const result = await request(session, "/api/chat", {
-    method: "POST", headers: { "content-type": "application/json" },
-    // The brain answers as the wake word's name, so the active phrase (server
-    // default or personal override) travels with every request.
-    body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase }),
+  const result = await withStepRetries(session, "brain", async () => {
+    stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
+    const data = await request(session, "/api/chat", {
+      method: "POST", headers: { "content-type": "application/json" },
+      // The brain answers as the wake word's name, so the active phrase
+      // (server default or personal override) travels with every request.
+      body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase }),
+    });
+    if (!data.answer) throw new Error("Brain returned no answer");
+    return data;
   });
-  if (!result.answer) throw new Error("Brain returned no answer");
   log("brain", `Request ${result.requestId} completed`);
   mark("brain", "done");
   el.answerText.textContent = result.answer;
@@ -629,7 +709,7 @@ async function answer(session, prompt) {
   const speech = new AbortController();
   session.speech = speech;
   try {
-    const followUp = await speak(session, result.answer, speech);
+    const followUp = await withStepRetries(session, "speech output", () => speak(session, result.answer, speech));
     check(session);
     if (followUp === null) {
       mark("tts", "done");
@@ -1049,8 +1129,6 @@ async function loadConfig(userFromLogin) {
     }
     config = value;
     // The pipeline panel names reflect the actual configuration.
-    el.steps.querySelector('[data-step="vad"] .step-name').textContent =
-      `Stop after ${(config.silenceMs / 1000).toFixed(1).replace(/\.0$/, "")} s silence`;
     el.steps.querySelector('[data-step="brain"] .step-name').textContent =
       config.brainModel ? `${config.brainModel} brain` : "Brain";
     el.wakeWordStatus.textContent = `Server default: "${config.wakePhrase}". Apply a personal wake word for this browser.`;
@@ -1080,6 +1158,16 @@ async function loadConfig(userFromLogin) {
       log("settings", "Could not load speaking speed", { message: error.message });
     }
     applyVoiceSpeed(savedSpeed ?? voiceSpeed, false);
+    let savedSilence = null;
+    try {
+      savedSilence = localStorage.getItem(silenceStorageKey);
+    } catch (error) {
+      log("settings", "Could not load silence stop", { message: error.message });
+    }
+    // The saved per-browser value wins over the server default (SILENCE_MS);
+    // applySilenceDelay also sets the vad step name and the silence bar scale.
+    applySilenceDelay(savedSilence ?? config.silenceMs, false);
+    el.silenceDelay.disabled = false;
     let savedSpeakEnabled = null;
     try {
       savedSpeakEnabled = localStorage.getItem(speakEnabledStorageKey);
@@ -1116,7 +1204,6 @@ async function loadConfig(userFromLogin) {
       log("settings", "Could not load panels setting");
     }
     setPanelsVisible(savedPanels === null ? true : savedPanels === "true", false);
-    el.silenceLevel.max = config.silenceMs;
     log("stt", `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`);
     el.armButton.disabled = el.sendManualButton.disabled = false;
     for (const button of previewButtons) button.disabled = false;

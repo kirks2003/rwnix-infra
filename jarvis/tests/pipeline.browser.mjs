@@ -54,10 +54,12 @@ async function setup(t, transcribe, options = {}) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
-  const calls = { audio: [], prompts: [], speak: [], mcp: undefined, wakePhrase: undefined };
+  const calls = { audio: [], prompts: [], speak: [], mcp: undefined, wakePhrase: undefined, maxInFlight: 0 };
+  let inFlight = 0;
   await page.addInitScript(() => {
     window.testTracks = [];
     window.ttsEvents = [];
+    window.failNextTTS = 0;
     const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async (...args) => {
       if (window.denyMicrophone) throw new DOMException("Permission denied", "NotAllowedError");
@@ -72,6 +74,11 @@ async function setup(t, transcribe, options = {}) {
       if (!utterance.text) return;
       window.savedUtterances.push(utterance);
       window.ttsEvents.push("speak");
+      if (window.failNextTTS > 0) {
+        window.failNextTTS -= 1;
+        setTimeout(() => utterance.onerror?.({ error: "synthesis-failed" }), 25);
+        return;
+      }
       if (!window.hangTTS) setTimeout(() => utterance.onend?.(), 25);
     };
     speechSynthesis.cancel = () => window.ttsEvents.push("cancel");
@@ -96,26 +103,42 @@ async function setup(t, transcribe, options = {}) {
   // The app sends the spoken language as a query parameter; Playwright globs
   // match the full URL, so the pattern must keep matching past the "?".
   await page.route("**/api/transcribe*", async (route) => {
-    const body = route.request().postDataBuffer();
-    assert.equal(body.toString("ascii", 0, 4), "RIFF");
-    assert.equal(body.toString("ascii", 8, 12), "WAVE");
-    assert.equal(body.readUInt32LE(40), body.length - 44);
-    assert.ok(body.length > 20000);
-    calls.audio.push(body);
-    const result = await transcribe(calls.audio.length, body);
-    await route.fulfill({ status: result.status || 200, json: {
-      endpoint: "http://vm103.test/v1/audio/transcriptions", requestId: `stt-${calls.audio.length}`,
-      ...result,
-    } }).catch((error) => {
-      if (!page.isClosed()) throw error;
-    });
+    // The pipeline is strictly sequential; track the overlap so a regression
+    // to parallel requests (e.g. a retry firing while the first is in flight)
+    // fails every test that uses this harness.
+    inFlight += 1;
+    calls.maxInFlight = Math.max(calls.maxInFlight, inFlight);
+    try {
+      const body = route.request().postDataBuffer();
+      assert.equal(body.toString("ascii", 0, 4), "RIFF");
+      assert.equal(body.toString("ascii", 8, 12), "WAVE");
+      assert.equal(body.readUInt32LE(40), body.length - 44);
+      assert.ok(body.length > 20000);
+      calls.audio.push(body);
+      const result = await transcribe(calls.audio.length, body);
+      await route.fulfill({ status: result.status || 200, json: {
+        endpoint: "http://vm103.test/v1/audio/transcriptions", requestId: `stt-${calls.audio.length}`,
+        ...result,
+      } }).catch((error) => {
+        if (!page.isClosed()) throw error;
+      });
+    } finally {
+      inFlight -= 1;
+    }
   });
   await page.route("**/api/chat", async (route) => {
     const payload = route.request().postDataJSON();
     calls.prompts.push(payload.prompt);
     calls.mcp = payload.mcp;
     calls.wakePhrase = payload.wakePhrase;
-    await route.fulfill({ json: { answer: options.answer || "Done.", requestId: "brain-test" } });
+    const result = options.chat
+      ? await options.chat(calls.prompts.length, payload)
+      : { answer: options.answer || "Done.", requestId: "brain-test" };
+    await route.fulfill(result.status && result.status !== 200
+      ? { status: result.status, json: { error: result.error || "brain_unavailable" } }
+      : { json: { answer: result.answer, requestId: result.requestId || "brain-test" } }).catch((error) => {
+      if (!page.isClosed()) throw error;
+    });
   });
   await page.goto(origin);
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
@@ -163,16 +186,41 @@ test("Stop ignores late Whisper responses and allows a clean re-arm", { timeout:
   assert.equal(calls.prompts.length, 1);
 });
 
-test("Whisper errors are visible, then recover without parallel requests", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async (n) => n === 1
+test("an exhausted Whisper retry is a visible error, then recovers sequentially", { timeout: 45000 }, async (t) => {
+  // The first wake probe fails on all three bounded attempts, which is the
+  // visible pipeline error; the next probe recovers and the user does not
+  // have to speak anything again.
+  const { page, calls } = await setup(t, async (n) => n <= 3
     ? { status: 502, error: "vm103 unavailable" }
     : { text: "Rocky recovered" });
   await page.waitForFunction(() => document.getElementById("core").classList.contains("error"));
   // The hero only shows the short error caption; server details live in the log.
   assert.match(await page.textContent("#log"), /vm103 unavailable/);
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  // Two "retrying" lines plus the error stage prove all three attempts ran.
+  assert.match(await page.textContent("#log"), /wake probe failed \(attempt 1\/3\)/);
+  assert.match(await page.textContent("#log"), /wake probe failed \(attempt 2\/3\)/);
+  assert.match(await page.textContent("#log"), /Pipeline error/);
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 30000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["recovered"]);
+  // The pipeline is strictly sequential: no two transcribe requests in flight.
+  assert.equal(calls.maxInFlight, 1);
+});
+
+test("a transient Whisper failure recovers on the bounded retry without an error stage", { timeout: 30000 }, async (t) => {
+  // One failed attempt is retried with the same captured window; the retry
+  // succeeds, so no pipeline error stage appears at all.
+  const { page, calls } = await setup(t, async (n) => n === 1
+    ? { status: 502, error: "vm103 unavailable" }
+    : { text: "Rocky, what time is it?" });
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  await page.click("#stopButton");
+  const log = await page.textContent("#log");
+  assert.match(log, /wake probe failed \(attempt 1\/3\): vm103 unavailable; retrying in 1000 ms/);
+  assert.doesNotMatch(log, /Pipeline error/);
+  assert.equal(await page.evaluate(() => document.getElementById("core").classList.contains("error")), false);
+  assert.deepEqual(calls.prompts, ["what time is it?"]);
+  assert.equal(calls.maxInFlight, 1);
 });
 
 test("missing TTS onend cancels speech before the next wake", { timeout: 30000 }, async (t) => {
@@ -618,4 +666,107 @@ test("the speed slider scales the request and persists per browser", { timeout: 
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
   assert.equal(await page.inputValue("#voiceSpeed"), "1.5");
   assert.match(await page.textContent("#voiceStatus"), /1\.50x/);
+});
+
+// page.fill is unstable in minimal containers (see the wake-word tests);
+// set the value directly.
+async function typeManualPrompt(page, text) {
+  await page.evaluate((value) => {
+    const input = document.getElementById("manualPrompt");
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, text);
+  await page.click("#sendManualButton");
+}
+
+test("a failed brain request is retried with the captured prompt", { timeout: 30000 }, async (t) => {
+  // The prompt was already captured, so a failed brain round trip must be
+  // retried with the same prompt instead of sending the user back to wake
+  // listening to speak it again.
+  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), {
+    silent: true,
+    chat: async (n) => (n === 1 ? { status: 502, error: "brain unavailable" } : { answer: "Done.", requestId: "brain-test" }),
+  });
+  await page.click("#stopButton");
+  await typeManualPrompt(page, "What time is it?");
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
+    null, { timeout: 25000 });
+  await page.waitForFunction(() => window.savedUtterances.length >= 1, null, { timeout: 15000 });
+  assert.deepEqual(calls.prompts, ["What time is it?", "What time is it?"]);
+  const log = await page.textContent("#log");
+  assert.match(log, /brain failed \(attempt 1\/3\): brain unavailable; retrying in 1000 ms/);
+  assert.doesNotMatch(log, /Pipeline error/);
+  assert.equal(await page.textContent("#answerText"), "Done.");
+});
+
+test("a failed speech output is retried and still speaks the answer", { timeout: 30000 }, async (t) => {
+  // The answer text is already known, so a failed speech output must be
+  // retried instead of discarding the answer and requiring the input again.
+  const { page } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  await page.click("#stopButton");
+  await page.evaluate(() => { window.failNextTTS = 1; });
+  await typeManualPrompt(page, "What time is it?");
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
+    null, { timeout: 25000 });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 15000 });
+  const log = await page.textContent("#log");
+  assert.match(log, /speech output failed \(attempt 1\/3\): Speech output failed: synthesis-failed/);
+  assert.doesNotMatch(log, /Pipeline error/);
+  assert.equal(await page.textContent("#answerText"), "Done.");
+});
+
+test("the silence slider adjusts the live stop delay and persists per browser", { timeout: 75000 }, async (t) => {
+  // The fixture tone plays 1.2 s and pauses 2.8 s (4 s period). With the
+  // 250 ms test default a recorded command ends at the first pause.
+  // n=1 probe + n=2 completed utterance (first cycle), n=3 probe + n=4
+  // completed utterance (second cycle after re-arm); later calls are the
+  // speech wake-watch probes during TTS, which must not match the wake word.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 4 ? "Rocky, what time is it?" : "background noise",
+  }));
+  assert.equal(await page.inputValue("#silenceDelay"), "250");
+  assert.equal(await page.textContent("#silenceDelayValue"), "250 ms");
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("request stt-2"),
+    null, { timeout: 30000 });
+  await page.click("#stopButton");
+  const before = calls.audio.length;
+
+  // Raise the stop to the 5 s maximum: the fixture's 2.8 s pauses are shorter
+  // than the stop, so after re-arming only the wake probe may have been sent
+  // while the command recording is still running.
+  await page.evaluate(() => {
+    const slider = document.getElementById("silenceDelay");
+    slider.value = "5000";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  assert.equal(await page.textContent("#silenceDelayValue"), "5 s");
+  assert.equal(await page.getAttribute("#silenceLevel", "max"), "5000");
+  assert.match(await page.textContent("#steps [data-step='vad'] .step-name"), /Stop after 5 s silence/);
+  assert.match(await page.textContent("#silenceDelayStatus"), /Saved/);
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.silenceMs")), "5000");
+  await page.click("#armButton");
+  await page.waitForTimeout(9000);
+  assert.equal(calls.audio.length, before + 1, "5 s stop: the 2.8 s pauses must not end the command");
+
+  // Live adjust mid-recording: dropping the stop to 250 ms ends the pending
+  // command at the next pause — no re-arm and no re-speaking.
+  await page.evaluate(() => {
+    const slider = document.getElementById("silenceDelay");
+    slider.value = "250";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForFunction((n) => document.getElementById("log").textContent.includes(`request stt-${n}`),
+    before + 2, { timeout: 25000 });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["what time is it?", "what time is it?"]);
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.silenceMs")), "250");
+
+  // The saved value survives a reload (per browser, like the wake word).
+  const restored = await setup(t, async () => ({ text: "" }), { silent: true });
+  assert.equal(await restored.page.inputValue("#silenceDelay"), "250");
+  assert.equal(await restored.page.textContent("#silenceDelayValue"), "250 ms");
+  await restored.page.click("#stopButton");
 });
