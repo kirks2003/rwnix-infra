@@ -266,7 +266,8 @@ const server = http.createServer(async (req, res) => {
       // The prompt history is keyed by the authenticated user, not by a
       // client-chosen id: every tab of Mila shares Mila's cache and no
       // other user can read or write it.
-      const result = await chat(prompt, req.user, normalizeLanguage(payload.language) || "en", requestId, controller.signal, normalizeMcpFlags(payload));
+      const result = await chat(prompt, req.user, normalizeLanguage(payload.language) || "en", requestId, controller.signal, normalizeMcpFlags(payload),
+        String(payload.wakePhrase || "").slice(0, 60));
       return json(res, 200, result);
     }
 
@@ -651,7 +652,7 @@ function withAbort(promise, signal) {
   });
 }
 
-async function chat(prompt, user, language, requestId, signal, mcpFlags) {
+async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhrase) {
   if (!isBrainConfigured()) {
     throw new Error("Brain endpoint/model is not configured");
   }
@@ -661,6 +662,10 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags) {
   // The override wins over a hardcoded answer language in BRAIN_SYSTEM_PROMPT,
   // which is how the UI language switch reaches the brain.
   const answerLanguage = language === "de" ? "German (Deutsch)" : "English";
+  // The wake word is how the user calls the assistant, so the brain answers as
+  // the wake word's name (the phrase without the leading "Hey/Hi/Hallo"
+  // filler) — "Hey Rocky" -> Rocky, "Kaya" -> Kaya — instead of a fixed name.
+  const wakeName = wakeNameFromPhrase(wakePhrase);
   // Fresh per request: search results are context for this prompt only and are
   // never stored in the per-session conversation history. One state line per
   // MCP server tells the brain which of the browser's MCP switches are on, so
@@ -686,7 +691,7 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags) {
   const messages = [
     {
       role: "system",
-      content: `${config.brainSystemPrompt}\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
+      content: `${config.brainSystemPrompt}\nYour name is ${wakeName} — the user calls you by your wake word, so use "${wakeName}" as your own name in your answers, for example when they ask who you are or address you by name.\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
     },
     ...(searchMessage ? [searchMessage] : []),
     ...history,
@@ -726,6 +731,16 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags) {
   const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-10);
   conversations.set(user, nextHistory);
   return { requestId, answer, configured: true, model: config.brainModel };
+}
+
+// The wake word's name: the last word of the phrase after dropping a leading
+// "Hey/Hi/Hallo" filler, capitalized ("Hey Rocky" -> "Rocky", "Kaya" ->
+// "Kaya"). The app name is the fallback for browsers that send no phrase.
+function wakeNameFromPhrase(phrase) {
+  const words = String(phrase || "").trim().split(/\s+/).filter(Boolean);
+  while (words.length > 1 && /^(hey|hi|hallo|yo|o)$/i.test(words[0])) words.shift();
+  const name = words[words.length - 1] || "";
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : "Jarvis";
 }
 
 function extractAnswer(data) {
