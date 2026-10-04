@@ -519,10 +519,16 @@ Verification:
 
 ## 2026-10-04: voice-pipeline fixes, beeps, first name and multi-engine web search
 
-A batch of user-reported fixes plus the web search becoming multi-engine. Not yet
-rolled out to vm104 at the time of writing; the usual file-copy + `docker compose up
--d --build` procedure applies (copy `server.js`, `mcp/`, `public/`, `tests/`, docs;
-`.env` untouched — no new `.env` entries).
+A batch of user-reported fixes plus the web search becoming multi-engine. The
+mid-speech stop fix (abort the answer's AbortController, not its signal) landed on
+main separately as `eb93c7b`; PR #12 (`a6d1621`, merged as `f5613ba`) carries the
+rest.
+
+Rolled out to vm104 on 2026-10-04 with the usual file-copy + `docker compose up -d
+--build` procedure. Backup first: `jarvis-code.bak-20261004_123111.tgz` under
+`/home/ubuntu/docker/` (code only; `.env` untouched — no new `.env` entries). Files
+synced: `server.js`, `mcp/`, `public/`, `tests/`, `Dockerfile`, `docker-compose.yml`,
+`package.json`, `package-lock.json`, docs.
 
 ### Stop-by-voice was broken by a swallowed abort
 
@@ -596,3 +602,11 @@ dedupe, merge, formatting) and the stdio protocol without network.
   previously-failing `wake word plus stop cuts a speaking answer before it finishes`
   now passes, along with `a stop command right after the spoken answer is not sent to
   the brain`.
+
+Verified against the running container on `192.168.54.111:8094` after the rollout:
+
+- `/api/health` ok: `whisperEndpoints: 1`, `brainConfigured: true`,
+  `ttsEndpoints: 1`; container `healthy` after the rebuild.
+- Served `/app.js` carries the new beeps (`sentBeep`/`probeBeep`); the container has
+  `mcp/engines.mjs` plus the multi-engine `websearch.mjs`.
+- Browsers holding a cached copy of the old UI need a hard refresh (Ctrl+Shift+R).
