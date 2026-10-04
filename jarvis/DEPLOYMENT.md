@@ -876,3 +876,85 @@ Verified against the running container on `192.168.54.111:8094`:
   retrying without an error stage. A hard refresh (Ctrl+Shift+R) is needed
   in browsers holding the old UI; a saved `jarvis.silenceMs` from the old
   UI does not exist, so everyone starts from the 1500 ms server default.
+
+## 2026-10-04: the stop word did not cut a speaking answer (echo-aware stop match)
+
+Reported live: "I get often whisper transcription error and the stop voice
+command is not working for me during the answer is being spoken on audio
+output" (user says **just the stop word**, listens on laptop speakers,
+German mode). The vm104 log of the 14:56 session told the story: the
+Whisper endpoint was healthy (successes 358-2386 ms, one failure = the user
+closing the tab), but after the 14:56:57 brain call the mic produced a
+5.5-minute stream of short (~12 char) probes at 2-5 s intervals — the user
+repeating the stop word while nothing cut the speech. Two code paths turned
+out to be broken by the speaker echo:
+
+1. **The speech watch** (`watchForVoiceCommand`, `public/app.js`) required
+   the stop word to match the **whole probe window exactly**. With speaker
+   echo the window transcribes as the answer's own words plus the stop
+   word, so the exact match never fired and the speech ran on.
+2. **The post-speech fallback** (`isPostSpeechStop`, `public/voice.js`) had
+   the same exact-match problem: a "Stopp" repeated after the answer —
+   possibly with the answer's echo tail in the window — fell into
+   "Whisper did not confirm the wake phrase in the completed utterance."
+   That red error is what read as "whisper transcription error" even
+   though Whisper itself was fine.
+
+Fix (all browser-side):
+
+- `hasLoudBurst(samples, start, end, sampleRate)` in `public/audio.js`:
+  true when the window holds a contiguous ≥200 ms run of 100 ms blocks at
+  least 1.5× the window's voice-block median RMS (and ≥0.02 absolute) —
+  the user's own voice standing out against a quieter speaker echo. A
+  uniform window (pure echo, or one loud voice level) never matches, so it
+  cannot self-trigger.
+- `stopCommandIn(command, { trailing })` in `public/voice.js`: the stop
+  list as a word-boundary containment match ("Der Regen bleibt bis morgen.
+  Stopp" → "stopp"; "Stoppuhr" and "Halten" do not match).
+- The watch now cuts when the window **is** the stop word (exact, as
+  before) or when the window carries a loud user burst **and** the
+  transcript contains a stop word. `STOP_COMMANDS` gained the natural
+  German phrases "hör auf", "lass es", "lass das", "genug schon".
+- The post-speech fallback uses the same gate (plus: the stop word must
+  end the utterance, so "Genug, was ist das Wetter?" is not a stop).
+- Every watch probe's transcript now lands in the Live log
+  ("Speech watch probe: …"), so a stop that does not trigger is debuggable
+  from the page alone (the server log only ever stores char counts).
+
+Tests: unit 64/64 (new: `hasLoudBurst` burst/echo/uniform/blip/noise
+cases, `stopCommandIn` containment and trailing boundaries, the
+burst-gated `isPostSpeechStop`); Chromium 30/30 (new: `a stop word inside
+the echoed window cuts a speaking answer on a loud user burst` — a 6 s
+fixture loop of 0.2 s loud burst + 1.2 s quieter echo, brain slowed 3 s so
+the speaking phase starts mid-loop and the watch's settled probe window
+carries the burst as a clear minority of voice blocks; the cut lands
+before the 5 s TTS watchdog without a second brain round trip). Two
+findings from building that test: the fake capture's audio processing
+(AGC/noise suppression) decays a steady tone below the 0.012 voice
+threshold within ~2 s, so the echo part of the fixture must stay short,
+and the watch's settled probe covers the last 2 s of the window, so the
+user burst must sit inside that tail.
+
+Rolled out to vm104 from the worktree with the file-copy +
+`docker compose up -d --build` procedure. Backup first:
+`jarvis-code.bak-20261004_181714.tgz` under `/home/ubuntu/docker/`
+(code only; `.env` untouched, verified absent from the tarball — the
+three `*env*` entries are `.env.example` and two pre-existing `.env.bak-*`
+snapshots). Files copied: `public/app.js`, `public/audio.js`,
+`public/voice.js`, `tests/pipeline.browser.mjs`, `tests/audio.test.mjs`,
+`tests/voice.test.mjs`, `README.md`, `DEPLOYMENT.md`.
+
+Verified against the running container on `192.168.54.111:8094`:
+
+- Container `healthy`, `/api/health` ok (`whisperEndpoints: 1`,
+  `brainConfigured: true`, `ttsEndpoints: 1`).
+- Served `app.js` / `audio.js` / `voice.js` md5 match the source
+  (`8e958f0f…`, `5a6bbf75…`, `738e7186…`); the served `app.js` carries
+  `hasLoudBurst` and `stopCommandIn`.
+- The fix is browser-side: the user-facing checks are saying the stop word
+  (in German: "Stopp", "Hör auf", "Lass das", "Genug schon") while an
+  answer is still speaking — the Live log must show
+  "Stop word heard while speaking" and the speech must cut — and, if a
+  stop still does not trigger, the Live log now shows the probe transcript
+  so the actual window content can be seen. A hard refresh (Ctrl+Shift+R)
+  is needed in browsers holding the old UI.
