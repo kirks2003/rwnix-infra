@@ -303,18 +303,18 @@ h2 {
 }
 
 .controls {
-  /* One row: Arm/Stop, the language switch and the per-MCP-server switches. */
-  grid-template-columns: max-content max-content max-content minmax(0, 1fr);
-  grid-template-areas: "arm stop language mcp";
+  /* One dynamic row: Arm/Stop, the language switch and the per-MCP-server
+     switches, centered as a group relative to the panel's middle. Items wrap
+     to a new centered line when the row no longer fits. */
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
   padding: 16px;
   border: 1px solid rgba(66, 217, 255, 0.18);
   border-radius: 18px;
   background: var(--panel);
 }
-
-#armButton { grid-area: arm; }
-#stopButton { grid-area: stop; }
 
 button {
   border: 1px solid rgba(66, 217, 255, 0.4);
@@ -404,17 +404,15 @@ button:disabled {
 }
 
 .language-control {
-  grid-area: language;
   display: grid;
   gap: 4px;
   justify-items: center;
 }
 
 .mcp-switches {
-  grid-area: mcp;
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: center;
   align-items: center;
   gap: 12px 18px;
 }
@@ -808,13 +806,14 @@ menu {
     padding: 16px;
   }
 
-  .hero, .transcript, .controls {
+  .hero, .transcript {
     grid-template-columns: 1fr;
   }
 
+  /* Mobile: the controls list vertically, every item centered in the panel. */
   .controls {
-    grid-template-areas:
-      "arm" "stop" "language" "mcp";
+    flex-direction: column;
+    align-items: center;
   }
 
   #steps {
