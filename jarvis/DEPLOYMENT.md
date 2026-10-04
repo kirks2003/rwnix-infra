@@ -666,3 +666,11 @@ gateway URLs remain separate origins), and Jarvis sign-in/out no longer
 triggers a gateway re-prompt. Note that deploys/restarts still wipe app
 sessions (in memory by design), so after a deploy users re-enter the
 *Mila/Roman* login — but not the mesh-admin one.
+
+Rolled out to vm104 on 2026-10-04 (PR #15) with the usual file-copy +
+`docker compose up -d --build` procedure. Backup first:
+`jarvis-code.bak-20261004_132818.tgz` under `/home/ubuntu/docker/`
+(`.env` untouched). Verified against the running container:
+`/api/config` without a session cookie answers `403 Forbidden` (no
+`WWW-Authenticate`), a wrong-password `/api/login` answers `403`, and the
+container is `healthy` after the rebuild.
