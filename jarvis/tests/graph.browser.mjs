@@ -44,12 +44,9 @@ const GRAPH_FIXTURE = {
   ],
 };
 
-async function openPanel(t, { configured = true } = {}) {
-  const page = await browser.newPage();
-  t.after(() => page.close());
-  const errors = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  t.after(() => assert.deepEqual(errors, []));
+// The panel talks to the backend's read-only /api/graph/* routes; the rest
+// of the app is the static shell, so a plain file server is enough.
+async function routeGraphApi(page, { configured = true } = {}) {
   await page.route("**/api/config", (route) => route.fulfill({ json: {
     user: "Mila",
     wakePhrase: "Rocky",
@@ -78,12 +75,22 @@ async function openPanel(t, { configured = true } = {}) {
       { at: new Date().toISOString(), kind: "ingest", user: "Mila", entities: 2, relations: 1 },
     ] } }));
   }
+}
+
+async function openPanel(t, { configured = true } = {}) {
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  t.after(() => assert.deepEqual(errors, []));
+  await routeGraphApi(page, { configured });
   await page.goto(origin);
   return page;
 }
 
 test("the graph panel renders the graph, schema and activity", async (t) => {
   const page = await openPanel(t);
+  await page.click("#graphView2dButton"); // the 3D view is the default
   await page.waitForSelector("#graphCanvas circle");
   assert.match(await page.textContent("#graphStatus"), /5 nodes · 4 links/);
   assert.equal(await page.locator("#graphCanvas circle").count(), 5);
@@ -100,6 +107,7 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
 
 test("clicking a node re-centres the panel on its neighbourhood", async (t) => {
   const page = await openPanel(t);
+  await page.click("#graphView2dButton"); // the 3D view is the default
   await page.waitForSelector("#graphCanvas circle");
   let centerSeen = null;
   // Registered last, so it wins over the initial subgraph route.
@@ -116,4 +124,75 @@ test("the graph panel degrades to a status line when unconfigured", async (t) =>
   const page = await openPanel(t, { configured: false });
   await page.waitForFunction(() => document.getElementById("graphStatus").textContent.includes("Not configured"));
   assert.equal(await page.locator("#graphCanvas circle").count(), 0);
+  // Without a graph the 3D view is not offered either.
+  assert.equal(await page.locator("#graph3dStage canvas").count(), 0);
+  assert.equal(await page.locator("#graphView3dButton").isDisabled(), true);
+});
+
+test("the 3D view is the default: an animated live graph with labels", async (t) => {
+  const page = await openPanel(t);
+  await page.waitForSelector("#graph3dStage canvas");
+  assert.equal(await page.locator("#graph3dStage").isHidden(), false, "the 3D stage is visible by default");
+  assert.equal(await page.locator("#graphCanvas").isHidden(), true, "the 2D SVG is hidden while 3D is active");
+  assert.equal(await page.evaluate(() => Boolean(document.querySelector("#graph3dStage canvas").getContext("webgl2"))), true);
+  // The layout is still settling, so the scene must be animating.
+  const canvas = page.locator("#graph3dStage canvas");
+  await page.waitForTimeout(2500);
+  const shot1 = await canvas.screenshot();
+  await page.waitForTimeout(1000);
+  const shot2 = await canvas.screenshot();
+  assert.notDeepEqual(shot1, shot2, "the 3D view should keep animating");
+  const labels = await page.locator(".graph-3d-labels span").allTextContents();
+  assert.ok(labels.includes("Mila (you)"), `labels: ${JSON.stringify(labels)}`);
+  assert.ok(labels.includes("Rocky"), "entity labels are drawn");
+});
+
+test("the 3D view: clicking a node label re-centres the panel", async (t) => {
+  const page = await openPanel(t);
+  await page.waitForSelector('.graph-3d-labels span:has-text("Berlin")');
+  let centerSeen = null;
+  // Registered last, so it wins over the initial subgraph route.
+  await page.route("**/api/graph/subgraph*", (route) => {
+    centerSeen = new URL(route.request().url()).searchParams.get("center");
+    return route.fulfill({ json: GRAPH_FIXTURE });
+  });
+  await page.locator(".graph-3d-labels span", { hasText: "Berlin" }).click();
+  await page.waitForFunction(() => document.getElementById("graphStatus").textContent.includes("neighbourhood"));
+  assert.ok(centerSeen, "the centred request should carry the node id");
+});
+
+test("the 3D view: new data appears live on the next refresh", async (t) => {
+  const page = await openPanel(t);
+  await page.waitForSelector('.graph-3d-labels span:has-text("Rocky")');
+  assert.equal(await page.locator('.graph-3d-labels span:has-text("Paris")').count(), 0);
+  // Registered last, so it wins: the graph gained a node and a link.
+  await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: {
+    nodes: [...GRAPH_FIXTURE.nodes, { id: "n5", name: "Paris", type: "place", common: true }],
+    edges: [...GRAPH_FIXTURE.edges, { source: "n3", target: "n5", type: "LOCATED_IN" }],
+  } }));
+  await page.click("#graphRefreshButton");
+  await page.waitForSelector('.graph-3d-labels span:has-text("Paris")');
+  assert.equal(await page.locator(".graph-3d-labels span").count(), GRAPH_FIXTURE.nodes.length + 1);
+});
+
+test("the 3D view falls back to 2D when WebGL is unavailable", async (t) => {
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  t.after(() => assert.deepEqual(errors, []));
+  await page.addInitScript(() => {
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+      if (String(type).startsWith("webgl")) return null;
+      return original.call(this, type, ...args);
+    };
+  });
+  await routeGraphApi(page);
+  await page.goto(origin);
+  await page.waitForSelector("#graphCanvas circle");
+  assert.equal(await page.locator("#graph3dStage").isHidden(), true, "the 3D stage stays hidden without WebGL");
+  assert.equal(await page.locator("#graph3dStage canvas").count(), 0, "no 3D canvas is created");
+  assert.equal(await page.locator("#graphView3dButton").isDisabled(), true, "the 3D toggle is disabled");
+  assert.equal(await page.locator("#graphCanvas circle").count(), 5, "the 2D view renders instead");
 });

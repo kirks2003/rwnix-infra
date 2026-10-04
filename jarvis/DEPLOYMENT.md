@@ -1177,6 +1177,40 @@ and `Mila(:User) -LIKES-> Lego(:Entity)`; a fresh "I like Lego." turn
 ingests cleanly without recreating the duplicate. Known simplification for a
 future multi-user deployment: when another user mentions the name of an
 existing account holder, the Neo4j store still creates a separate `:Entity`
-for them (only the current user resolves to `:User`); it does not occur in
-the current single-user deployment, and the memory store dedupes by name and
-is unaffected.
+ for them (only the current user resolves to `:User`); it does not occur in
+ the current single-user deployment, and the memory store dedupes by name and
+ is unaffected.
+
+## 3D graph view rollout (2026-10-04, PR #28)
+
+The Knowledge graph panel's default view became a live 3D visualisation: a
+continuously animating three.js force layout (type-coloured sphere nodes, one
+dynamic line object for the links, DOM-projected clickable labels, drag-to-orbit,
+wheel zoom, auto-rotate after 5 s idle, and node positions preserved across the
+15 s polls so the view keeps settling instead of jumping). The old SVG layout
+remains as a 2D toggle with the same click-to-re-centre behaviour; browsers
+without WebGL 2 fall back to it automatically (three.js dropped WebGL 1 support
+in r163, so the 3D view requires WebGL 2). three.js is vendored locally at
+`public/vendor/three.module.min.js` (pinned `three@0.164.1`, fetched from unpkg),
+so the panel has no CDN dependency at runtime.
+
+Rollout: the standard vm104 procedure — backup `jarvis-code.bak-20261004_231156.tgz`,
+synced `public/app.js`, `public/graph3d.js` (new), `public/index.html`,
+`public/style.css`, `public/vendor/three.module.min.js` (new) and
+`tests/graph.browser.mjs`, then `docker compose up -d --build`. Verified live:
+served artifact md5s match the worktree, `/api/health` ok, and a logged-in
+headless Chromium session shows the 3D view as default with the real graph
+("Mila (you)", "Lego") and a working 2D toggle. The browser check runs against
+the plain-HTTP LAN origin with `--unsafely-treat-insecure-origin-as-secure`
+because `crypto.randomUUID` (used for the session id) only exists in secure
+contexts; normal browsers reach the app over the HTTPS proxies, which are
+already secure contexts.
+
+Two findings: (1) the `hidden` IDL property does not reflect the `hidden`
+attribute on **SVG elements** in Chromium — `svgEl.hidden = false` leaves the
+attribute, and with it the `[hidden]` CSS `display: none`, in place; the view
+switch therefore uses `toggleAttribute("hidden", …)` for the 2D SVG. (2) The
+headless SwiftShader here fires a spurious `webglcontextcreationerror` ("Canvas
+has an existing context of a different type") even though the
+`getContext("webgl2")` call succeeds — the renderer is created and renders
+normally, so the console line is cosmetic.
