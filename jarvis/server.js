@@ -704,14 +704,24 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags) {
       model: config.brainModel,
       messages,
       temperature: 0.2,
-      max_tokens: 1200,
+      // The brain is a reasoning model: max_tokens covers its thinking tokens
+      // too, so an undersized budget is spent on reasoning and the reply comes
+      // back with empty content (finish_reason "length"). 4096 leaves ~26 s of
+      // budget at the measured ~150 tok/s while staying inside the 45 s timeout.
+      max_tokens: 4096,
     }),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`Brain HTTP ${response.status}: ${text.slice(0, 500)}`);
   const data = JSON.parse(text);
   const answer = extractAnswer(data);
-  if (!answer) throw new Error("Brain returned no answer text");
+  if (!answer) {
+    const finishReason = data?.choices?.[0]?.finish_reason || "";
+    console.log(JSON.stringify({ level: "error", requestId, msg: "brain_empty_answer", finishReason, usage: data?.usage || {} }));
+    throw new Error(finishReason === "length"
+      ? "The brain spent its whole token budget on reasoning and returned no answer; ask again."
+      : "Brain returned no answer text");
+  }
 
   const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-10);
   conversations.set(user, nextHistory);

@@ -57,7 +57,9 @@ before(async () => {
     if (mode === "failure") {
       res.writeHead(503).end('{"error":"unavailable"}');
     } else if (req.url.endsWith("chat/completions")) {
-      res.end('{"choices":[{"message":{"content":"Hello"}}]}');
+      res.end(mode === "empty-answer"
+        ? '{"choices":[{"message":{"content":null},"finish_reason":"length"}]}'
+        : '{"choices":[{"message":{"content":"Hello"}}]}');
     } else {
       res.end(JSON.stringify({ text: mode === "silence" ? "" : mode === "hallucination" ? "Untertitelung des ZDF, 2020" : mode === "thanks" ? "Thank you." : "Hey, Jarvis. What time is it?" }));
     }
@@ -296,6 +298,27 @@ test("brain proxy still returns the upstream answer", async () => {
   });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).answer, "Hello");
+});
+
+test("brain requests carry a reasoning-safe token budget and an exhausted budget is reported clearly", async () => {
+  mode = "success";
+  const response = await auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Hello", sessionId: "budget" }),
+  });
+  assert.equal(response.status, 200);
+  // The brain is a reasoning model: max_tokens covers its thinking tokens too,
+  // so an undersized budget comes back with empty content and finish_reason
+  // "length" (the red pipeline error after "Wetter Wien" on 2026-10-04).
+  assert.ok(JSON.parse(received.toString("utf8")).max_tokens >= 4096);
+  mode = "empty-answer";
+  const failed = await auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Hello", sessionId: "budget-exhausted" }),
+  });
+  assert.equal(failed.status, 500);
+  assert.match((await failed.json()).message, /token budget/);
+  mode = "success";
 });
 
 test("TTS proxy returns upstream audio and reports configuration", async () => {
