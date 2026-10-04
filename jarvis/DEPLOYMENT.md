@@ -156,7 +156,16 @@ curl -k -I https://jarvis.gw-1-vie-1-at-netcup.rwnix.net/
 curl -k -I https://jarvis.gw-1-nbg-1-de-netcup.rwnix.net/
 ```
 
-Expected public route result without credentials is `401 Unauthorized` with `WWW-Authenticate: Basic realm="Authorization required"`.
+Expected public route result without credentials is `401 Unauthorized` with
+`WWW-Authenticate: Basic realm="Authorization required"`.
+
+With valid `mesh-admin` Basic Auth credentials (verified on 2026-10-04 on both
+gateways) the route passes the Basic layer and answers `302` to the gateway's
+Authelia portal (`auth.gw-1-*-at-netcup` / `-de-netcup` with `?rd=` back to the
+requested path), where the browser two-factor login completes. The vhost access
+log shows `[Sent-to 192.168.54.111]`, confirming the proxy chain to the app.
+Note: the NPM access files are htpasswd `apr1` hashes (`admin:$apr1$...`), not
+plaintext — the plaintext password is the NPM database value.
 
 Observed successful checks:
 
