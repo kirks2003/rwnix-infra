@@ -54,7 +54,7 @@ async function setup(t, transcribe, options = {}) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   t.after(() => assert.deepEqual(errors, []));
-  const calls = { audio: [], prompts: [], speak: [], mcp: undefined };
+  const calls = { audio: [], prompts: [], speak: [], mcp: undefined, wakePhrase: undefined };
   await page.addInitScript(() => {
     window.testTracks = [];
     window.ttsEvents = [];
@@ -114,6 +114,7 @@ async function setup(t, transcribe, options = {}) {
     const payload = route.request().postDataJSON();
     calls.prompts.push(payload.prompt);
     calls.mcp = payload.mcp;
+    calls.wakePhrase = payload.wakePhrase;
     await route.fulfill({ json: { answer: options.answer || "Done.", requestId: "brain-test" } });
   });
   await page.goto(origin);
@@ -192,6 +193,24 @@ test("wake word plus stop cuts a speaking answer before it finishes", { timeout:
   // command and must cut the speech without a second brain round trip.
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : "Rocky stop",
+  }), { hangTTS: true });
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech stopped by voice command"),
+    null, { timeout: 20000 });
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  // The hung utterance was cancelled by the cut, not left to the TTS watchdog.
+  assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Wake listening",
+    null, { timeout: 10000 });
+  await page.click("#stopButton");
+});
+
+test("a bare stop word without the wake phrase cuts a speaking answer", { timeout: 30000 }, async (t) => {
+  // The escape hatch for answers that run too long: the user says just the
+  // stop word (no wake phrase) while the answer is still speaking, and the
+  // speech wake-watch must cut the audio on it without a second brain round
+  // trip.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : "stop",
   }), { hangTTS: true });
   await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech stopped by voice command"),
     null, { timeout: 20000 });
@@ -295,6 +314,36 @@ test("MCP web-search toggle is saved, restored and sent with brain requests", { 
     null, { timeout: 15000 });
   assert.deepEqual(calls.prompts, ["What time is it?"]);
   assert.deepEqual(calls.mcp, { websearch: true });
+});
+
+test("chat requests carry the active wake phrase so the brain answers as its name", { timeout: 20000 }, async (t) => {
+  // The brain's name is the wake word's name, and personal wake words are
+  // per-browser: the /api/chat body must carry the active phrase (server
+  // default, then the personal override) for the server to inject
+  // "Your name is ...".
+  const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  await page.click("#stopButton");
+  const ask = async (text) => {
+    // page.fill is unstable in minimal containers (see the wake-word tests);
+    // set the value directly.
+    await page.evaluate((value) => {
+      const input = document.getElementById("manualPrompt");
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, text);
+    await page.click("#sendManualButton");
+    // The manual-prompt flow stops itself, so the Stop button is disabled.
+    await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
+      null, { timeout: 15000 });
+  };
+  await ask("Who are you?");
+  await page.waitForFunction(() => window.savedUtterances.length >= 1, null, { timeout: 15000 });
+  assert.equal(calls.wakePhrase, "Rocky");
+  await page.fill("#wakeWordInput", "Kaya");
+  await page.click("#saveWakeWordButton");
+  await ask("Who are you?");
+  await page.waitForFunction(() => window.savedUtterances.length >= 2, null, { timeout: 15000 });
+  assert.equal(calls.wakePhrase, "Kaya");
 });
 
 test("manual prompt returns the pipeline icons to waiting after the answer speaks", { timeout: 20000 }, async (t) => {

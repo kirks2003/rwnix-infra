@@ -543,7 +543,18 @@ async function listen(session) {
           log("wake", "Completed utterance came back empty; waiting for the command after the beep.");
           prompt = "";
         }
-        if (prompt === null) throw new Error("Whisper did not confirm the wake phrase in the completed utterance.");
+        if (prompt === null) {
+          // A bare stop word right after the spoken answer (no wake phrase)
+          // is the same escape hatch as the wake-word stop: acknowledge it
+          // and stay in wake listening instead of erroring.
+          if (isPostSpeechStop(fullText, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS)) {
+            log("tts", `Stop word ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer without a wake phrase; staying in wake listening.`);
+            session.mic.beep();
+            session.lastSpeechEndedAt = 0;
+            break;
+          }
+          throw new Error("Whisper did not confirm the wake phrase in the completed utterance.");
+        }
         if (!prompt) {
           const commandStart = buffer.end;
           const commandCaptured = await waitForCommandEnd(session, commandStart, true);
@@ -599,7 +610,9 @@ async function answer(session, prompt) {
   stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
   const result = await request(session, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags }),
+    // The brain answers as the wake word's name, so the active phrase (server
+    // default or personal override) travels with every request.
+    body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase }),
   });
   if (!result.answer) throw new Error("Brain returned no answer");
   log("brain", `Request ${result.requestId} completed`);
@@ -732,6 +745,16 @@ function watchForVoiceCommand(session, signal, speech) {
         if (detected && detected.trim()) {
           command = detected;
           log("wake", `Wake phrase heard while speaking: ${JSON.stringify(result.text || "")}`);
+          speech.abort(speechStopped);
+          return;
+        }
+        // A bare stop word, without the wake phrase, also cuts the speech:
+        // the escape hatch for answers that run too long. isStopCommand
+        // matches the whole window exactly, so a longer sentence from the
+        // speaker echo does not self-trigger.
+        if (isStopCommand(result.text || "")) {
+          command = (result.text || "").trim();
+          log("wake", `Stop word heard while speaking: ${JSON.stringify(result.text || "")}`);
           speech.abort(speechStopped);
           return;
         }

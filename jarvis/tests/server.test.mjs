@@ -207,6 +207,22 @@ test("chat accepts the per-server mcp flag map, ignores unknown ids and defaults
   assert.match(brainPrompt(), /Web search \(MCP web-search server\) is OFF/);
 });
 
+test("the brain answers as the wake word's name, per request", async () => {
+  mode = "success";
+  const brainPrompt = () => JSON.parse(received.toString("utf8")).messages[0].content;
+  const ask = (body) => auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await ask({ prompt: "Hello", sessionId: "wake-name-rocky", wakePhrase: "Hey Rocky" });
+  assert.match(brainPrompt(), /Your name is Rocky/);
+  await ask({ prompt: "Hello", sessionId: "wake-name-kaya", wakePhrase: "Kaya" });
+  assert.match(brainPrompt(), /Your name is Kaya/);
+  // Browsers that send no wake phrase fall back to the app name.
+  await ask({ prompt: "Hello", sessionId: "wake-name-fallback" });
+  assert.match(brainPrompt(), /Your name is Jarvis/);
+});
+
 test("the brain knows the signed-in user's first name and is honest about live data while web search is off", async () => {
   mode = "success";
   const brainPrompt = () => JSON.parse(received.toString("utf8")).messages[0].content;
