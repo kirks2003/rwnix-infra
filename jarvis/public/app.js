@@ -1,7 +1,7 @@
-import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase } from "./audio.js";
+import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst } from "./audio.js";
 import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
   pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError,
-  textForSpeech, isStopCommand, isPostSpeechStop } from "./voice.js";
+  textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
 
 const el = Object.fromEntries([
@@ -623,8 +623,11 @@ async function listen(session) {
         if (prompt === null) {
           // A bare stop word right after the spoken answer (no wake phrase)
           // is the same escape hatch as the wake-word stop: acknowledge it
-          // and stay in wake listening instead of erroring.
-          if (isPostSpeechStop(fullText, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS)) {
+          // and stay in wake listening instead of erroring. With speaker echo
+          // the window's transcript is the answer's own words plus the stop
+          // word, so the match needs a loud user burst in the window's audio.
+          if (isPostSpeechStop(fullText, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS,
+              { userBurst: hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate) })) {
             log("tts", `Stop word ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer without a wake phrase; staying in wake listening.`);
             session.mic.beep();
             session.lastSpeechEndedAt = 0;
@@ -651,8 +654,10 @@ async function listen(session) {
         }
         mark("whisper", "done");
         // A stop command heard shortly after a spoken answer is not a prompt
-        // for the brain; it just confirms the speech is over.
-        if (isPostSpeechStop(prompt, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS)) {
+        // for the brain; it just confirms the speech is over. The burst-gated
+        // match covers the echoed window, exactly like the wake pipeline above.
+        if (isPostSpeechStop(prompt, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS,
+            { userBurst: hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate) })) {
           log("tts", `Stop command ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer; staying in wake listening.`);
           session.mic.beep();
           session.lastSpeechEndedAt = 0;
@@ -785,8 +790,11 @@ async function speak(session, text, speech) {
 // never settles (speaker echo plus the user talking), on the 3 s forced speech
 // cap. It transcribes the window and, if the wake phrase is in there with a
 // non-empty command after it, aborts the speech with `speechStopped` and keeps
-// the command. Probe failures are swallowed: a bad probe must not kill the
-// answer.
+// the command. A stop word heard the same way — exact over the window, or
+// contained in the echoed transcript when the window's audio carries a loud
+// user burst — cuts the speech instead. Probe failures are swallowed: a bad
+// probe must not kill the answer. Every probe's transcript lands in the Live
+// log, so a stop that does not trigger is debuggable from the page alone.
 // `speech` is the per-answer AbortController (answer()), so the watch can
 // abort it with the speechStopped reason; its signal feeds the composite.
 function watchForVoiceCommand(session, signal, speech) {
@@ -819,25 +827,32 @@ function watchForVoiceCommand(session, signal, speech) {
         const result = await request(session, `/api/transcribe?language=${language}`, {
           method: "POST", headers: { "content-type": blob.type }, body: blob, signal,
         });
-        const detected = wakeCommand(result.text || "", config.wakePhrase);
+        const text = result.text || "";
+        const detected = wakeCommand(text, config.wakePhrase);
         // The assistant's own text may contain the wake phrase without a
         // command after it; only a non-empty command interrupts the speech.
         if (detected && detected.trim()) {
           command = detected;
-          log("wake", `Wake phrase heard while speaking: ${JSON.stringify(result.text || "")}`);
+          log("wake", `Wake phrase heard while speaking: ${JSON.stringify(text)}`);
           speech.abort(speechStopped);
           return;
         }
-        // A bare stop word, without the wake phrase, also cuts the speech:
-        // the escape hatch for answers that run too long. isStopCommand
-        // matches the whole window exactly, so a longer sentence from the
-        // speaker echo does not self-trigger.
-        if (isStopCommand(result.text || "")) {
-          command = (result.text || "").trim();
-          log("wake", `Stop word heard while speaking: ${JSON.stringify(result.text || "")}`);
+        // A stop word, without the wake phrase, also cuts the speech: the
+        // escape hatch for answers that run too long. The exact whole-window
+        // match covers the quiet case; with speaker echo the window
+        // transcribes as the answer's own words plus the stop word, so a loud
+        // user burst in the window's audio unlocks the containment match —
+        // and keeps a pure-echo window from self-triggering on an answer that
+        // merely ends on a stop word.
+        const userBurst = hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate);
+        const stopText = isStopCommand(text) ? text.trim() : userBurst ? stopCommandIn(text) : null;
+        if (stopText) {
+          command = stopText;
+          log("wake", `Stop word heard while speaking: ${JSON.stringify(text)}`);
           speech.abort(speechStopped);
           return;
         }
+        log("wake", `Speech watch probe: ${JSON.stringify(text)}`);
       } catch (error) {
         if (error === speechStopped || signal.aborted) return;
       }

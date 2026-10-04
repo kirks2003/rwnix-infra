@@ -218,6 +218,7 @@ export function normalizeVoiceId(value) {
 export const STOP_COMMANDS = [
   "stop", "stopp", "stop it", "halt", "still", "quiet", "enough",
   "genug", "genugsam", "das reicht", "reicht", "schweig", "schweigen",
+  "hör auf", "lass es", "lass das", "genug schon",
 ];
 
 export function isStopCommand(command) {
@@ -225,12 +226,38 @@ export function isStopCommand(command) {
   return STOP_COMMANDS.includes(normalized);
 }
 
+// The same list as a word-boundary containment match: with speaker echo the
+// probe window transcribes as the answer's own words plus the stop word, so
+// the exact whole-window match never fires. Returns the matched command or
+// null. With `trailing`, only a stop word at the very end of the text counts
+// — a deliberate last utterance, not part of a longer sentence.
+export function stopCommandIn(command, { trailing = false } = {}) {
+  const normalized = String(command || "").trim().toLowerCase().replace(/[.!?,;:]+$/g, "");
+  if (!normalized) return null;
+  for (const word of STOP_COMMANDS) {
+    if (trailing) {
+      if (normalized === word || normalized.endsWith(` ${word}`)) return word;
+      continue;
+    }
+    const escaped = word.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    if (new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped.join("[\\s,;:.!?-]+")}(?![\\p{L}\\p{N}_])`, "u").test(normalized)) {
+      return word;
+    }
+  }
+  return null;
+}
+
 // The speech wake-watch cuts the audio while it plays; this is the fallback
 // for the wake pipeline: a stop command heard within `windowMs` after the
 // answer's speech finished (lastSpeechEndedAt, same clock as `now`) still
-// counts as a speech stop and is not sent to the brain.
-export function isPostSpeechStop(command, lastSpeechEndedAt, now, windowMs) {
-  return isStopCommand(command) && lastSpeechEndedAt > 0 && now - lastSpeechEndedAt < windowMs;
+// counts as a speech stop and is not sent to the brain. The exact match covers
+// the quiet window; an echoed window (the answer's own words around the stop
+// word) counts only when the caller passes userBurst — the window's audio
+// carried the user's voice louder than the echo.
+export function isPostSpeechStop(command, lastSpeechEndedAt, now, windowMs, { userBurst = false } = {}) {
+  if (lastSpeechEndedAt <= 0 || now - lastSpeechEndedAt >= windowMs) return false;
+  if (isStopCommand(command)) return true;
+  return userBurst && Boolean(stopCommandIn(command, { trailing: true }));
 }
 
 export const voiceSpeedRange = { min: 0.6, max: 1.6, step: 0.05, default: 1 };

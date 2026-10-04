@@ -201,3 +201,41 @@ export function normalizeWakePhrase(value) {
   }
   return phrase;
 }
+
+// True when the window holds a contiguous run of at least minBurstMs whose
+// per-100 ms block RMS is at least burstGain times the median of the window's
+// voice blocks and at least absoluteFloor: the user's own voice standing out
+// against a quieter speaker echo. A uniform recording (pure echo, or the user
+// speaking the whole window at one level) has no such run, so neither can
+// self-trigger a voice command.
+export function hasLoudBurst(samples, start, end, sampleRate, options = {}) {
+  const { voiceThreshold = 0.012, burstGain = 1.5, minBurstMs = 200, absoluteFloor = 0.02 } = options;
+  const wrap = samples.length;
+  const block = Math.max(1, Math.floor(sampleRate * 0.1));
+  start = Math.max(0, Math.floor(start));
+  end = Math.floor(end);
+  if (end - start < block * 5) return false;
+  const levels = [];
+  for (let from = start; from + block <= end; from += block) {
+    let energy = 0;
+    for (let i = 0; i < block; i++) {
+      const sample = samples[(from + i) % wrap];
+      energy += sample * sample;
+    }
+    levels.push(Math.sqrt(energy / block));
+  }
+  const voice = levels.filter((level) => level >= voiceThreshold).sort((a, b) => a - b);
+  if (voice.length < 3) return false;
+  const floor = Math.max(absoluteFloor, voice[Math.floor(voice.length / 2)] * burstGain);
+  const minRun = Math.max(2, Math.round(minBurstMs / 100));
+  let run = 0;
+  for (const level of levels) {
+    if (level >= floor) {
+      run += 1;
+      if (run >= minRun) return true;
+    } else {
+      run = 0;
+    }
+  }
+  return false;
+}
