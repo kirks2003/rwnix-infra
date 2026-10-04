@@ -405,13 +405,13 @@ test("login issues a session cookie and rejects wrong credentials", async () => 
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    assert.equal(bad.status, 401, JSON.stringify(body));
+    assert.equal(bad.status, 403, JSON.stringify(body));
     await bad.json();
   }
 });
 
 test("api routes require the session cookie; health stays public", async () => {
-  assert.equal((await fetch(`${origin}/api/config`)).status, 401);
+  assert.equal((await fetch(`${origin}/api/config`)).status, 403);
   for (const [pathname, body] of [
     ["/api/chat", JSON.stringify({ prompt: "Hello" })],
     ["/api/speak", JSON.stringify({ text: "Hello" })],
@@ -420,7 +420,7 @@ test("api routes require the session cookie; health stays public", async () => {
     const response = await fetch(`${origin}${pathname}`, {
       method: "POST", headers: { "content-type": "application/json" }, body,
     });
-    assert.equal(response.status, 401, pathname);
+    assert.equal(response.status, 403, pathname);
     await response.json();
   }
   assert.equal((await fetch(`${origin}/api/health`)).status, 200);
@@ -438,7 +438,7 @@ test("repeated failed logins lock the address out", async (t) => {
     attempts.push(bad.status);
     await bad.json();
   }
-  assert.deepEqual(attempts, [401, 401, 401, 401, 401]);
+  assert.deepEqual(attempts, [403, 403, 403, 403, 403]);
   // The sixth attempt is locked out even with the right password.
   const locked = await fetch(`${localOrigin}/api/login`, {
     method: "POST", headers: { "content-type": "application/json" },
@@ -456,7 +456,7 @@ test("logout invalidates the session cookie", async (t) => {
   const out = await fetch(`${localOrigin}/api/logout`, { method: "POST", headers: { cookie } });
   assert.equal(out.status, 200);
   assert.equal((await out.json()).user, "Roman");
-  assert.equal((await fetch(`${localOrigin}/api/config`, { headers: { cookie } })).status, 401);
+  assert.equal((await fetch(`${localOrigin}/api/config`, { headers: { cookie } })).status, 403);
 });
 
 test("each user keeps an isolated prompt history", async () => {

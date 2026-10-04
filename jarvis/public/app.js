@@ -894,8 +894,10 @@ function applyVoice(value, persist) {
 }
 
 // --- Multi-user login -------------------------------------------------------
-// The backend gates every /api route on an HttpOnly session cookie. A 401 on
-// /api/config means "not signed in", so the login panel takes over the shell.
+// The backend gates every /api route on an HttpOnly session cookie. A 403 on
+// /api/config means "not signed in", so the login panel takes over the shell
+// (the backend answers 403, not 401, so the browser does not mistake it for a
+// rejection of the gateway's Basic Auth credentials).
 // Each user's prompt history is keyed by their account on the server, so
 // Mila and Roman never share a conversation.
 function showLogin(message) {
@@ -985,7 +987,7 @@ el.voiceSelect.replaceChildren(...voiceGroups.map(([group, label]) => {
 async function loadConfig(userFromLogin) {
   stage("standby", "Loading", "Loading runtime configuration.");
   const response = await fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) });
-  if (response.status === 401) {
+  if (response.status === 403) {
     showLogin();
     return;
   }
