@@ -21,6 +21,7 @@ Multi-user browser Jarvis for Chrome desktop and Android Chrome.
 - **Stop the answer by voice.** While an answer is being spoken, a parallel wake watch probes the microphone with the same trailing-edge trigger as the wake probes (350 ms of silence, plus a forced probe after 3 s of unbroken voice, because the speaker echo keeps the mic active) — so a stop command cuts the speech within at most 3 seconds of being said, for every voice profile. Saying the wake word plus a stop word ("stop", "stopp", "stop it", "halt", "still", "quiet", "enough", "genug", "genugsam", "das reicht", "reicht", "schweig", "schweigen", "hör auf", "lass es", "lass das", "genug schon") cuts the speech: the Live log says so, the pipeline beeps and returns to wake listening without a brain round trip. Saying **just the stop word, without the wake word**, also cuts the speech — that is the escape hatch for answers that run too long. With speaker echo the probe window transcribes as the answer's own words plus the stop word, so the match is echo-aware: it fires when the whole window is the stop word, or when the stop word stands alone (word boundary, anywhere in the window) **and** the window's audio carries a loud user burst — a contiguous ≥200 ms run of mic blocks at least 1.5× the window's voice-block median, i.e. the user's own voice standing out against the quieter echo. A pure-echo window (no user burst) can never self-trigger on an answer that merely ends on a stop word, and a stop word buried in the echo's text without the user's voice is ignored. The same echo-aware rule applies to the wake pipeline's fallback: the same stop word heard up to 10 s after the speech already finished is treated identically, wake word or not (the fallback's permissive match additionally requires the stop word to end the utterance). Every watch probe's transcript lands in the Live log ("Speech watch probe: …"), so a stop that does not trigger is debuggable from the page alone. Any other command heard while speaking ("Rocky, what time is it?") cuts the speech and starts a new brain round trip with it.
 - **Text-only mode.** The **Speak / Text only** switch in the voice settings turns spoken answers off: the answer is written to the Answer panel and the TTS step is marked skipped. The wake pipeline itself keeps running; the setting is saved per browser.
 - Spoken output is plain language only: before any TTS request or `speechSynthesis` utterance, markdown, links, code markers, URLs and special signs are stripped (`textForSpeech` in `public/voice.js`). The printed Answer panel keeps the brain's text verbatim.
+- **Knowledge graph (MCP + panel).** Next to web search there is a second MCP server, **Knowledge graph** (`id: "graph"`), giving the brain read-only access to the Neo4j knowledge graph through the official `neo4j-mcp` server (stdio, spawned by the backend exactly like the web-search server). With the toggle on, the brain's system prompt carries the user's stored entities plus the shared knowledge (a bounded context block), and the brain can call two tools — `get-schema` and `read-cypher` — over up to three tool rounds within the request deadline; the tool results go back to the brain as regular tool messages. The graph is populated automatically: after every answered turn the backend (never the brain) makes one structured extraction call over the prompt, the web search results and the answer, and upserts the entities and relations — the app's only write path, run fire-and-forget so the spoken reply is never blocked. Chat turns can never write to the graph: the MCP server is spawned with writes disabled (the write tool does not exist in its tool list), `read-cypher` rejects write Cypher via Neo4j's query classification, and the only write path is the backend's own ingestion, which issues only `MERGE`/`SET` upserts (see "Knowledge graph (Neo4j)"). The **Knowledge graph panel** below the Prompt/Answer panels is a read-only view — node/link counts, a small force-directed SVG of the newest (or a clicked node's) neighbourhood, the schema, and recent activity (the brain's read queries plus ingested turns); it refreshes every 15 s and after each answered turn. Without the `NEO4J_*` environment variables everything degrades to "not configured" (panel status line, no tools, the brain is told the feature is unavailable) and nothing else changes.
 - **Multi-user login**: the shell opens on a sign-in form (users from `USERS`, default `Mila,Roman`; each user's password is their own name). A successful login sets an HttpOnly session cookie; every `/api/*` route (except login/logout/health) requires it and answers 403 otherwise, which the UI turns back into the login screen. (403, deliberately not 401: the app sits behind the gateway's Basic Auth layer, and a 401 arriving on a request that carried those credentials makes the browser clear its cached Basic credentials and prompt again — see `DEPLOYMENT.md`, "Double Basic Auth prompt".) Each user's prompt history is kept on the server **per account**, so Mila and Roman have completely separate prompt caches (shared across that user's own tabs) with no connection between users. Sign out from the hero or just close the tab (sessions live 7 days, in memory only).
 
 ## Browser limitations
@@ -82,6 +83,22 @@ The app opens on a sign-in form. Users come from the `USERS` environment variabl
 - Five failed logins from one address lock it out for 15 minutes (429).
 - **Sign out** (hero, next to "Signed in as …") stops any running session and deletes the server session; the cookie is cleared in the browser.
 
+## Knowledge graph (Neo4j)
+
+The knowledge graph is a Neo4j Community database on the compose network that stores what the assistant learns from conversations and web searches: what each user knows (`(:User)-[:KNOWS]->(:Entity)`), entity-to-entity links from a fixed allowlist of relation types (`WORKS_AT`, `LIVES_IN`, `STUDIES_AT`, `BORN_IN`, `FRIEND_OF`, `FAMILY_OF`, `PART_OF`, `LOCATED_IN`, `RELATED_TO`, `MENTIONED_IN`, `LIKES`, `WENT_TO`, `OWNS`, `USES`), and a `common` flag marking shared knowledge (flagged by the extractor, or known to two or more users).
+
+**Chat turns can never write to the graph.** Neo4j Community Edition has no roles or grants — RBAC (`CREATE ROLE`, `GRANT`) is Enterprise-only, and every Community user has implied admin privileges (verified on `5.26.31`: the server rejects `CREATE ROLE` with `UnsupportedAdministrationCommand`). So the guarantee is enforced by the MCP server and the application layer, not by the database:
+
+1. The brain's MCP server (the official `neo4j-mcp`, installed in the jarvis image and spawned by the backend) is started with `NEO4J_MCP_READ_ONLY=true` **forced by the backend**, regardless of the host environment — the `write-cypher` tool is not even in the tool list.
+2. `read-cypher` itself is enforced read-only by Neo4j's query classification (an `EXPLAIN`-based check for write operations), so even a prompt-injected brain cannot run `CREATE`/`MERGE`/`DELETE` through the read tool.
+3. The only write path is the backend's own turn ingestion, after the answer is already delivered: one cheap structured LLM call extracts entities and relations from the prompt, the web search results (if any) and the answer, and the result is sanitised (allowlisted entity types and relation types, capped counts, validated property keys) and upserted with `MERGE`/`SET` using the `jarvis_write` user — there is no `DELETE` anywhere in the ingestion code. A failed extraction is skipped, never a crash and never a partial write.
+
+The `jarvis_read` and `jarvis_write` database users exist for credential separation (MCP/panel vs ingestion); Community Edition does not restrict what either user can do at the database level, so treat both passwords as write access to the graph.
+
+**Panel.** The Knowledge graph panel below the Prompt/Answer panels (always visible, like the transcript) is display-only: node/link counts, a small force-directed SVG of the newest subgraph (click a node to re-centre on its neighbourhood), the schema, and recent activity — the brain's read queries and the ingested turns — which doubles as the audit trail that only reads ever come from the brain. Endpoints: `GET /api/graph/status`, `/api/graph/subgraph?limit=&center=`, `/api/graph/schema`, `/api/graph/activity`, all read-only and session-gated like the other `/api` routes.
+
+**Running without a graph.** Leave the `NEO4J_*` variables in `.env` empty: the endpoints answer `503 graph_not_configured`, the panel shows "Not configured on this server", the brain is told the feature is off, and chat behaves exactly as before.
+
 ## Troubleshooting
 
 **"I say the wake word and nothing happens."** Three causes have actually been observed, in
@@ -137,6 +154,19 @@ TTS_ENDPOINTS=https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/sp
 TTS_MODEL=speaches-ai/Kokoro-82M-v1.0-ONNX
 TTS_VOICE=bm_george
 TTS_API_KEY=
+# Knowledge graph (optional; leave empty to run without the graph — see
+# "Knowledge graph (Neo4j)"):
+NEO4J_URI=bolt://neo4j:7687
+NEO4J_DATABASE=neo4j
+NEO4J_READ_USER=jarvis_read
+NEO4J_READ_PASSWORD=
+NEO4J_WRITE_USER=jarvis_write
+NEO4J_WRITE_PASSWORD=
+NEO4J_ADMIN_PASSWORD=
+NEO4J_MCP_URI=bolt://neo4j:7687
+NEO4J_MCP_DATABASE=neo4j
+NEO4J_MCP_USERNAME=jarvis_read
+NEO4J_MCP_PASSWORD=
 ```
 
 `USERS` lists the login accounts (comma-separated); each one signs in with its own name as the password (see Login (multi-user)).
@@ -159,7 +189,7 @@ Open <http://127.0.0.1:8094>.
 docker compose up -d --build
 ```
 
-The compose file binds `192.168.54.111:8094` for vm104. Live STT and TTS use the gpu-1 voice service configured in `WHISPER_ENDPOINTS` and `TTS_ENDPOINTS` (see `DEPLOYMENT.md`).
+The compose file binds `192.168.54.111:8094` for vm104. Live STT and TTS use the gpu-1 voice service configured in `WHISPER_ENDPOINTS` and `TTS_ENDPOINTS` (see `DEPLOYMENT.md`). It also starts the `neo4j` knowledge-graph database (pinned `neo4j:5.26.31-community`, APOC plugin, capped heap, no published ports) — see "Knowledge graph (Neo4j)"; leave the `NEO4J_*` variables empty to run without a graph.
 
 ## Regression tests
 
@@ -181,7 +211,7 @@ If `--with-deps` is unavailable, the Debian 12 (bookworm) package list is:
 `libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 libgbm1 libasound2 libpango-1.0-0 libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxcb1 libxkbcommon0`.
 Verify with `ldd ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome | grep "not found"` — it must print nothing.
 
-Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality. Because the fixture microphone keeps playing a tone, tests that let the answer speak for real (self-hosted TTS or the TTS watchdog) cap the wake phrase at the first two transcribe calls — the speech wake-watch probes the mic while speaking and would otherwise interrupt the speech under test. `tests/voice.test.mjs` covers clause splitting, character-profile delivery, HAL playback sequencing, the German browser-voice picker, the voice stop-command matcher, the post-speech stop window and the plain-language TTS sanitizer against Web Audio stubs; `tests/visualizer.test.mjs` covers the waveform ring geometry, spectrum mapping and smoothing; `tests/mcp.test.mjs` covers the MCP web-search server's protocol (initialize, tools/list, tools/call) and the pure search-engine helpers (redirect unwrapping, ad filtering, dedupe merging, result formatting) without touching the network; actual playback is covered by the Chromium tests.
+Browser tests use actual Chromium microphone capture and the production AudioWorklet/WAV encoder with synthetic audio. STT/brain responses and TTS callbacks are controlled for lifecycle tests; they are not proof of physical microphone or speaker quality. Because the fixture microphone keeps playing a tone, tests that let the answer speak for real (self-hosted TTS or the TTS watchdog) cap the wake phrase at the first two transcribe calls — the speech wake-watch probes the mic while speaking and would otherwise interrupt the speech under test. `tests/voice.test.mjs` covers clause splitting, character-profile delivery, HAL playback sequencing, the German browser-voice picker, the voice stop-command matcher, the post-speech stop window and the plain-language TTS sanitizer against Web Audio stubs; `tests/visualizer.test.mjs` covers the waveform ring geometry, spectrum mapping and smoothing; `tests/mcp.test.mjs` covers the MCP web-search server's protocol (initialize, tools/list, tools/call) and the pure search-engine helpers (redirect unwrapping, ad filtering, dedupe merging, result formatting) without touching the network; actual playback is covered by the Chromium tests. `tests/graph.test.mjs` covers the knowledge-graph pipeline: extraction parsing and sanitising, context formatting, the in-memory store, the unconfigured 503s, and — against a real HTTP backend with the stdio MCP server mocked (`tests/mock-graph-mcp.mjs`) — the full configured brain tool loop (context injection, `get-schema`/`read-cypher` calls, write-Cypher rejection) plus post-turn ingestion; `tests/graph.browser.mjs` covers the Knowledge graph panel render, click-to-re-centre and the unconfigured status line.
 
 `wake probes end in silence rather than cutting a word in half` is a property test: it
 asserts every uploaded probe window has a near-silent tail, which is what keeps the

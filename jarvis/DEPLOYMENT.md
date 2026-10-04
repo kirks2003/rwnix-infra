@@ -16,6 +16,7 @@ vm104 hosts Jarvis. vm103 hosts the active Whisper STT service. vm104 still has 
 |---|---|---|---|---|
 | vm103 | `voice-gpu` | `python:3.12-slim` | `http://192.168.53.111:8003` | active STT |
 | vm104 | `jarvis` | locally built from `jarvis/Dockerfile` | `http://192.168.54.111:8094` | web app/backend |
+| vm104 | `jarvis-neo4j` | `neo4j:5.26.31-community` | none (compose network only) | knowledge graph |
 | vm104 | `whisper` | `fedirz/faster-whisper-server:latest-cpu` | `http://192.168.54.111:8001` | legacy/not active |
 
 Jarvis calls the vm103 Whisper service directly across the internal network at `192.168.53.111:8003`; the prior vm104-local `host.docker.internal:8001` endpoint is not the active Jarvis STT target.
@@ -1029,3 +1030,99 @@ Verified against the running container on `192.168.54.111:8094`:
   Kokoro engine.
 - Browsers holding the old UI need a hard refresh (Ctrl+Shift+R) to see
   the new voice in the Answer-voice select.
+
+## Knowledge graph (Neo4j) rollout (2026-10-04)
+
+A Neo4j Community database and knowledge graph were added for the assistant:
+per-user knowledge (`(:User)-[:KNOWS]->(:Entity)`), entity-to-entity
+relations from a fixed allowlist of relation types, and a `common` flag for
+shared knowledge. The graph populates itself from every answered turn (web
+search results and brain answers) and is exposed to the brain as a second MCP
+server — **Knowledge graph** — with a read-only panel below the Prompt/Answer
+panels (see `README.md`, "Knowledge graph (Neo4j)").
+
+**Guarantee that chat turns can never write to the graph (application
+layer).** During the rollout it turned out that Neo4j Community Edition has
+no RBAC: `CREATE ROLE`/`GRANT` are rejected with
+`UnsupportedAdministrationCommand` (verified on a fresh default-configured
+`neo4j:5.26.31-community` container; official docs: "In Neo4j Community
+Edition there are no roles, but all users have implied administrator
+privileges"). The no-delete guarantee therefore rests on the MCP server and
+the application layer:
+
+1. The brain's MCP server is the official `neo4j-mcp` (PyPI
+   `neo4j-mcp-server==1.6.0`, installed into the jarvis image at build time,
+   spawned by the backend on demand). The backend spawns it with
+   `NEO4J_MCP_READ_ONLY=true` and `NEO4J_MCP_TELEMETRY=false` **forced
+   regardless of the host environment** — `write-cypher` is not in its tool
+   list.
+2. `read-cypher` is enforced read-only by Neo4j's query classification
+   (an `EXPLAIN`-based check for write operations), so a prompt-injected
+   brain cannot run `CREATE`/`MERGE`/`DELETE` through the read tool.
+3. The only write path is the backend's own post-turn ingestion: one
+   structured extraction LLM call over the prompt, the search results (if
+   any) and the answer, sanitised (allowlisted entity/relation types, capped
+   counts, validated property keys) and upserted with `MERGE`/`SET` using
+   `jarvis_write` — there is no `DELETE` anywhere in the ingestion code —
+   fire-and-forget after the answer was already delivered.
+
+   `jarvis_read`/`jarvis_write` provide credential separation (MCP/panel vs
+   ingestion), but on Community every user has full privileges — treat both
+   passwords as write access to the graph.
+
+**Services and env:** `neo4j` (container `jarvis-neo4j`, pinned
+`neo4j:5.26.31-community`, `NEO4J_PLUGINS=["apoc"]`, heap 512m/1g, pagecache
+512m, named volume `neo4j_data`, no published ports, wget-7474 healthcheck);
+jarvis has `depends_on: neo4j: service_healthy`. New variables in vm104's
+`.env` (never committed): `NEO4J_ADMIN_PASSWORD` (neo4j superuser, only for
+the one-shot user creation below and admin work — the value in `.env` is
+authoritative; it was rotated once during this rollout and the database was
+updated to match), `NEO4J_READ_PASSWORD` (user `jarvis_read`) and
+`NEO4J_WRITE_PASSWORD` (user `jarvis_write`); `NEO4J_MCP_*` mirrors the read
+credentials for the MCP process.
+
+**One-shot user creation (after the first healthy start).** Two gotchas hit
+during the rollout: (a) the `cypher-shell` bundled with `5.26.31` rejects
+admin commands in non-interactive mode — positional, `-f` and stdin all fail
+with `UnsupportedAdministrationCommand`, even against the `system` database —
+so admin commands must go through the HTTP API `POST /db/system/tx/commit`
+with Basic auth (the same endpoint the browser uses); (b) the 5.26
+`CREATE USER` syntax is `SET [PLAINTEXT | ENCRYPTED] PASSWORD '…'` (the 4.x
+`REQUIRE ENCRYPTED PASSWORD` form no longer parses), and `CHANGE NOT
+REQUIRED` must be appended, otherwise the new user is locked out with
+`CredentialsExpired` until its first login. Both users were created on
+2026-10-04:
+
+```bash
+cd /home/ubuntu/docker/jarvis
+ADMIN=$(grep '^NEO4J_ADMIN_PASSWORD=' .env | cut -d= -f2-)
+docker compose exec -T neo4j wget -qO- \
+  --post-data='{"statements":[{"statement":"CREATE USER jarvis_read IF NOT EXISTS SET PASSWORD \"<NEO4J_READ_PASSWORD>\" CHANGE NOT REQUIRED"}]}' \
+  --header="Content-Type: application/json" \
+  --header="Authorization: Basic $(printf neo4j:$ADMIN | base64)" \
+  http://127.0.0.1:7474/db/system/tx/commit
+# identical call for jarvis_write with NEO4J_WRITE_PASSWORD
+```
+
+**Rollout:** usual file-copy + `docker compose up -d --build`, backup first
+(code-only tarball under `/home/ubuntu/docker/`, `.env` untouched). Files:
+`graphdb.js`, `server.js`, `Dockerfile`, `docker-compose.yml`, `package.json`,
+`.env.example`, `public/index.html`, `public/style.css`, `public/app.js`,
+`tests/graph.test.mjs`, `tests/graph.browser.mjs`, `tests/mock-graph-mcp.mjs`,
+`tests/server.test.mjs`, `README.md`, `DEPLOYMENT.md`.
+
+**Risks checked at deploy time:** the `neo4j-mcp-server` PyPI package ships
+glibc wheels only (no sdist, no musl wheels), so the jarvis base image moved
+from `node:20-alpine` to `node:20-slim` (Debian bookworm, Python 3.11 via
+apt, pip `--break-system-packages`); the APOC jar download on first container
+start (needs internet on vm104); `tools` support of the `a1-dsv4f`
+`deepseek-v4-flash` endpoint (if it does not honour tools, the loop makes one
+plain call and degrades to context injection only — the pre-graph behaviour
+plus the context block), and tool-loop latency vs the 60 s browser request
+timeout (3-round cap, 50 s total deadline).
+
+**Rollback:** restore the backup tarball, remove the `NEO4J_*` lines from
+`.env`, `docker compose up -d --build` (or `docker compose rm -s neo4j` to
+drop the DB service too). The app runs fully without the graph — endpoints
+answer 503, the panel shows "Not configured on this server". The `neo4j_data`
+volume can be kept or deleted; deleting it is the only destructive step.

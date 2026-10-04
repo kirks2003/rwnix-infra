@@ -191,7 +191,10 @@ test("the language switch overrides the brain answer language", async () => {
 test("chat accepts the per-server mcp flag map, ignores unknown ids and defaults to off", async () => {
   mode = "success";
   const config = await (await auth(origin, "/api/config")).json();
-  assert.deepEqual(config.mcpServers, [{ id: "websearch", label: "Web search" }]);
+  assert.deepEqual(config.mcpServers, [
+    { id: "websearch", label: "Web search" },
+    { id: "graph", label: "Knowledge graph" },
+  ]);
   const ask = (body) => auth(origin, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify(body),

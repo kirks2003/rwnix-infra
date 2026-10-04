@@ -2,6 +2,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const graphdb = require("./graphdb");
 
 const root = __dirname;
 const publicDir = path.join(root, "public");
@@ -29,6 +30,18 @@ const config = {
   // Multi-user login: comma-separated user names. Each user's password is
   // their own name (Mila signs in with "Mila"/"Mila").
   users: splitCsv(process.env.USERS || "Mila,Roman"),
+  // Neo4j knowledge graph. The read user is used for the brain context, the
+  // /api/graph/* panel endpoints and (via the MCP server) the brain's own
+  // read-only queries; the write user is used ONLY by the backend's turn
+  // ingestion. Everything stays off when these are empty.
+  graph: {
+    uri: trimSlash(process.env.NEO4J_URI || ""),
+    database: process.env.NEO4J_DATABASE || "neo4j",
+    readUser: process.env.NEO4J_READ_USER || "",
+    readPassword: process.env.NEO4J_READ_PASSWORD || "",
+    writeUser: process.env.NEO4J_WRITE_USER || "",
+    writePassword: process.env.NEO4J_WRITE_PASSWORD || "",
+  },
 };
 
 let whisperCursor = 0;
@@ -146,6 +159,7 @@ const profileVoices = {
 // `websearch` boolean from older clients is still accepted).
 const mcpServers = [
   { id: "websearch", label: "Web search" },
+  { id: "graph", label: "Knowledge graph" },
 ];
 
 function normalizeMcpFlags(payload) {
@@ -247,7 +261,41 @@ const server = http.createServer(async (req, res) => {
         ttsModel: config.ttsModel,
         ttsVoice: config.ttsVoice,
         mcpServers: mcpServers.map(({ id, label }) => ({ id, label })),
+        graphConfigured: isGraphConfigured(),
       });
+    }
+
+    if (req.method === "GET" && pathname === "/api/graph/status") {
+      if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
+      try {
+        return json(res, 200, { requestId, ...(await graphStore.status()) });
+      } catch (error) {
+        return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
+      }
+    }
+
+    if (req.method === "GET" && pathname === "/api/graph/subgraph") {
+      if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
+      const center = String(url.searchParams.get("center") || "").slice(0, 128) || null;
+      try {
+        return json(res, 200, { requestId, ...(await graphStore.subgraph({ limit: Number(url.searchParams.get("limit")) || 60, center })) });
+      } catch (error) {
+        return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
+      }
+    }
+
+    if (req.method === "GET" && pathname === "/api/graph/schema") {
+      if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
+      try {
+        return json(res, 200, { requestId, ...(await graphStore.schema()) });
+      } catch (error) {
+        return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
+      }
+    }
+
+    if (req.method === "GET" && pathname === "/api/graph/activity") {
+      if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
+      return json(res, 200, { requestId, entries: graphActivity.slice(-30).reverse() });
     }
 
     if (req.method === "POST" && pathname === "/api/transcribe") {
@@ -330,6 +378,41 @@ function stripBasePath(pathname) {
 
 function isBrainConfigured() {
   return Boolean(config.brainBaseUrl && config.brainModel && !config.brainApiKey.includes("PUT-YOUR"));
+}
+
+function isGraphConfigured() {
+  const graph = config.graph;
+  return Boolean(graph.uri && graph.readUser && graph.readPassword && graph.writeUser && graph.writePassword);
+}
+
+// Knowledge graph store (null when unconfigured). GRAPH_MEMORY=1 swaps in the
+// in-memory store with a small starter graph for tests and demos.
+const graphStore = (() => {
+  if (!isGraphConfigured()) return null;
+  try {
+    if (process.env.GRAPH_MEMORY === "1") return graphdb.createMemoryStore();
+    return graphdb.createGraphStore({
+      uri: config.graph.uri,
+      database: config.graph.database,
+      readUser: config.graph.readUser,
+      readPassword: config.graph.readPassword,
+      writeUser: config.graph.writeUser,
+      writePassword: config.graph.writePassword,
+    });
+  } catch (error) {
+    console.log(JSON.stringify({ level: "warn", msg: "graph_store_unavailable", error: error.message }));
+    return null;
+  }
+})();
+
+// Bounded ring of graph events (brain reads + ingested turns) for the panel's
+// activity list.
+const GRAPH_ACTIVITY_CAP = 50;
+const graphActivity = [];
+
+function recordGraphActivity(entry) {
+  graphActivity.push({ at: new Date().toISOString(), ...entry });
+  if (graphActivity.length > GRAPH_ACTIVITY_CAP) graphActivity.shift();
 }
 
 function redactUrl(value) {
@@ -524,9 +607,10 @@ function isLikelyWhisperHallucination(text) {
 // across requests). The web-search tool is only used when the browser's
 // MCP web-search toggle sends websearch: true with the /api/chat request.
 class McpClient {
-  constructor(command, args) {
+  constructor(command, args, extraEnv = {}) {
     this.command = command;
     this.args = args;
+    this.extraEnv = extraEnv;
     this.child = null;
     this.pending = new Map();
     this.nextId = 1;
@@ -543,7 +627,7 @@ class McpClient {
         this.child = null;
         reject(error);
       };
-      const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...this.extraEnv } });
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => this.onData(chunk));
       child.stderr.on("data", (chunk) => {
@@ -624,6 +708,21 @@ class McpClient {
 // uses the real DuckDuckGo/Wikipedia search server.
 const mcpWebSearch = new McpClient(process.execPath, [process.env.MCP_SEARCH_SCRIPT || path.join(__dirname, "mcp", "websearch.mjs")]);
 
+// The official neo4j-mcp server (stdio) for the knowledge graph. Read-only is
+// FORCED here, not taken from the host environment: NEO4J_MCP_READ_ONLY removes
+// the write-cypher tool from the tool list, and read-cypher itself rejects
+// write Cypher via Neo4j's query classification, so no chat turn can write to
+// the graph via MCP. (Neo4j Community Edition has no RBAC, so there is no
+// DB-level read-only user — the guarantee is enforced by the MCP server, see
+// DEPLOYMENT.md, "Knowledge graph".)
+// MCP_GRAPH_COMMAND/MCP_GRAPH_ARGS let tests point the client at a mock
+// server, same pattern as MCP_SEARCH_SCRIPT.
+const mcpGraph = new McpClient(
+  process.env.MCP_GRAPH_COMMAND || "python3",
+  process.env.MCP_GRAPH_ARGS ? JSON.parse(process.env.MCP_GRAPH_ARGS) : ["-m", "neo4j_mcp_server"],
+  { NEO4J_MCP_READ_ONLY: "true", NEO4J_MCP_TELEMETRY: "false" },
+);
+
 // Runs the web_search tool of the MCP server and resolves with the result
 // text; the caller treats a failure as "answer without search results".
 async function webSearch(query, requestId, signal) {
@@ -689,12 +788,34 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
   } else {
     mcpStates.push("Web search (MCP web-search server) is OFF in the user's browser for this request, so no web results are available. For questions that need live or current data (the weather now, news, prices, sports scores, today's events), say you cannot check it while web search is off and that the user can enable it with the MCP web search toggle in the UI to let you look it up. If the user asks about web search or MCP, say it is switched off and can be enabled with the MCP search toggle in the UI.");
   }
+  let graphMessage = null;
+  if (mcpFlags.graph) {
+    if (graphStore) {
+      try {
+        const context = await withAbort(graphStore.readContext(user), signal);
+        const graphText = graphdb.formatGraphContext(context);
+        if (graphText) graphMessage = { role: "system", content: graphText };
+        mcpStates.push(graphText
+          ? "The knowledge graph (MCP graph server) is ON: what this user and the shared knowledge know is in a separate message, and you can call the get-schema and read-cypher tools to inspect or query the graph read-only for anything deeper. If the user asks what you remember or know about them, answer from the graph context and the conversation history."
+          : "The knowledge graph (MCP graph server) is ON but holds nothing relevant yet; you can still inspect it with the get-schema and read-cypher tools. New facts are stored automatically after every answer.");
+      } catch (error) {
+        if (signal.aborted) throw error;
+        console.log(JSON.stringify({ level: "warn", requestId, msg: "graph_context_failed", error: error.message }));
+        mcpStates.push("The knowledge graph (MCP graph server) is ON, but the graph is currently unreachable; answer from your own knowledge and do not mention the graph.");
+      }
+    } else {
+      mcpStates.push("The knowledge graph (MCP graph server) is ON in the user's browser but not configured on this server; do not claim graph access or stored memories.");
+    }
+  } else {
+    mcpStates.push("The knowledge graph (MCP graph server) is OFF in the user's browser for this request: no graph context and no graph tools are available for this turn, so answer from the conversation history and your own knowledge. Facts from this conversation are still stored in the graph after the answer; the user can enable the MCP knowledge graph toggle to let you read them in future conversations.");
+  }
   const messages = [
     {
       role: "system",
       content: `${config.brainSystemPrompt}\nYour name is ${wakeName} — the user calls you by your wake word, so use "${wakeName}" as your own name in your answers, for example when they ask who you are or address you by name.\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
     },
     ...(searchMessage ? [searchMessage] : []),
+    ...(graphMessage ? [graphMessage] : []),
     ...history,
     { role: "user", content: prompt },
   ];
@@ -702,24 +823,10 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
   const headers = { "content-type": "application/json" };
   if (config.brainApiKey) headers.authorization = `Bearer ${config.brainApiKey}`;
 
-  const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
-    method: "POST",
-    signal: AbortSignal.any([signal, AbortSignal.timeout(45000)]),
-    headers,
-    body: JSON.stringify({
-      model: config.brainModel,
-      messages,
-      temperature: 0.2,
-      // The brain is a reasoning model: max_tokens covers its thinking tokens
-      // too, so an undersized budget is spent on reasoning and the reply comes
-      // back with empty content (finish_reason "length"). 4096 leaves ~26 s of
-      // budget at the measured ~150 tok/s while staying inside the 45 s timeout.
-      max_tokens: 4096,
-    }),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`Brain HTTP ${response.status}: ${text.slice(0, 500)}`);
-  const data = JSON.parse(text);
+  // One overall deadline, comfortably inside the browser's 60 s request
+  // timeout: the brain may spend it on at most a few tool round-trips.
+  const data = await runBrain({ messages, user, useTools: Boolean(mcpFlags.graph && graphStore), requestId, signal, headers,
+    deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
     const finishReason = data?.choices?.[0]?.finish_reason || "";
@@ -731,7 +838,165 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
 
   const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-10);
   conversations.set(user, nextHistory);
+  // Store the turn in the knowledge graph after the answer is handed back:
+  // fire-and-forget so the spoken reply is never blocked by or fails on the
+  // graph. This is the app's only write path into the graph.
+  if (graphStore) {
+    ingestTurn({ user, prompt, searchResults: searchMessage?.content || null, answer, requestId }).catch(() => {});
+  }
   return { requestId, answer, configured: true, model: config.brainModel };
+}
+
+// The graph tools offered to the brain when the knowledge graph toggle is on.
+// Names match the neo4j-mcp server's tools 1:1; the server runs read-only
+// (NEO4J_MCP_READ_ONLY forced in mcpGraph) and read-cypher enforces read-only
+// via Neo4j's query classification.
+const GRAPH_TOOL_ROUNDS = 3;
+const GRAPH_TOOL_TIMEOUT_MS = 15000;
+const graphTools = [
+  {
+    type: "function",
+    function: {
+      name: "get-schema",
+      description: "Inspect the knowledge graph schema: node labels, relationship types and property keys. Call this before writing Cypher so the query uses the real labels.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read-cypher",
+      description: "Run a read-only Cypher query (MATCH/RETURN) against the knowledge graph and get the rows back. Write queries are rejected.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "The read-only Cypher query to run." },
+          params: { type: "object", description: "Optional query parameters, e.g. { \"name\": \"Mila\" }." },
+        },
+        required: ["query"],
+      },
+    },
+  },
+];
+
+async function runBrain({ messages, user, useTools, requestId, signal, headers, deadlineMs }) {
+  const local = [...messages];
+  const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
+  for (let round = 0; ; round += 1) {
+    const body = {
+      model: config.brainModel,
+      messages: local,
+      temperature: 0.2,
+      // The brain is a reasoning model: max_tokens covers its thinking tokens
+      // too, so an undersized budget is spent on reasoning and the reply comes
+      // back with empty content (finish_reason "length"). 4096 leaves ~26 s of
+      // budget at the measured ~150 tok/s while staying inside the timeout.
+      max_tokens: 4096,
+    };
+    if (useTools) body.tools = graphTools;
+    let data;
+    try {
+      const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
+        method: "POST", signal: totalSignal, headers, body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      if (!response.ok) throw new Error(`Brain HTTP ${response.status}: ${text.slice(0, 500)}`);
+      data = JSON.parse(text);
+    } catch (error) {
+      if (totalSignal.aborted && !signal.aborted) throw new Error(`Brain timed out after ${deadlineMs} ms`);
+      throw error;
+    }
+    const message = data?.choices?.[0]?.message;
+    const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+    if (!useTools || !toolCalls.length) return data;
+    if (round >= GRAPH_TOOL_ROUNDS) {
+      // Tool budget spent: force a final answer without tools.
+      local.push({ ...message, role: "assistant" }, { role: "system", content: "Tool budget reached. Answer now from what you have gathered." });
+      const fallback = await fetch(`${config.brainBaseUrl}/chat/completions`, {
+        method: "POST", signal: totalSignal, headers,
+        body: JSON.stringify({ model: config.brainModel, messages: local, temperature: 0.2, max_tokens: 4096 }),
+      });
+      const fallbackText = await fallback.text();
+      if (!fallback.ok) throw new Error(`Brain HTTP ${fallback.status}: ${fallbackText.slice(0, 500)}`);
+      return JSON.parse(fallbackText);
+    }
+    local.push({ ...message, role: "assistant" });
+    for (const call of toolCalls) {
+      const name = String(call.function?.name || "");
+      let args = {};
+      try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* malformed args -> error result below */ }
+      const started = Date.now();
+      if (name !== "get-schema" && name !== "read-cypher") {
+        recordGraphActivity({ kind: "brain_query", user, tool: name, ok: false, error: "unknown tool", ms: 0 });
+        local.push({ role: "tool", tool_call_id: call.id, content: "Unknown tool. Use get-schema or read-cypher." });
+        continue;
+      }
+      try {
+        const result = await withAbort(mcpGraph.call(name, args, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
+        const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
+        recordGraphActivity({ kind: "brain_query", user, tool: name, cypher: String(args.query || "").slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
+        local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
+      } catch (error) {
+        if (totalSignal.aborted) throw error;
+        recordGraphActivity({ kind: "brain_query", user, tool: name, cypher: String(args.query || "").slice(0, 200), ok: false, error: error.message.slice(0, 200), ms: Date.now() - started });
+        local.push({ role: "tool", tool_call_id: call.id, content: `Graph query failed: ${error.message}. Answer from what you know.` });
+      }
+    }
+  }
+}
+
+// --- Knowledge graph ingestion (the only write path) -------------------------
+
+const EXTRACT_SYSTEM_PROMPT = `You extract knowledge-graph entities from a voice-assistant conversation turn.
+Return ONLY a JSON object, no prose, with this exact shape:
+{"entities":[{"name":"...","type":"person|place|organization|event|topic|thing","common":true,"props":{"key":"value"}}],"relations":[{"from":"EntityName","to":"EntityName","type":"RELATION_TYPE"}]}
+Rules:
+- Extract from the prompt, the web search results and the answer together.
+- "name" is a short canonical name (e.g. "Mila", "Berlin", "Kokoro-82M"), at most a few words.
+- type must be exactly one of: person, place, organization, event, topic, thing.
+- "common" is true only for general knowledge shared by everyone (public people, cities, products, concepts); false for personal data (family, friends, routines, preferences, private plans).
+- Always include the signed-in user as a person entity with common false and their exact name.
+- relations use UPPERCASE_SNAKE types, one of: WORKS_AT, LIVES_IN, STUDIES_AT, BORN_IN, FRIEND_OF, FAMILY_OF, PART_OF, LOCATED_IN, RELATED_TO, MENTIONED_IN, LIKES, WENT_TO, OWNS, USES. "from" and "to" must be entity names from your entities list.
+- At most 12 entities and 15 relations. Prefer a few high-confidence facts over many guesses; if nothing is worth storing, return {"entities":[],"relations":[]}.`;
+
+// Runs after a finished turn: one cheap structured LLM call over the prompt,
+// the search results (if any) and the answer, then an idempotent MERGE upsert
+// with the write-only DB user. Never blocks or fails the user's reply.
+async function ingestTurn({ user, prompt, searchResults, answer, requestId }) {
+  const started = Date.now();
+  const headers = { "content-type": "application/json" };
+  if (config.brainApiKey) headers.authorization = `Bearer ${config.brainApiKey}`;
+  try {
+    const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      signal: AbortSignal.timeout(30000),
+      body: JSON.stringify({
+        model: config.brainModel,
+        temperature: 0,
+        max_tokens: 1200,
+        messages: [
+          { role: "system", content: EXTRACT_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: `user: ${user}\nprompt: ${String(prompt).slice(0, 2000)}\nweb_search_results:\n${String(searchResults || "(none)").slice(0, 6000)}\nanswer: ${String(answer).slice(0, 2000)}`,
+          },
+        ],
+      }),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Brain HTTP ${response.status}: ${text.slice(0, 300)}`);
+    const extraction = graphdb.parseExtraction(extractAnswer(JSON.parse(text)) || text);
+    if (!extraction.entities.length && !extraction.relations.length) {
+      console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_empty", ms: Date.now() - started }));
+      return;
+    }
+    await graphStore.upsertTurn({ user, ...extraction });
+    recordGraphActivity({ kind: "ingest", user, entities: extraction.entities.length, relations: extraction.relations.length });
+    console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_success", ms: Date.now() - started, entities: extraction.entities.length, relations: extraction.relations.length }));
+  } catch (error) {
+    console.log(JSON.stringify({ level: "warn", requestId, msg: "graph_ingest_failure", ms: Date.now() - started, error: error.message }));
+  }
 }
 
 // The wake word's name: the last word of the phrase after dropping a leading
