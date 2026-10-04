@@ -198,13 +198,25 @@ h2 {
 }
 
 .controls {
-  grid-template-columns: repeat(3, max-content) max-content max-content max-content 1fr;
+  /* Row 1 holds the session buttons and the language switch; the MCP
+     web-search switch sits on its own row one below, centered. */
+  grid-template-columns: max-content max-content max-content max-content max-content 1fr;
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "arm stop manual test language meters"
+    "mcp mcp mcp mcp mcp mcp";
   align-items: center;
   padding: 16px;
   border: 1px solid rgba(66, 217, 255, 0.18);
   border-radius: 18px;
   background: var(--panel);
 }
+
+#armButton { grid-area: arm; }
+#stopButton { grid-area: stop; }
+#testButton { grid-area: manual; }
+.test-control { grid-area: test; }
+.meters { grid-area: meters; }
 
 .test-control {
   display: grid;
@@ -276,9 +288,15 @@ button:disabled {
 }
 
 .language-control {
+  grid-area: language;
   display: grid;
   gap: 4px;
   justify-items: center;
+}
+
+.language-control.mcp-control {
+  grid-area: mcp;
+  justify-self: center;
 }
 
 #languageStatus, #websearchStatus {
@@ -503,6 +521,11 @@ menu {
 
   .hero, .transcript, .controls {
     grid-template-columns: 1fr;
+  }
+
+  .controls {
+    grid-template-areas:
+      "arm" "stop" "manual" "test" "language" "mcp" "meters";
   }
 
   .core {
