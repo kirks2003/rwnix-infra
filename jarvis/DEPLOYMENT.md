@@ -705,3 +705,38 @@ Rolled out to vm104 on 2026-10-04 (PR #15) with the usual file-copy +
 `/api/config` without a session cookie answers `403 Forbidden` (no
 `WWW-Authenticate`), a wrong-password `/api/login` answers `403`, and the
 container is `healthy` after the rebuild.
+
+## 2026-10-04: "Wetter Wien" manual prompt ended in a red pipeline error (empty brain answer)
+
+Reported: the manual text prompt `Wetter Wien` (MCP web search on) finished in a
+red pipeline error. The backend log showed `websearch_success` (780 ms, 1301
+chars), then ~9.2 s later `Brain returned no answer text` from `chat()`.
+
+Root cause: the brain (`deepseek-v4-flash`) is a reasoning model, and
+`max_tokens` covers its thinking tokens as well. The request sent
+`max_tokens: 1200`, so the model spent the whole budget reasoning over the
+web-search context and returned `content: null` (`finish_reason: "length"`) —
+the same failure class recorded under "Whisper and pipeline finding" (the ZDF
+case, where the budget was raised once). 1200 was still too small once search
+results joined the prompt.
+
+Fix (PR #18):
+
+- `max_tokens: 1200` -> `4096`: ~26 s of budget at the measured ~150 tok/s,
+  inside the 45 s brain timeout, with 3.4x the headroom that failed.
+- Empty answers are now logged with `finish_reason` and `usage`
+  (`brain_empty_answer`), and the browser-visible error distinguishes the
+  budget-exhausted case ("The brain spent its whole token budget on reasoning
+  and returned no answer; ask again.") from a genuinely empty reply.
+- New unit test: the brain request carries a reasoning-safe budget (>= 4096)
+  and an exhausted budget answers 500 with the budget message (unit suite
+  59/59, browser suite 21 pass / 2 opt-in skip).
+
+Rolled out to vm104 on 2026-10-04 with the usual file-copy +
+`docker compose up -d --build` procedure. Backup first:
+`jarvis-code.bak-20261004_145543.tgz` under `/home/ubuntu/docker/`
+(code only; `.env` untouched). Files synced: `server.js`,
+`tests/server.test.mjs`. Verified against the running container on
+`192.168.54.111:8094`: container `healthy`, and the reporter's exact request
+— signed in as Mila, `Wetter Wien` with `websearch: true` — returned a real
+answer in 10.0 s (`websearch_success` 843 ms, no `brain_empty_answer`).
