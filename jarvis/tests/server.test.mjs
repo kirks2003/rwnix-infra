@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AudioBufferWindow } from "../public/audio.js";
 
 let upstream, backend, origin, endpoint, speechEndpoint, base;
@@ -156,6 +159,57 @@ test("the language switch overrides the brain answer language", async () => {
   assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Language override: answer in German \(Deutsch\)/);
   assert.equal((await ask("en")).status, 200);
   assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Language override: answer in English/);
+});
+
+test("the brain system prompt reports the MCP web-search state per request", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-mcp-mock-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // Mock MCP servers that speak the same stdio protocol; tools/call returns a
+  // canned result (ok) or an isError result (failure) without any network.
+  const mock = (isError) => `
+    import readline from "node:readline";
+    readline.createInterface({ input: process.stdin }).on("line", (line) => {
+      const message = JSON.parse(line);
+      if (message.id === undefined) return;
+      let result;
+      if (message.method === "initialize") {
+        result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-websearch", version: "1.0.0" } };
+      } else if (message.method === "tools/call") {
+        result = { isError: ${isError}, content: [{ type: "text", text: "Mock web search result: 42." }] };
+      } else {
+        result = {};
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+    });
+  `;
+  const okScript = join(dir, "mcp-ok.mjs");
+  const failScript = join(dir, "mcp-fail.mjs");
+  await writeFile(okScript, mock(false));
+  await writeFile(failScript, mock(true));
+  const ask = (backendOrigin, body) => fetch(`${backendOrigin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  // Toggle off: no MCP spawn at all; the brain is told the feature is off.
+  mode = "success";
+  await ask(origin, { prompt: "Can you search the web?", sessionId: "mcp-off", websearch: false });
+  assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Web search \(MCP web-search server\) is OFF/);
+  // Toggle on: a working search tells the brain it is on and delivers results;
+  // a failed search tells it the feature is on but this search had no results.
+  const cases = [
+    [okScript, /Web search \(MCP web-search server\) is ON: the web was just searched/, /Mock web search result/],
+    [failScript, /is ON, but the search for this prompt returned no results/, null],
+  ];
+  for (const [script, promptPattern, searchPattern] of cases) {
+    const { process: child, origin: mcpOrigin } = await startBackend({ MCP_SEARCH_SCRIPT: script });
+    t.after(async () => { child.kill(); await once(child, "exit"); });
+    mode = "success";
+    await ask(mcpOrigin, { prompt: "Can you search the web?", sessionId: `mcp-${script}`, websearch: true });
+    const body = JSON.parse(received.toString("utf8"));
+    assert.match(body.messages[0].content, promptPattern);
+    if (searchPattern) assert.match(body.messages[1].content, searchPattern);
+    else assert.equal(body.messages.length, 2, "no search-results message");
+  }
 });
 
 test("the TTS proxy rejects non-English languages instead of mispronouncing", async () => {

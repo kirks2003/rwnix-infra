@@ -372,3 +372,43 @@ Verified against the running container on `192.168.54.111:8094`:
 - Both public gateways (`gw-1-vie-1-at-netcup`, `gw-1-nbg-1-de-netcup`) answer `401` from
   outside — the existing Basic Auth layer, not an app error.
 - Container `healthy` after the rebuild.
+
+## MCP panel row + brain web-search state (2026-10-04)
+
+Two fixes after the MCP feature went live. The search itself was working (backend logs
+showed `websearch_success` for the user's session), so the reported failure
+("IT answers No MCP Server available") came from the brain, not the MCP server.
+
+- **MCP button panel one row below.** The MCP web-search switch no longer shares the main
+  controls row (Arm/Stop/Manual prompt, test buttons, language switch, meters — seven
+  columns that did not fit the 1180px shell). The controls panel is now two rows: the main
+  row on top, and the MCP switch with its status line centered on the row directly below.
+  On mobile (≤780px) everything stacks in the same order. Placement is `grid-template-areas`
+  in `public/style.css` (`mcp-control` marker class in `index.html`).
+- **The brain now knows the web-search state.** The brain is a raw LLM on
+  `/chat/completions` with no tools, so it had no self-knowledge of the feature and answered
+  capability questions from training data — "No MCP Server available" / "Ich habe keine
+  Live-Websuche" — even with the toggle on. `chat()` in `server.js` appends the per-request
+  state to the system prompt:
+  - toggle on + results: "Web search (MCP web-search server) is ON …" plus the results message,
+  - toggle on + failed search: ON but no results; answer from own knowledge,
+  - toggle off: OFF; point to the MCP search toggle in the UI.
+  New `MCP_SEARCH_SCRIPT` env var lets tests point the stdio client at a mock server;
+  `tests/server.test.mjs` covers all three states without network (unit suite 39/39).
+
+Rolled out to vm104 with the file-copy + `docker compose up -d --build` procedure
+(`server.js`, `public/index.html`, `public/style.css`, docs; `.env` untouched).
+Backup first: `jarvis-code.bak-20261004_080104.tgz` under `/home/ubuntu/docker/`.
+
+Verified against the running container on `192.168.54.111:8094`:
+
+- `/api/health` ok: `whisperEndpoints: 1`, `brainConfigured: true`, `ttsEndpoints: 1`.
+- `Ist der MCP Server verfügbar?` with `websearch: true` →
+  "Ja, der MCP Web-Search Server ist verfügbar und aktiviert." (previously "No MCP Server
+  available"); with `websearch: false` → "Der MCP Web-Search Server ist in Ihrem Browser
+  derzeit deaktiviert. Sie können ihn über den MCP-Such-Toggle … einschalten."
+- Real question with `websearch: true` answered from live DuckDuckGo results; backend log
+  shows `websearch_success` for every request.
+- Browser suite 17/22: the 3 wake-word `page.fill` tests fail identically in this container
+  environment (see `README.md`), including on unmodified `main`.
+- Container `healthy` after the rebuild.

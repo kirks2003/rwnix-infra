@@ -458,7 +458,9 @@ class McpClient {
   }
 }
 
-const mcpWebSearch = new McpClient(process.execPath, [path.join(__dirname, "mcp", "websearch.mjs")]);
+// MCP_SEARCH_SCRIPT lets tests point the client at a mock server; production
+// uses the real DuckDuckGo/Wikipedia search server.
+const mcpWebSearch = new McpClient(process.execPath, [process.env.MCP_SEARCH_SCRIPT || path.join(__dirname, "mcp", "websearch.mjs")]);
 
 // Runs the web_search tool of the MCP server and resolves with the result
 // text; the caller treats a failure as "answer without search results".
@@ -500,8 +502,12 @@ async function chat(prompt, sessionId, language, requestId, signal, websearch) {
   // which is how the UI language switch reaches the brain.
   const answerLanguage = language === "de" ? "German (Deutsch)" : "English";
   // Fresh per request: search results are context for this prompt only and are
-  // never stored in the per-session conversation history.
+  // never stored in the per-session conversation history. The state line tells
+  // the brain whether the browser's MCP web-search toggle is on, so it does not
+  // deny the feature when it is on (it answered "No MCP server available") or
+  // claim web results when it is off.
   let searchMessage = null;
+  let websearchState;
   if (websearch) {
     try {
       const results = await webSearch(prompt, requestId, signal);
@@ -509,15 +515,19 @@ async function chat(prompt, sessionId, language, requestId, signal, websearch) {
         role: "system",
         content: `Web search results for this prompt (use them if relevant, keep the answer short and spoken):\n${results}`,
       };
+      websearchState = "Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.";
     } catch (error) {
       if (signal.aborted) throw error;
       console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_skipped", error: error.message }));
+      websearchState = "Web search (MCP web-search server) is ON, but the search for this prompt returned no results; answer from your own knowledge and do not mention the search.";
     }
+  } else {
+    websearchState = "Web search (MCP web-search server) is OFF in the user's browser for this request, so no web results are available. If the user asks about web search or MCP, say it is switched off and can be enabled with the MCP search toggle in the UI.";
   }
   const messages = [
     {
       role: "system",
-      content: `${config.brainSystemPrompt}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
+      content: `${config.brainSystemPrompt}\n${websearchState}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
     },
     ...(searchMessage ? [searchMessage] : []),
     ...history,
