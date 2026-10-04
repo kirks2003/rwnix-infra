@@ -674,12 +674,12 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags) {
       mcpStates.push("Web search (MCP web-search server) is ON, but the search for this prompt returned no results; answer from your own knowledge and do not mention the search.");
     }
   } else {
-    mcpStates.push("Web search (MCP web-search server) is OFF in the user's browser for this request, so no web results are available. If the user asks about web search or MCP, say it is switched off and can be enabled with the MCP search toggle in the UI.");
+    mcpStates.push("Web search (MCP web-search server) is OFF in the user's browser for this request, so no web results are available. For questions that need live or current data (the weather now, news, prices, sports scores, today's events), say you cannot check it while web search is off and that the user can enable it with the MCP web search toggle in the UI to let you look it up. If the user asks about web search or MCP, say it is switched off and can be enabled with the MCP search toggle in the UI.");
   }
   const messages = [
     {
       role: "system",
-      content: `${config.brainSystemPrompt}\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
+      content: `${config.brainSystemPrompt}\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
     },
     ...(searchMessage ? [searchMessage] : []),
     ...history,

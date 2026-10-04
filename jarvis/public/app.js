@@ -315,6 +315,7 @@ function check(session) {
 function stop(message = "Jarvis is disarmed.") {
   const old = current;
   current = null;
+  stopMeters();
   old?.controller.abort(abortError());
   speechSynthesis.cancel();
   el.armButton.disabled = !config;
@@ -333,7 +334,7 @@ function stop(message = "Jarvis is disarmed.") {
 function newSession() {
   stop();
   const controller = new AbortController();
-  const session = { controller, signal: controller.signal, id: ++sequence, startedAt: performance.now() };
+  const session = { controller, signal: controller.signal, id: ++sequence, startedAt: performance.now(), commandHeard: false };
   current = session;
   probeCount = 0;
   pipelineStatusOverride = null;
@@ -370,6 +371,11 @@ async function transcribe(session, start, purpose) {
   if (purpose === "wake") probeCount += 1;
   stage("transcribing", purpose === "wake" ? "Checking wake word" : "Transcribing command",
     `Sending ${Math.round(blob.size / 1024)} KB to ${config.whisperEndpoints.join(", ")}`, purpose === "wake" ? "wake" : "whisper");
+  // Audible feedback that the captured audio left the browser and the
+  // transcription is starting: a soft tick for wake probes, a higher ping for
+  // the command.
+  if (purpose === "wake") session.mic.probeBeep();
+  else session.mic.sentBeep();
   const result = await request(session, `/api/transcribe?language=${language}`, {
     method: "POST", headers: { "content-type": blob.type }, body: blob,
   });
@@ -384,20 +390,45 @@ async function tick(session) {
   await delay(100, session.signal);
   check(session);
   session.mic.check();
-  el.micLevel.value = Math.min(100, session.mic.buffer.level * 800);
-  el.micLevelValue.textContent = `${Math.round(el.micLevel.value)}%`;
-  const status = pipelineStatus();
-  if (status !== el.pipelineStatus.textContent) el.pipelineStatus.textContent = status;
 }
 
-// The silence meter shows live trailing silence during wake listening, so
-// speaking the wake word is visible: the bar fills after the last voice and
-// the probe fires once speech settles for 350 ms.
-function updateWakeSilenceMeter(session) {
+// The mic level and the silence bar are driven by their own 100 ms interval,
+// not by the pipeline loop: the loop is suspended for the whole Whisper/brain
+// round trip, so loop-owned meters froze at their last value (usually ~400 ms
+// of silence) and then jumped straight to full when the round trip returned.
+// The dedicated timer keeps both bars filling in real time while audio is in
+// flight, and the silence bar tracks trailing silence during wake listening,
+// so speaking the wake word is visible (the probe fires once speech settles
+// for 350 ms).
+let meterTimer = 0;
+function startMeters() {
+  stopMeters();
+  meterTimer = setInterval(updateMeters, 100);
+}
+function stopMeters() {
+  if (meterTimer) clearInterval(meterTimer);
+  meterTimer = 0;
+}
+function updateMeters() {
+  const session = current;
+  if (!session || !session.mic) return;
   const buffer = session.mic.buffer;
+  el.micLevel.value = Math.min(100, buffer.level * 800);
+  el.micLevelValue.textContent = `${Math.round(el.micLevel.value)}%`;
   const silentMs = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000;
-  el.silenceLevel.value = Math.min(config.silenceMs, silentMs);
-  el.silenceValue.textContent = `${Math.round(el.silenceLevel.value)} ms`;
+  // Trailing silence while wake listening and while recording a command once
+  // voice has been heard; flat while waiting for a separate command after a
+  // wake word alone, and while the answer speaks or the pipeline is idle.
+  const kind = visualizer.stage;
+  let silence = 0;
+  if (kind === "wake" || kind === "transcribing" || kind === "thinking"
+    || ((kind === "recording" || kind === "prompting") && session.commandHeard)) {
+    silence = Math.min(config.silenceMs, silentMs);
+  }
+  el.silenceLevel.value = silence;
+  el.silenceValue.textContent = `${Math.round(silence)} ms`;
+  const status = pipelineStatus();
+  if (status !== el.pipelineStatus.textContent) el.pipelineStatus.textContent = status;
 }
 
 async function waitForCommandEnd(session, start, needsSpeech) {
@@ -407,25 +438,24 @@ async function waitForCommandEnd(session, start, needsSpeech) {
     `Stops after ${config.silenceMs} ms of silence.`, "record");
   if (needsSpeech) session.mic.beep();
   const speechAfter = start + (needsSpeech ? buffer.sampleRate * 0.3 : 0);
-  let heard = !needsSpeech;
+  session.commandHeard = !needsSpeech;
   let shown = 0;
   while (performance.now() - started < 15000) {
     await tick(session);
-    if (buffer.lastVoice > speechAfter) heard = true;
+    if (buffer.lastVoice > speechAfter) session.commandHeard = true;
     const silentMs = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000;
-    el.silenceLevel.value = heard ? Math.min(config.silenceMs, silentMs) : 0;
-    el.silenceValue.textContent = `${Math.round(el.silenceLevel.value)} ms`;
     // This stage can hold for up to 15 s on a noisy microphone that never goes
     // quiet, so count down in the pipeline status line rather than looking
     // frozen. Updated without stage() so the live log is not flooded.
     const elapsed = performance.now() - started;
     if (elapsed - shown >= 500) {
       shown = elapsed;
-      pipelineStatusOverride = heard
+      pipelineStatusOverride = session.commandHeard
         ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(config.silenceMs - silentMs))} ms more silence, or at the 15 s limit.`
         : `Waiting for speech: ${(elapsed / 1000).toFixed(1)} s of 10 s. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
+      el.pipelineStatus.textContent = pipelineStatus();
     }
-    if (heard) {
+    if (session.commandHeard) {
       mark("vad", "active");
       if (silentMs >= config.silenceMs) {
         mark("record", "done");
@@ -467,7 +497,6 @@ async function listen(session) {
     try {
       for (;;) {
         await tick(session);
-        updateWakeSilenceMeter(session);
         if (buffer.lastVoice <= probedThrough) continue;
         // Probe on the trailing edge of speech, not on a fixed interval: a window
         // that ends mid-word comes back from Whisper empty, so the phrase is only
@@ -560,6 +589,8 @@ async function answer(session, prompt) {
     return;
   }
   stage("speaking", "Speaking", `${voiceProfiles[voiceId].label} is reading the answer at ${voiceSpeed.toFixed(2)}x.`, "tts");
+  // The controller (not just its signal) goes to speak(): the speech watch
+  // needs it to abort the speech with `speechStopped` mid-answer.
   const speech = new AbortController();
   session.speech = speech;
   try {
@@ -755,6 +786,7 @@ el.armButton.addEventListener("click", async () => {
     speechSynthesis.speak(unlock);
     await session.mic.start();
     check(session);
+    startMeters();
     await listen(session);
   } catch (error) {
     fatal(session, error);

@@ -42,7 +42,8 @@ export class AudioBufferWindow {
     if (start < this.end - this.samples.length || end > this.end || end <= start) {
       throw new Error("Requested audio is outside the capture buffer");
     }
-    const data = new ArrayBuffer(44 + (end - start) * 2);
+    const length = end - start;
+    const data = new ArrayBuffer(44 + length * 2);
     const view = new DataView(data);
     const text = (offset, value) => {
       for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
@@ -60,9 +61,15 @@ export class AudioBufferWindow {
     view.setUint16(34, 16, true);
     text(36, "data");
     view.setUint32(40, data.byteLength - 44, true);
-    for (let i = start; i < end; i++) {
-      const sample = Math.max(-1, Math.min(1, this.samples[i % this.samples.length]));
-      view.setInt16(44 + (i - start) * 2, sample * (sample < 0 ? 32768 : 32767), true);
+    // One typed-array store per sample instead of a DataView call keeps a 25 s
+    // window (up to ~9.6 MB at a 192 kHz AudioContext) under a meter tick, so
+    // the mic/silence bars keep moving while a probe is being prepared.
+    // Little-endian hosts only, like every target browser (x86/ARM).
+    const pcm = new Int16Array(data, 44, length);
+    const wrap = this.samples.length;
+    for (let i = 0; i < length; i++) {
+      const sample = Math.max(-1, Math.min(1, this.samples[(start + i) % wrap]));
+      pcm[i] = sample * (sample < 0 ? 32768 : 32767);
     }
     return new Blob([data], { type: "audio/wav" });
   }
@@ -127,6 +134,10 @@ export class Microphone {
     }
   }
 
+  // Audible pipeline feedback, each a distinct tone:
+  //  - beep():       880->1320 Hz sweep, "I heard the wake word" (or: speak now)
+  //  - probeBeep():  soft 660 Hz tick, a wake-probe window was just sent to Whisper
+  //  - sentBeep():   higher 1760 Hz ping, the command audio was sent, transcription starts
   beep() {
     const oscillator = this.context.createOscillator();
     const gain = this.context.createGain();
@@ -139,6 +150,28 @@ export class Microphone {
     oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
     oscillator.start(now);
     oscillator.stop(now + 0.2);
+  }
+
+  probeBeep() {
+    this.tone(660, 0.09, 0.035);
+  }
+
+  sentBeep() {
+    this.tone(1760, 0.12, 0.06);
+  }
+
+  tone(frequency, seconds, peakGain) {
+    if (this.context.state === "closed") return;
+    const oscillator = this.context.createOscillator();
+    const gain = this.context.createGain();
+    const now = this.context.currentTime;
+    oscillator.frequency.setValueAtTime(frequency, now);
+    gain.gain.setValueAtTime(peakGain, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + seconds);
+    oscillator.connect(gain).connect(this.context.destination);
+    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
+    oscillator.start(now);
+    oscillator.stop(now + seconds + 0.02);
   }
 
   close() {
