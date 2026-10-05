@@ -2073,3 +2073,74 @@ German-localized results (athome.at, home24.at) via the language-aware
 Interessen") still resolves the Home Assistant interest from the graph,
 calls `web_news` (log: `websearch_tool tool=web_news ok=true`) and answers
 with dated German HA news.
+
+## Storing save/track instructions as WATCHES facts (2026-10-05, PR #44)
+
+**Report (as Roman):** "Add to my trading news list keywords: Trump btcusd
+gold silver nvidia" → the brain answered it had "no way to store keywords
+in the knowledge graph — I can only read, not write", and the graph indeed
+stayed unchanged (verified in Neo4j: Roman's only entity was "Home
+Assistant").
+
+**Root cause (three layers, all in the prompts — no code bug):**
+1. By design the brain's tools are read-only (a prompt-injected brain must
+   never write); the only write path is the **post-turn ingestion** — a
+   cheap structured extraction call over prompt + search results + answer,
+   run after the answer is delivered.
+2. The extraction prompt only taught **first-person fact statements**
+   ("I like X" → LIKES, "I'm interested in X" → INTERESTED_IN, …). Roman's
+   message was an **imperative instruction** ("Add … to my trading news
+   list"), which no rule covered — and the brain's own answer ("I can't
+   store …") reinforced the "no facts in this turn" reading. Log:
+   `graph_ingest_empty` for the turn.
+3. The brain's system prompt never told it that what the user says is
+   stored automatically after every answer — so it answered "I can only
+   read, not write" (true for its tools, wrong for the product).
+
+**Changes (all `server.js` prompts + tests):**
+- `EXTRACT_SYSTEM_PROMPT`: new rule — instructions to save/remember/track/
+  add topics ("add X, Y to my (trading) news list", "remember these
+  keywords: X, Y", "track/watch X") are facts to store: a `WATCHES`
+  relation from the user to each listed topic (stored even though the
+  prompt is an instruction, including when the answer only confirms it),
+  with a full JSON example (Roman + Trump/Gold/Nvidia). `WATCHES` (and
+  `INTERESTED_IN`) joined the "prefer the existing types" hint — the type
+  is auto-created by the schema (PR #40), so no registry change.
+- Brain graph state lines (non-admin with context, non-admin empty, admin):
+  "Your graph tools are read-only, but the graph is updated automatically
+  after every answer from the conversation — so when the user asks you to
+  save, remember or track topics (e.g. 'add X to my trading news list'),
+  confirm that it is done instead of claiming you cannot write; the topics
+  are stored (as WATCHES facts) and visible in the graph context and the
+  list-my-facts tool from the next turn on."
+- The web-search ON line now names the stored topics: "including about the
+  user's interests and their stored topics (the WATCHES facts from the
+  knowledge graph, e.g. a trading news list the user asked to track)".
+- `tests/server.test.mjs`: the graph-ingest mock answers a "trading news
+  list" extraction with a WATCHES extraction; new test pins the end-to-end
+  path (turn → 2 WATCHES edges + both topic nodes stored, the extraction
+  prompt the production LLM reads contains the WATCHES rule, and the next
+  turn's brain prompt contains the auto-save/confirm guidance). A new
+  `lastBrain` capture (last non-extraction brain request) avoids racing the
+  fire-and-forget ingestion, which calls the same upstream endpoint after
+  the answer is sent.
+
+**Tests:** unit **116/116** (115 + 1: the WATCHES end-to-end test); browser
+**39 pass + 2 opt-in skips** (unchanged, no UI change).
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261005_231109.tgz`; synced
+`server.js`, `tests/server.test.mjs` (+ docs), md5-verified (container ==
+worktree), image rebuilt, container healthy, `/api/health` ok. Live
+regression as Roman, both turns: (1) the exact prompt from the report —
+"Add to my trading news list keywords: Trump btcusd gold silver nvidia" —
+now gets a confirmation answer, and ingestion stored all five topics
+(`graph_ingest_success extracted=6 stored=5 extractedRelations=5 linked=5`:
+Trump/person, BTCUSD/topic, Gold/topic, Silver/topic, Nvidia/organization,
+each `Roman -[:WATCHES]->` — verified in Neo4j); (2) "Gib mir die letzten
+News zu meinen Trading-Themen" — the brain read the stored topics from its
+graph context and called `web_news` once per topic (log: five
+`websearch_tool tool=web_news ok=true` lines for Trump, BTCUSD, Gold,
+Silver, Nvidia) and answered with fresh per-topic German trading news
+(Trump midterms/EU diesel reserves, BTCUSD at the 87k resistance, Gold
+China buying/JPMorgan $4.500, Silver equities, Nvidia SpaceX/Microsoft).
+The pre-PR failure mode (brain denying a write, graph unchanged) is gone.
