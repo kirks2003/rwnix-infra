@@ -10,6 +10,7 @@ export function cleanHtml(html) {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#x27;|&#39;/g, "'")
+    .replace(/&apos;/g, "'")
     .replace(/&nbsp;/g, " ")
     .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
     .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number.parseInt(dec, 10)))
@@ -112,4 +113,101 @@ export function formatSearchResults(merged, instant) {
     sections.push(`${index + 1}. [${result.engine}] ${result.title}\n${result.url}\n${result.snippet || ""}`);
   }
   return sections.join("\n\n");
+}
+
+// --- News (the web_news tool) -------------------------------------------------
+//
+// Free, keyless RSS/Atom feeds per interest area. Unlike the HTML search
+// endpoints, feeds are built for machine consumers, so they survive
+// datacenter IPs (DuckDuckGo HTML does not — measured from the production
+// server: see DEPLOYMENT.md, "Live web news"). Every feed below was
+// verified reachable from the live server without a bot wall.
+export const INTEREST_FEEDS = {
+  // German tech press.
+  technik: [
+    { source: "heise online", url: "https://www.heise.de/rss/heise-atom.xml", lang: "de" },
+    { source: "Golem", url: "https://rss.golem.de/rss.php?feed=RSS2.0", lang: "de" },
+  ],
+  // English tech press.
+  it: [
+    { source: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index", lang: "en" },
+    { source: "The Verge", url: "https://www.theverge.com/rss/index.xml", lang: "en" },
+    { source: "TechCrunch", url: "https://techcrunch.com/feed/", lang: "en" },
+  ],
+  finance: [
+    { source: "CNBC Top News", url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114", lang: "en" },
+    { source: "MarketWatch", url: "https://feeds.marketwatch.com/marketwatch/topstories/", lang: "en" },
+    { source: "Financial Times", url: "https://www.ft.com/rss/home", lang: "en" },
+  ],
+  geek: [
+    { source: "Hacker News front page", url: "https://hnrss.org/frontpage", lang: "en" },
+    { source: "Lobsters", url: "https://lobste.rs/rss", lang: "en" },
+  ],
+  nerd: [
+    { source: "r/programming", url: "https://www.reddit.com/r/programming/.rss", lang: "en" },
+    { source: "Hacker News front page", url: "https://hnrss.org/frontpage", lang: "en" },
+    { source: "Lobsters", url: "https://lobste.rs/rss", lang: "en" },
+  ],
+};
+
+// Interest-area spellings the user (or the brain) is likely to use.
+const TOPIC_ALIASES = {
+  technik: "technik", technologie: "technik", "tech news": "technik",
+  it: "it", "it news": "it", itnews: "it", informatik: "it", tech: "it",
+  finance: "finance", finanzen: "finance", "finance news": "finance",
+  geek: "geek", geeks: "geek",
+  nerd: "nerd", nerds: "nerd",
+};
+
+// Maps a topic to an interest-area key; a concrete topic (e.g. "Home
+// Assistant") comes back as null and is searched as free text.
+export function normalizeTopic(topic) {
+  return TOPIC_ALIASES[String(topic || "").trim().toLowerCase()] || null;
+}
+
+// One <tag>…</tag> value from a feed block (first match), CDATA unwrapped.
+function feedTag(block, name) {
+  const match = block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`, "i"));
+  return match ? match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim() : "";
+}
+
+// <link href="…"/> (Atom) or <link>https://…</link> (RSS), skipping the
+// feed-plumbing links (self/edit/hub/enclosure).
+function feedLink(block) {
+  const selfless = block.replace(/<link[^>]+rel="(?:self|edit|hub|enclosure)"[^>]*\/?>/g, "");
+  const href = selfless.match(/<link[^>]+href="([^"]+)"/);
+  if (href) return unescapeHref(href[1]);
+  const text = selfless.match(/<link[^>]*>([^<]+)<\/link>/);
+  return text ? unescapeHref(text[1].trim()) : "";
+}
+
+// Parses one RSS 2.0 or Atom feed into news items. Tolerant by design: items
+// without a title or link are skipped, markup/CDATA in titles and snippets is
+// stripped, and a missing date comes back as 0 (sorts to the end).
+export function parseFeedItems(xml, source) {
+  const text = String(xml || "");
+  const blocks = text.match(/<item[\s>][\s\S]*?<\/item>/g) || text.match(/<entry[\s>][\s\S]*?<\/entry>/g) || [];
+  const items = [];
+  for (const block of blocks) {
+    const title = feedTag(block, "title");
+    const url = feedLink(block);
+    if (!title || !url) continue;
+    const snippet = cleanHtml(feedTag(block, "description") || feedTag(block, "summary") || feedTag(block, "content")).slice(0, 200);
+    const rawDate = feedTag(block, "pubDate") || feedTag(block, "published") || feedTag(block, "updated") || feedTag(block, "dc:date");
+    const time = Date.parse(rawDate);
+    items.push({ title: cleanHtml(title), url, snippet, source, date: Number.isNaN(time) ? 0 : time });
+  }
+  return items;
+}
+
+// One text block for the brain: newest first, numbered, with source, date and
+// URL per item.
+export function formatNewsItems(items) {
+  return [...(items || [])]
+    .sort((a, b) => b.date - a.date)
+    .map((item, index) => {
+      const when = item.date ? ` (${new Date(item.date).toISOString().slice(0, 10)})` : "";
+      return `${index + 1}. ${item.title} — ${item.source}${when}\n${item.url}\n${item.snippet || ""}`;
+    })
+    .join("\n\n");
 }

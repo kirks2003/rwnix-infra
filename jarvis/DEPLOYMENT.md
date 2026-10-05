@@ -1913,3 +1913,98 @@ synced `public/app.js`, `public/graph3d.js`, `public/index.html`,
 `public/style.css`, `tests/graph.browser.mjs` (+ docs), md5-verified against
 the worktree, image rebuilt, container healthy, `/api/health` ok, served
 `app.js`/`style.css`/`index.html` md5 match the source.
+
+## Live web search + news for the brain (2026-10-05, PR #42)
+
+**Report (as Roman):** "suche im internet über letzte news zu meinen
+Interessen" → the brain answered it had "no active web-search tool" and that
+the results it had gotten were "general, not specific to my interest".
+
+Two separate gaps, found by inspection + a live probe:
+
+1. **The brain could not steer the search at all.** Web search ran once,
+   server-side, with the *raw user prompt* ("suche im internet über letzte
+   news zu meinen Interessen") as the query — a meta-prompt, so the engines
+   returned generic pages. The brain saw those results but had no way to
+   re-query with a concrete topic ("Home Assistant news 2026"). The graph
+   already had a tool loop for exactly this; web search did not.
+2. **The measured engines were partly dead from the production IP.** A probe
+   run from inside the live jarvis container (the real egress IP) on
+   2026-10-05:
+   - DuckDuckGo HTML **and** the DuckDuckGo Instant Answer API: `fetch failed`
+     (connection-level refusal) — both dead from this IP, which is why the
+     merged payloads were small (~1.4 KB = Bing + Wikipedia only).
+   - GDELT doc API: timed out.
+   - Bing HTML, Wikipedia API: ok.
+   - **Bing News RSS** (`/news/search?q=…&format=rss`): ok, ~11 items. Its
+     `bing.com/news/apiclick.aspx?…` links are **real HTTP redirects** —
+     `fetch(redirect:"follow")` lands on the actual article (verified:
+     borncity.com / heise.de / notebookcheck.com).
+   - **Google News RSS** (`/rss/search?q=… when:7d`): ok, 38–51 items, but
+     its `news.google.com/rss/articles/…` links are **JS-only wrappers**:
+     the 200 page is an Angular app shell with no server-side redirect and no
+     anchor to the article (verified: 594 KB page, `location.href`/meta-
+     refresh absent, the `CBMi…` token no longer embeds the URL in its
+     base64). Unresolvable server-side.
+   - Interest feeds all reachable without a bot wall: heise (150 items),
+     Golem (40), Ars Technica (20), The Verge (10), TechCrunch (20), CNBC
+     (30), MarketWatch (10), Financial Times (11), Hacker News front page
+     (20), Lobsters (25), r/programming (25). (heise-security feed 404s —
+     dropped; hnrss.org `frontend?points` variant times out — dropped,
+     `frontpage` works.)
+
+**Design**
+
+- **`mcp/websearch.mjs` — new `web_news` tool** (besides `web_search`),
+  `serverInfo` bump 1.1.0 → 1.2.0. `web_news({topic, max_results})`:
+  - `topic` is either a free topic (e.g. "Home Assistant") or an interest
+    area: **technik, it, finance, geek, nerd** (spelling aliases in
+    `normalizeTopic`, e.g. "Finanzen" → finance, "Informatik" → it).
+  - Free topic: **Bing News RSS primary**; **Google News RSS backup** that
+    only fills slots the primary left empty (its wrapper URLs are unusable
+    in the Answer panel, so it never leads). Interest area: the curated
+    feeds from `INTEREST_FEEDS` (below) + a Bing News RSS search for the
+    area.
+  - All sources fetched in parallel; each degrades to zero items on failure.
+  - **Bing `apiclick.aspx` links are resolved server-side** (`fetch` with
+    `redirect:"follow"`, body cancelled, 5 s cap; a failed resolution keeps
+    the wrapper). Resolution happens **before dedupe** so the same article
+    via two wrappers merges on its real URL.
+  - `lang` (de/en) is injected by the backend per call — not in the brain's
+    tool schema — and steers the Google News locale (`hl=de&gl=DE&ceid=DE:de`)
+    and the area query language.
+- **`mcp/engines.mjs` — pure news helpers** (no network, unit-tested):
+  `INTEREST_FEEDS` (the five interest areas → verified-reachable feeds),
+  `normalizeTopic`, `parseFeedItems` (RSS 2.0 `<item>` **and** Atom
+  `<entry>`, CDATA unwrapped, markup stripped, linkless items skipped,
+  pubDate/published/updated → epoch ms), `formatNewsItems` (newest first,
+  numbered, source + ISO date + URL + snippet).
+- **`server.js` — the web tool loop.** `runBrain` is generalized: it takes
+  `webTools` + `lang` and offers the brain `web_search` + `web_news`
+  (function tools, same shape as the graph tools) when the web-search toggle
+  is on — sharing the graph's five-round budget when both toggles are on.
+  The answer language is injected per call (`{ ...args, lang }`), like the
+  graph user, so a prompt injection cannot steer the locale. Tool results
+  are logged (`websearch_tool` with tool, topic/query, ok, ms, chars) and
+  collected into `webResults`, which joins the up-front search results and
+  is passed to post-turn ingestion (the extractor now reads what the turn
+  actually used, not just the raw-prompt search). The ON state line tells
+  the brain it may call both tools and to use `web_news` (one interest at a
+  time, concrete topic) for any "latest news" question — including the
+  user's interests from the graph or the conversation.
+
+**Tests:** unit **114/114** (109 + 5: parseFeedItems RSS+Atom/CDATA/linkless,
+normalizeTopic aliases, INTEREST_FEEDS shape, formatNewsItems newest-first,
+cleanHtml `&apos;`; the server web-tool-loop test pins that the brain is
+offered both tools, a `web_news` round returns the MCP result, and the
+backend injected `lang:"de"`). Browser **39 pass + 2 opt-in skips**
+(unchanged — no UI change).
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261005_221451.tgz`; synced
+`mcp/websearch.mjs`, `mcp/engines.mjs`, `server.js`, `tests/mcp.test.mjs`,
+`tests/server.test.mjs` (+ docs), md5-verified, image rebuilt, container
+healthy, `/api/health` ok. Live MCP smoke from the production IP: `web_news`
+"Home Assistant" (de) → fresh Bing News items with **resolved direct article
+URLs** (borncity.com, heise.de); "technik" → heise; "finance" → CNBC/
+MarketWatch. (Google News wrapper links are not resolved — see design; they
+only appear as backup fill.)

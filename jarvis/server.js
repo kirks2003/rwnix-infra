@@ -833,7 +833,7 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
         role: "system",
         content: `Web search results for this prompt (use them if relevant, keep the answer short and spoken):\n${results}`,
       };
-      mcpStates.push("Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.");
+      mcpStates.push("Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. You can also call the tools web_search (your own query) and web_news (latest news for a topic or an interest area: technik, it, finance, geek, nerd). For 'latest news' questions — including about the user's interests (from the knowledge graph or the conversation) — call web_news with the concrete topic, one interest at a time. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.");
     } catch (error) {
       if (signal.aborted) throw error;
       console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_skipped", error: error.message }));
@@ -886,7 +886,7 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const data = await runBrain({ messages, user, useTools: Boolean(mcpFlags.graph && graphStore), admin: isAdmin(user), requestId, signal, headers,
+  const { data, webResults } = await runBrain({ messages, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), admin: isAdmin(user), lang: language === "de" ? "de" : "en", requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -903,7 +903,9 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
   // fire-and-forget so the spoken reply is never blocked by or fails on the
   // graph. This is the app's only write path into the graph.
   if (graphStore) {
-    ingestTurn({ user, prompt, searchResults: searchMessage?.content || null, answer, requestId }).catch(() => {});
+    // The extractor reads what the turn actually used: the up-front search
+    // results plus any web tool results the brain gathered itself.
+    ingestTurn({ user, prompt, searchResults: [searchMessage?.content, ...webResults].filter(Boolean).join("\n\n") || null, answer, requestId }).catch(() => {});
   }
   return { requestId, answer, configured: true, model: config.brainModel };
 }
@@ -962,6 +964,33 @@ function graphTools(admin) {
   ];
 }
 
+// The web tools offered to the brain when the web-search toggle is on. Both
+// are read-only live lookups (mcp/websearch.mjs runs free keyless engines and
+// news sources); `lang` is injected per call by this backend — like the graph
+// user — so the brain (or a prompt injection) cannot steer the locale.
+const WEB_TOOL_NAMES = new Set(["web_search", "web_news"]);
+const WEB_TOOL_TIMEOUT_MS = 20000;
+function webTools() {
+  return [
+    {
+      type: "function",
+      function: {
+        name: "web_search",
+        description: "Search the web (Bing, Wikipedia, DuckDuckGo) with your own query. Use for concrete questions or current information the injected search results do not cover.",
+        parameters: { type: "object", properties: { query: { type: "string", description: "The search query, in a few words." }, max_results: { type: "number", description: "Optional maximum number of results (default 5, max 10)." } }, required: ["query"] },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "web_news",
+        description: "Fetch the latest news (past 7 days) from free news sources (Google News, Bing News, heise, Golem, Ars Technica, The Verge, TechCrunch, CNBC, MarketWatch, Financial Times, Hacker News, Lobsters, r/programming). Use whenever the user asks for news or the latest developments: with a concrete topic (e.g. one of their interests from the knowledge graph or the conversation) or an interest area — technik, it, finance, geek, nerd.",
+        parameters: { type: "object", properties: { topic: { type: "string", description: "A concrete topic (e.g. 'Home Assistant') or an interest area: technik, it, finance, geek, nerd." }, max_results: { type: "number", description: "Optional maximum number of news items (default 8, max 15)." } }, required: ["topic"] },
+      },
+    },
+  ];
+}
+
 // One short, loggable description of a tool call for the activity feed —
 // never raw Cypher (there is none on the surface anymore).
 function graphToolDetail(name, args) {
@@ -972,9 +1001,13 @@ function graphToolDetail(name, args) {
   return parts.length ? `${name}: ${parts.join(", ")}` : name;
 }
 
-async function runBrain({ messages, user, useTools, admin = false, requestId, signal, headers, deadlineMs }) {
+async function runBrain({ messages, user, useTools, webTools: webToolsOn = false, admin = false, lang = "de", requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
   const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
+  // Web tool results collected for post-turn ingestion (the extractor reads
+  // the search context the turn actually used), separate from the answer.
+  const webResults = [];
+  const hasTools = Boolean(useTools || webToolsOn);
   for (let round = 0; ; round += 1) {
     const body = {
       model: config.brainModel,
@@ -986,7 +1019,7 @@ async function runBrain({ messages, user, useTools, admin = false, requestId, si
       // budget at the measured ~150 tok/s while staying inside the timeout.
       max_tokens: 4096,
     };
-    if (useTools) body.tools = graphTools(admin);
+    if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : [])];
     let data;
     try {
       const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
@@ -1001,7 +1034,7 @@ async function runBrain({ messages, user, useTools, admin = false, requestId, si
     }
     const message = data?.choices?.[0]?.message;
     const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
-    if (!useTools || !toolCalls.length) return data;
+    if (!hasTools || !toolCalls.length) return { data, webResults };
     if (round >= GRAPH_TOOL_ROUNDS) {
       // Tool budget spent: force a final answer without tools.
       local.push({ ...message, role: "assistant" }, { role: "system", content: "Tool budget reached. Answer now from what you have gathered." });
@@ -1011,7 +1044,7 @@ async function runBrain({ messages, user, useTools, admin = false, requestId, si
       });
       const fallbackText = await fallback.text();
       if (!fallback.ok) throw new Error(`Brain HTTP ${fallback.status}: ${fallbackText.slice(0, 500)}`);
-      return JSON.parse(fallbackText);
+      return { data: JSON.parse(fallbackText), webResults };
     }
     local.push({ ...message, role: "assistant" });
     for (const call of toolCalls) {
@@ -1019,24 +1052,42 @@ async function runBrain({ messages, user, useTools, admin = false, requestId, si
       let args = {};
       try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* malformed args -> error result below */ }
       const started = Date.now();
-      if (!GRAPH_TOOL_NAMES.has(name)) {
-        recordGraphActivity({ kind: "brain_query", user, tool: name, ok: false, error: "unknown tool", ms: 0 });
-        local.push({ role: "tool", tool_call_id: call.id, content: "Unknown tool. Use get-schema, get-entity, list-my-knowledge or list-my-facts." });
-        continue;
-      }
-      try {
+      if (useTools && GRAPH_TOOL_NAMES.has(name)) {
         // The session user (and the admin flag) are injected HERE, not in
         // the brain's tool schema: the brain (or a prompt injection riding on
         // it) can only ever target the signed-in user's own data — and the
         // cross-owner admin queries are reachable only for the admin session.
-        const result = await withAbort(mcpGraph.call(name, { ...args, user, admin }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
-        const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
-        recordGraphActivity({ kind: "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
-        local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
-      } catch (error) {
-        if (totalSignal.aborted) throw error;
-        recordGraphActivity({ kind: "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: false, error: error.message.slice(0, 200), ms: Date.now() - started });
-        local.push({ role: "tool", tool_call_id: call.id, content: `Graph lookup failed: ${error.message}. Answer from what you know.` });
+        try {
+          const result = await withAbort(mcpGraph.call(name, { ...args, user, admin }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
+          const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
+          recordGraphActivity({ kind: "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
+          local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
+        } catch (error) {
+          if (totalSignal.aborted) throw error;
+          recordGraphActivity({ kind: "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started });
+          local.push({ role: "tool", tool_call_id: call.id, content: `Graph lookup failed: ${error.message}. Answer from what you know.` });
+        }
+      } else if (webToolsOn && WEB_TOOL_NAMES.has(name)) {
+        // The answer language is injected HERE (like the graph user): the
+        // brain's web tool schema has no lang parameter.
+        try {
+          const result = await withAbort(mcpWebSearch.call(name, { ...args, lang }, WEB_TOOL_TIMEOUT_MS), totalSignal);
+          const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
+          console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_tool", tool: name, detail: (name === "web_news" ? args.topic : args.query) || "", ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));
+          if (!result.isError) webResults.push(`${name} (${name === "web_news" ? args.topic : args.query}):\n${resultText}`);
+          local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
+        } catch (error) {
+          if (totalSignal.aborted) throw error;
+          console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_tool", tool: name, ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started }));
+          local.push({ role: "tool", tool_call_id: call.id, content: `Web lookup failed: ${error.message}. Answer from what you know.` });
+        }
+      } else {
+        if (useTools) recordGraphActivity({ kind: "brain_query", user, tool: name, ok: false, error: "unknown tool", ms: 0 });
+        const available = [
+          ...(useTools ? ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"] : []),
+          ...(webToolsOn ? ["web_search", "web_news"] : []),
+        ];
+        local.push({ role: "tool", tool_call_id: call.id, content: `Unknown tool. Use: ${available.join(", ")}.` });
       }
     }
   }

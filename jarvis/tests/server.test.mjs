@@ -67,6 +67,25 @@ before(async () => {
           : '{"choices":[{"message":{"content":"Noted: Lego."}}]}');
         return;
       }
+      if (mode === "web-tools") {
+        // The mock brain asks for the web_news tool on the first round (tools
+        // offered, no tool result yet) and answers once the result arrives —
+        // exercising the server-side web tool loop end to end.
+        const body = JSON.parse(received.toString("utf8") || "{}");
+        const hasToolResult = (body.messages || []).some((message) => message.role === "tool");
+        if (body.tools && !hasToolResult) {
+          return res.end(JSON.stringify({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call_news", type: "function", function: { name: "web_news", arguments: JSON.stringify({ topic: "technik" }) } }],
+              },
+            }],
+          }));
+        }
+        return res.end(JSON.stringify({ choices: [{ message: { content: "Fresh news delivered." } }] }));
+      }
       res.end(mode === "empty-answer"
         ? '{"choices":[{"message":{"content":null},"finish_reason":"length"}]}'
         : '{"choices":[{"message":{"content":"Hello"}}]}');
@@ -328,6 +347,56 @@ test("the brain system prompt reports the MCP web-search state per request", asy
     if (searchPattern) assert.match(body.messages[1].content, searchPattern);
     else assert.equal(body.messages.length, 2, "no search-results message");
   }
+});
+
+test("the brain gets web_search and web_news tools and can fetch live news", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-web-tools-mock-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // The mock MCP server echoes the tool name and the full arguments it
+  // received, so the test can pin the backend's per-call lang injection
+  // without any network.
+  const script = join(dir, "mcp-web-tools.mjs");
+  await writeFile(script, `
+    import readline from "node:readline";
+    readline.createInterface({ input: process.stdin }).on("line", (line) => {
+      const message = JSON.parse(line);
+      if (message.id === undefined) return;
+      let result;
+      if (message.method === "initialize") {
+        result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-websearch", version: "1.0.0" } };
+      } else if (message.method === "tools/call") {
+        result = { isError: false, content: [{ type: "text", text: "Mock " + message.params.name + " result: 42. args=" + JSON.stringify(message.params.arguments || {}) }] };
+      } else {
+        result = {};
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+    });
+  `);
+  const { process: child, origin: toolsOrigin } = await startBackend({ MCP_SEARCH_SCRIPT: script });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  mode = "web-tools";
+  const response = await auth(toolsOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Gib mir die letzten News.", sessionId: "web-news-loop", language: "de", websearch: true }),
+  });
+  const result = await response.json();
+  assert.equal(result.answer, "Fresh news delivered.");
+  // The final request (after the tool round) still offers both web tools...
+  const body = JSON.parse(received.toString("utf8"));
+  assert.deepEqual(body.tools.map((tool) => tool.function.name), ["web_search", "web_news"]);
+  // ...and the tool round landed: the brain's web_news call got the mock
+  // result, the backend injected the answer language (lang) per call, and
+  // the brain only supplied the topic — the MCP never sees a brain-chosen
+  // locale.
+  const toolMessage = body.messages.find((message) => message.role === "tool");
+  assert.ok(toolMessage, "the tool result is in the final request");
+  assert.match(toolMessage.content, /Mock web_news result: 42/);
+  assert.match(toolMessage.content, /"topic":"technik"/);
+  assert.match(toolMessage.content, /"lang":"de"/);
+  // The system prompt tells the brain about the news tool and the areas.
+  assert.match(body.messages[0].content, /web_news/);
+  assert.match(body.messages[0].content, /technik, it, finance, geek, nerd/);
+  mode = "success";
 });
 
 test("the TTS proxy rejects non-English languages instead of mispronouncing", async () => {
