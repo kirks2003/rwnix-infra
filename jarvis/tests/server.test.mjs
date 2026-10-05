@@ -13,6 +13,7 @@ let mode = "success";
 let receivedAuth;
 let disconnected;
 let received;
+let lastBrain;
 let logs = "";
 
 // Session cookies per origin (the backend gates every /api route on login).
@@ -56,15 +57,26 @@ before(async () => {
     res.setHeader("content-type", "application/json");
     if (mode === "failure") {
       res.writeHead(503).end('{"error":"unavailable"}');
-    } else if (req.url.endsWith("chat/completions")) {
+    } else    if (req.url.endsWith("chat/completions")) {
+      // The brain request, kept separately from `received` (the last
+      // upstream call of any kind): post-turn ingestion calls the same
+      // endpoint after the answer is sent, so it would otherwise race the
+      // brain body out of `received`.
+      const parsedBody = JSON.parse(received.toString("utf8") || "{}");
+      if (!String(parsedBody.messages?.[0]?.content || "").includes("knowledge-graph entities")) lastBrain = parsedBody;
       if (mode === "graph-ingest") {
         // The brain answer and the post-turn extraction call both hit this
         // endpoint; the extraction one carries the EXTRACT_SYSTEM_PROMPT.
+        // A "trading news list" prompt gets a WATCHES extraction instead of
+        // the canned LIKES one, so the save-instruction path is testable.
         const body = JSON.parse(received.toString("utf8") || "{}");
         const isExtraction = String(body.messages?.[0]?.content || "").includes("knowledge-graph entities");
-        res.end(isExtraction
-          ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Lego\\",\\"type\\":\\"thing\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Lego\\",\\"type\\":\\"LIKES\\"}]}"}}]}'
-          : '{"choices":[{"message":{"content":"Noted: Lego."}}]}');
+        const isWatchTurn = isExtraction && String(body.messages?.[1]?.content || "").includes("trading news list");
+        res.end(isWatchTurn
+          ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Gold\\",\\"type\\":\\"topic\\"},{\\"name\\":\\"Nvidia\\",\\"type\\":\\"organization\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Gold\\",\\"type\\":\\"WATCHES\\"},{\\"from\\":\\"Mila\\",\\"to\\":\\"Nvidia\\",\\"type\\":\\"WATCHES\\"}]}"}}]}'
+          : isExtraction
+            ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Lego\\",\\"type\\":\\"thing\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Lego\\",\\"type\\":\\"LIKES\\"}]}"}}]}'
+            : '{"choices":[{"message":{"content":"Noted."}}]}');
         return;
       }
       if (mode === "web-tools") {
@@ -260,6 +272,47 @@ test("finished chat turns are ingested into the knowledge graph", async (t) => {
   }
   assert.ok(sub.nodes.some((node) => node.name === "Lego" && node.type === "thing"), JSON.stringify(sub.nodes));
   assert.ok(sub.edges.some((edge) => edge.type === "LIKES"), JSON.stringify(sub.edges));
+});
+
+test("save/track instructions land as WATCHES facts and the brain is told the graph auto-saves", async (t) => {
+  mode = "graph-ingest";
+  t.after(() => { mode = "success"; });
+  const graphBackend = await startBackend({ GRAPH_MEMORY: "1" });
+  t.after(async () => { graphBackend.process.kill(); await once(graphBackend.process, "exit"); });
+  const chat = await auth(graphBackend.origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Add Gold, Nvidia to my trading news list.", sessionId: "watch-list", mcp: { graph: true } }),
+  });
+  assert.equal(chat.status, 200);
+  // Ingestion is fire-and-forget: poll until the upsert has landed.
+  let sub = { nodes: [], edges: [] };
+  for (let i = 0; i < 40; i += 1) {
+    sub = await (await auth(graphBackend.origin, "/api/graph/subgraph")).json();
+    if ((sub.edges || []).some((edge) => edge.type === "WATCHES")) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  assert.ok(sub.nodes.some((node) => node.name === "Gold" && node.type === "topic"), JSON.stringify(sub.nodes));
+  assert.ok(sub.nodes.some((node) => node.name === "Nvidia" && node.type === "organization"), JSON.stringify(sub.nodes));
+  assert.equal(sub.edges.filter((edge) => edge.type === "WATCHES").length, 2, JSON.stringify(sub.edges));
+  // The extraction request (the last upstream call of the turn) is what the
+  // production extractor LLM reads: it must be taught that save/track
+  // instructions are facts to store as WATCHES.
+  const extraction = JSON.parse(received.toString("utf8"));
+  assert.match(extraction.messages[0].content, /WATCHES/);
+  assert.match(extraction.messages[0].content, /Instructions to save, remember, track or add topics/);
+  // The next turn has a non-empty graph context: the brain's system prompt
+  // tells it the graph is updated automatically after every answer, so it
+  // confirms save requests instead of claiming it cannot write.
+  mode = "success";
+  await auth(graphBackend.origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Remember Silver for my news list.", sessionId: "watch-confirm", mcp: { graph: true } }),
+  });
+  // lastBrain (not received): this turn's own ingestion would race the brain
+  // body out of received.
+  const brainPrompt = lastBrain.messages[0].content;
+  assert.match(brainPrompt, /updated automatically after every answer/);
+  assert.match(brainPrompt, /confirm that it is done/);
 });
 
 test("the brain answers as the wake word's name, per request", async () => {
