@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   cleanHtml, decodeDuckDuckGoHref, decodeBingUrl, normalizeUrlForDedupe, mergeResults, formatSearchResults,
-  INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems,
+  INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems, browserHeaders,
 } from "../mcp/engines.mjs";
 
 test("cleanHtml strips tags and named plus numeric entities", () => {
@@ -154,6 +154,30 @@ test("normalizeTopic maps the interest-area spellings and leaves free topics alo
   assert.equal(normalizeTopic("Home Assistant"), null);
   assert.equal(normalizeTopic("  "), null);
   assert.equal(normalizeTopic(null), null);
+});
+
+test("browserHeaders look like a normal Chrome request and steer the language", () => {
+  const de = browserHeaders("de", true);
+  assert.match(de["user-agent"], /^Mozilla\/5\.0 .*Chrome\/\d+\.\d+\.\d+\.\d+ Safari/);
+  assert.equal(de["accept-language"], "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7");
+  assert.match(de["sec-ch-ua"], /^"Chromium";v="/);
+  assert.equal(de["sec-ch-ua-mobile"], "?0");
+  assert.equal(de["sec-fetch-dest"], "document");
+  assert.equal(de["sec-fetch-mode"], "navigate");
+  assert.equal(de["sec-fetch-user"], "?1");
+  assert.equal(de["upgrade-insecure-requests"], "1");
+  assert.equal(de["priority"], "u=0,i");
+  assert.match(de.accept, /^text\/html/);
+  assert.equal(de["accept-encoding"], "gzip, deflate, br");
+
+  const en = browserHeaders("en", false);
+  assert.equal(en["accept-language"], "en-US,en;q=0.9");
+  assert.equal(en["sec-fetch-dest"], "empty");
+  assert.equal(en["sec-fetch-mode"], "cors");
+  assert.equal(en["sec-fetch-user"], undefined);
+  assert.equal(en["upgrade-insecure-requests"], undefined);
+  assert.equal(en["priority"], "u=1,i");
+  assert.equal(en.accept, "*/*");
 });
 
 test("the interest feed map covers the five areas with reachable http(s) feeds", () => {
