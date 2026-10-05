@@ -487,7 +487,10 @@ function renderGraph(subgraph) {
     circle.setAttribute("cy", String(point.y));
     circle.setAttribute("r", isUser ? "9" : "7");
     circle.style.fill = isUser ? "var(--cyan)" : (colors[node.type] || "var(--muted)");
-    circle.style.fillOpacity = node.common ? "0.9" : "0.65";
+    // An isolated mention (owned, but no fact edge touches it) is drawn
+    // dimmed — what the brain's list-my-knowledge reports is what the panel
+    // shows, just visually marked as "known, nothing stored about it".
+    circle.style.fillOpacity = node.isolated ? "0.35" : "0.65";
     // Click a node to re-centre the panel on its neighbourhood.
     circle.addEventListener("click", () => loadGraph(node.id));
     const label = document.createElementNS(NS, "text");
@@ -497,7 +500,12 @@ function renderGraph(subgraph) {
     label.setAttribute("font-size", "10");
     label.style.fill = "var(--muted)";
     const suffix = isUser && config?.user === node.name ? " (you)" : "";
-    label.textContent = `${String(node.name || node.type).slice(0, 24)}${suffix}`;
+    // In the admin view every owner's copy of an entity is drawn; the owner
+    // suffix keeps same-named copies (two "Lego") tellable apart. For a
+    // regular user this never fires: their own entities carry owner === them
+    // and account markers carry no owner.
+    const ownerSuffix = node.owner && node.owner !== config?.user ? ` (${node.owner})` : "";
+    label.textContent = `${String(node.name || node.type).slice(0, 24)}${ownerSuffix}${suffix}`;
     svg.appendChild(circle);
     svg.appendChild(label);
   }

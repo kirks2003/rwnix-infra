@@ -15,6 +15,12 @@
 // endpoints. A foreign or unknown entity name comes back exactly like a
 // nonexistent one — there is nothing to enumerate.
 //
+// The ONE cross-user exception is the admin session: the backend injects
+// `admin: true` (never the brain) and this file's admin query variants read
+// across all owners, reporting each row's owner. The privilege is an
+// app-level session property — there is no way for a non-admin chat turn to
+// reach the admin queries.
+//
 // Env (set by the backend at spawn time): NEO4J_URI, NEO4J_DATABASE,
 // NEO4J_READ_USER, NEO4J_READ_PASSWORD.
 
@@ -32,12 +38,16 @@ export const QUERIES = {
   // One of the user's OWN entities (owner = $user): a foreign or unknown
   // name yields no row, identical to a nonexistent one. Links are the
   // entity's edges to :User account markers or to the user's own entities.
+  // Direction via startNode (there is no direction() in Neo4j): the
+  // undirected match yields one row per relationship.
   getEntity:
     "MATCH (e:Entity {name: $name, owner: $user}) " +
     "OPTIONAL MATCH (e)-[r]-(other) " +
     "WHERE other:User OR coalesce(other.owner, '') = $user " +
     "RETURN e.name AS name, e.type AS type, properties(e) AS props, " +
-    "other.name AS other, type(r) AS rel, direction(r) AS dir, coalesce(r.negative, false) AS negative " +
+    "other.name AS other, type(r) AS rel, " +
+    "CASE WHEN e = startNode(r) THEN 'OUTGOING' ELSE 'INCOMING' END AS dir, " +
+    "coalesce(r.negative, false) AS negative " +
     "LIMIT 200",
   // Everything the user owns — their stored knowledge.
   listMyKnowledge:
@@ -47,6 +57,23 @@ export const QUERIES = {
   // (what they like, own, ...). The about/relation filters are appended by
   // the handler.
   listMyFacts: "MATCH (u:User {name: $user})-[r]->(e:Entity) WHERE type(r) <> 'KNOWS'",
+  // Admin variants — run ONLY when the backend injects admin: true (admin
+  // sessions only; the flag is not in the brain's tool schema, so a
+  // non-admin call can never reach them). Same read-only user, same file:
+  // the admin privilege is an app-level session property. These read across
+  // all owners and report each row's owner.
+  getEntityAll:
+    "MATCH (e:Entity {name: $name}) " +
+    "OPTIONAL MATCH (e)-[r]-(other) " +
+    "WHERE other:User OR other:Entity " +
+    "RETURN e.name AS name, e.type AS type, e.owner AS owner, properties(e) AS props, " +
+    "other.name AS other, type(r) AS rel, " +
+    "CASE WHEN e = startNode(r) THEN 'OUTGOING' ELSE 'INCOMING' END AS dir, " +
+    "coalesce(r.negative, false) AS negative " +
+    "LIMIT 200",
+  listAllKnowledge:
+    "MATCH (e:Entity) RETURN e.name AS name, e.type AS type, e.owner AS owner ORDER BY e.owner, e.last_seen DESC LIMIT 200",
+  listAllFacts: "MATCH (u:User)-[r]->(e:Entity) WHERE type(r) <> 'KNOWS'",
 };
 
 // "user" is injected by the backend on every call; the brain's tool schema
@@ -103,6 +130,57 @@ export function formatFacts(rows, about, relation) {
   return `Facts about this user: ${rows.map((row) => `${plain(row.type)}${row.negative ? " (negative)" : ""} -> ${row.name}`).join("; ")}.`;
 }
 
+// Bookkeeping properties never rendered (the owner bookkeeping is shown in
+// the admin headers, never leaked into a user's rendered properties).
+const BOOKKEEPING_PROPS = ["name", "type", "owner", "last_seen", "first_seen", "mention_count"];
+
+// Admin: one line per owner copy of an entity, each with its own links.
+export function formatEntityAll(rows) {
+  if (!rows.length) return "No entity found in the graph.";
+  const byOwner = new Map();
+  for (const row of rows) {
+    const key = String(row.owner || "unknown");
+    const list = byOwner.get(key) || [];
+    list.push(row);
+    byOwner.set(key, list);
+  }
+  const parts = [...byOwner.entries()].map(([owner, list]) => {
+    const head = list[0];
+    const props = Object.entries(head.props || {}).filter(([key]) => !BOOKKEEPING_PROPS.includes(key));
+    const links = list
+      .filter((row) => row.rel && row.other !== null && row.other !== undefined)
+      .map((row) =>
+        `${row.dir === "INCOMING" ? `${row.other} ${plain(row.rel)} -> ${head.name}` : `${head.name} ${plain(row.rel)} -> ${row.other}`}${row.negative ? " (negative)" : ""}`,
+      );
+    return `owner ${owner}: ${head.name} (${head.type || "thing"})${props.length ? `, properties ${props.map(([key, value]) => `${key}=${value}`).join(", ")}` : ""}, links ${links.length ? links.join("; ") : "none"}`;
+  });
+  return `${rows[0].name} (${rows[0].type || "thing"}) has ${byOwner.size === 1 ? "1 owner copy" : `${byOwner.size} owner copies`}: ${parts.join(". ")}.`;
+}
+
+export function formatKnowledgeAll(rows) {
+  if (!rows.length) return "No stored entities in the graph yet.";
+  const byUser = new Map();
+  for (const row of rows) {
+    const key = String(row.owner || "unknown");
+    const list = byUser.get(key) || [];
+    list.push(`${row.name} (${row.type || "thing"})`);
+    byUser.set(key, list);
+  }
+  return `Stored entities per user: ${[...byUser.entries()].map(([user, list]) => `${user}: ${list.join(", ")}`).join("; ")}.`;
+}
+
+export function formatFactsAll(rows) {
+  if (!rows.length) return "No stored facts in the graph yet.";
+  const byUser = new Map();
+  for (const row of rows) {
+    const key = String(row.user || "unknown");
+    const list = byUser.get(key) || [];
+    list.push(`${plain(row.type)}${row.negative ? " (negative)" : ""} -> ${row.name}`);
+    byUser.set(key, list);
+  }
+  return `Stored facts per user: ${[...byUser.entries()].map(([user, list]) => `${user}: ${list.join("; ")}`).join("; ")}.`;
+}
+
 // The stdio server: only starts when run directly (node mcp/graph.mjs), so
 // importing this module in tests does not open a driver or read stdin.
 function startServer() {
@@ -139,20 +217,27 @@ function startServer() {
     ].join(" ");
   }
 
-  async function handleGetEntity(user, name) {
+  async function handleGetEntity(user, name, admin) {
+    if (admin) {
+      const rows = await run(QUERIES.getEntityAll, { name });
+      if (!rows.length) return `No entity named "${name}" in the graph.`;
+      return formatEntityAll(rows);
+    }
     const rows = await run(QUERIES.getEntity, { user, name });
     if (!rows.length || rows[0].name === null) return `No entity named "${name}" in the graph.`;
     return formatEntity(rows[0], rows.filter((row) => row.rel));
   }
 
-  async function handleListMyKnowledge(user) {
+  async function handleListMyKnowledge(user, admin) {
+    if (admin) return formatKnowledgeAll(await run(QUERIES.listAllKnowledge));
     const rows = await run(QUERIES.listMyKnowledge, { user });
     return formatKnowledge(rows);
   }
 
-  async function handleListMyFacts(user, about, relation) {
-    let cypher = QUERIES.listMyFacts + " ";
-    const params = { user };
+  async function handleListMyFacts(user, about, relation, admin) {
+    const base = admin ? QUERIES.listAllFacts : QUERIES.listMyFacts;
+    let cypher = base + " ";
+    const params = admin ? {} : { user };
     if (about) {
       cypher += "AND e.name = $about ";
       params.about = about;
@@ -161,9 +246,11 @@ function startServer() {
       cypher += "AND type(r) = $relation ";
       params.relation = String(relation).toUpperCase().slice(0, 24);
     }
-    cypher += "RETURN type(r) AS type, e.name AS name, coalesce(r.negative, false) AS negative ORDER BY type, name LIMIT 100";
+    cypher += admin
+      ? "RETURN type(r) AS type, u.name AS user, e.name AS name, coalesce(r.negative, false) AS negative ORDER BY user, type, name LIMIT 100"
+      : "RETURN type(r) AS type, e.name AS name, coalesce(r.negative, false) AS negative ORDER BY type, name LIMIT 100";
     const rows = await run(cypher, params);
-    return formatFacts(rows, about, relation);
+    return admin ? formatFactsAll(rows) : formatFacts(rows, about, relation);
   }
 
   const readLine = readline.createInterface({ input: process.stdin, terminal: false });
@@ -200,7 +287,10 @@ function startServer() {
         const args = params?.arguments || {};
         // Defense in depth: every scoped tool requires the user the backend
         // injected; a call without it (which the backend never makes) fails.
+        // `admin` is injected the same way (admin sessions only) — it is not
+        // in the brain's tool schema, so a chat turn can never set it.
         const user = String(args.user || "").replace(/\s+/g, " ").trim().slice(0, 80);
+        const admin = args.admin === true;
         if (name !== "get-schema" && !user) {
           return respond(id, { content: [{ type: "text", text: "user is required (injected by the backend)." }], isError: true });
         }
@@ -209,9 +299,9 @@ function startServer() {
         else if (name === "get-entity") {
           const entityName = String(args.name || "").replace(/\s+/g, " ").trim().slice(0, 80);
           if (!entityName) return respond(id, { content: [{ type: "text", text: "name is required." }], isError: true });
-          text = await handleGetEntity(user, entityName);
-        } else if (name === "list-my-knowledge") text = await handleListMyKnowledge(user);
-        else if (name === "list-my-facts") text = await handleListMyFacts(user, String(args.about || "").trim().slice(0, 80), String(args.relation || "").trim().slice(0, 24));
+          text = await handleGetEntity(user, entityName, admin);
+        } else if (name === "list-my-knowledge") text = await handleListMyKnowledge(user, admin);
+        else if (name === "list-my-facts") text = await handleListMyFacts(user, String(args.about || "").trim().slice(0, 80), String(args.relation || "").trim().slice(0, 24), admin);
         else return respond(id, null, { code: -32602, message: `Unknown tool: ${name}` });
         return respond(id, { content: [{ type: "text", text }] });
       }

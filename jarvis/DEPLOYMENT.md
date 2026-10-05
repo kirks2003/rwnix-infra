@@ -1593,3 +1593,70 @@ with the `LIKES` edge and no foreign nodes; **Roman** sees only his own node
 (his isolated `Lego` copy is not drawn) with zero edges and no `Mila` node;
 admin `MATCH (e:Entity {name: "Lego"})` returns both owner copies — per-user
 privacy for users, full visibility for the admin.
+
+ ## Admin session + isolated mentions drawn dimmed (2026-10-05, PR #37)
+
+ User report (as Roman, admin): asked the brain "tell me about all graph db
+ entries of all graphdb users" — the brain answered with `Lego (thing)` but
+ the panel showed only `Roman(you)`. Audit (read-only admin Cypher against the
+ live DB) showed **no leak**: `Lego(owner: Mila)` + `Lego(owner: Roman)`, one
+ edge `Mila:User -[:LIKES]-> Lego(owner: Mila)`. Roman's brain saw only his
+ own copy (owner-scoped `list-my-knowledge`), which has no fact edge — so the
+ panel (PR #34) hid it while the brain listed it. Two gaps, both fixed here:
+
+ 1. **No in-app admin view.** The only cross-user visibility was direct DB
+    access. Now an `admin` login (name in both `USERS` and `ADMIN_USERS`,
+    password = name like all users) sees the whole graph:
+    - Panel: `visibleWorld(user, cap, userRows, admin)` — the admin's status
+      and subgraph return every `:User` node and every owner-keyed `:Entity`
+      (with the `owner` field) and all fact edges; centre mode accepts any
+      node. Works even before the admin has a `:User` node of their own.
+    - Brain: same four tools, but the backend injects `admin: true` into every
+      MCP call (the flag is not in the brain's tool schema, so a non-admin
+      call can never reach the cross-owner queries). `mcp/graph.mjs` gains
+      admin `QUERIES` (`getEntityAll`, `listAllKnowledge`, `listAllFacts`)
+      and per-owner formatters; the admin's system prompt gets an all-users
+      line instead of the privacy line.
+    - Activity feed: global for the admin.
+    - `isAdmin()` is derived from the session against `ADMIN_USERS`
+      (default `admin`) — never from client input.
+ 2. **Owned isolated mentions now drawn, dimmed.** PR #34 hid them; now the
+    node shape is `{id, name, type, owner, isolated}` (every node is drawn;
+    `isolated: true` marks an owned entity with no fact edge — never a
+    `:User` node) and both views dim it (2D `fill-opacity 0.35`, 3D material
+    opacity + label class). In the admin view, entity labels carry the owner
+    suffix. Panel and brain `list-my-knowledge` now agree.
+
+ Latent bug found and fixed while verifying live: **`direction(r)` is not a
+ Cypher function in Neo4j 5.26** ("Unknown function 'direction'") — every
+ `get-entity` call (user and admin variant) was a hard runtime error since
+ the custom MCP shipped (PR #33); the unit tests pin query strings and the
+ mock driver never executes them, so nothing caught it. Both queries now use
+ `CASE WHEN e = startNode(r) THEN 'OUTGOING' ELSE 'INCOMING' END AS dir`
+ (single undirected match, one row per relationship — verified live against
+ real data), and `tests/mcp-graph.test.mjs` pins that no query may call
+ `direction(`. Also fixed a null-safe centre filter in both stores' subgraph
+ queries: with zero edges `r` is null and `type(r) <> 'KNOWS'` drops the row,
+ so centring on an isolated node returned an empty view — now `r IS NULL OR
+ (type(r) <> 'KNOWS' AND …)`.
+
+ Tests: unit 99/99 (memory + neo4j-mock admin global views, isolated flag and
+ dimming inputs, admin subgraph/centre queries, the null-safe centre pin,
+ `mcp-graph` admin query pins + formatters + the `direction()` regression
+ pin, admin integration test: global panel, `admin: true` in the tool calls,
+ admin prompt line, global activity), browser 37 pass + 2 opt-in skips
+ (fixture gains an isolated mention; both views assert it is drawn but
+ dimmed).
+
+ Deployed (backup `jarvis-code.bak-20261005_181329.tgz` +
+ `.env.bak-20261005_181329`; `USERS=Mila,Roman,admin` added to the live
+ `.env`; `graphdb.js`, `server.js`, `mcp/graph.mjs`, `public/app.js`,
+ `public/graph3d.js`, `public/style.css`, the three test files and `README.md`
+ synced, md5-verified, image rebuilt, container healthy) and verified live:
+ **admin** panel shows the whole graph — `Mila`, `Roman`, `Lego(owner:
+ Mila)`, `Lego(owner: Roman)` (isolated) and the single `LIKES` edge;
+ **Roman** now sees `Roman` + his `Lego` (flagged isolated, drawn dimmed)
+ with zero edges and no `Mila`; **Mila**'s world is unchanged. The user's
+ exact question, asked as admin, answered with the per-user breakdown (Mila:
+ likes Lego; Roman: owns the entity, no facts) and the activity feed recorded
+ the admin's tool reads globally.

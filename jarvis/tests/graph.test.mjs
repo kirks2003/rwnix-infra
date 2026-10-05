@@ -83,13 +83,12 @@ test("formatGraphContext renders the user's own entities only (no shared tier)",
 
 test("memory store: status, context, upsert, per-user scope and neighbourhood", async () => {
   const store = graphdb.createMemoryStore();
-  // Mila's drawn world: her node plus the entities a visible fact edge
-  // touches — Rocky and Kokoro, via Rocky -USES-> Kokoro. Berlin is known
-  // but an isolated mention (no fact edge touches it), so it is neither
-  // drawn nor counted; KNOWS keeps it in the brain context. Roman's private
-  // data is not in the counts.
+  // Mila's drawn world: her node, the entities she owns (Rocky and Kokoro via
+  // Rocky -USES->, and the isolated mention Berlin — drawn, but flagged
+  // `isolated` for the UI to dim) and the fact edges. Roman's private data is
+  // not in the counts.
   const status = await store.status({ user: "Mila" });
-  assert.equal(status.nodes, 3, JSON.stringify(status));
+  assert.equal(status.nodes, 4, JSON.stringify(status));
   assert.equal(status.edges, 1, JSON.stringify(status));
   const context = await store.readContext("Mila");
   assert.ok(context.userEntities.some((entity) => entity.name === "Rocky"));
@@ -105,6 +104,10 @@ test("memory store: status, context, upsert, per-user scope and neighbourhood", 
   let sub = await store.subgraph({ user: "Mila" });
   assert.ok(sub.nodes.some((node) => node.name === "Amelie"));
   assert.ok(sub.edges.some((edge) => edge.type === "FRIEND_OF"));
+  // Isolated mentions are drawn but flagged; linked entities are not.
+  assert.equal(sub.nodes.find((node) => node.name === "Berlin").isolated, true, "Berlin is an isolated mention");
+  assert.equal(sub.nodes.find((node) => node.name === "Rocky").isolated, false, "Rocky has a fact edge");
+  assert.equal(sub.nodes.find((node) => node.name === "Mila").isolated, false, "the :User node is never isolated");
   const amelieId = sub.nodes.find((node) => node.name === "Amelie").id;
   const centered = await store.subgraph({ user: "Mila", center: amelieId });
   assert.ok(centered.nodes.some((node) => node.name === "Mila"));
@@ -112,15 +115,23 @@ test("memory store: status, context, upsert, per-user scope and neighbourhood", 
   // Mila->Amelie KNOWS edge from the upsert stays out of the panel data.
   assert.equal(centered.edges.length, 1);
   assert.equal(centered.edges[0].type, "FRIEND_OF");
+  // Centring on an isolated mention (no fact edge) still returns the node
+  // itself — not an empty view.
+  const berlinId = sub.nodes.find((node) => node.name === "Berlin").id;
+  const centeredBerlin = await store.subgraph({ user: "Mila", center: berlinId });
+  assert.ok(centeredBerlin.nodes.some((node) => node.name === "Berlin"), "the isolated centre comes back");
+  assert.equal(centeredBerlin.edges.length, 0, "an isolated centre has no edges");
   // Roman mentions Amelie too: he gets his OWN copy (owner Roman) — Mila's
   // node is a different node and stays untouched (owner-keyed isolation).
   await store.upsertTurn({ user: "Roman", entities: [{ name: "Amelie", type: "person", props: {} }], relations: [] });
   sub = await store.subgraph({ user: "Mila" });
   assert.equal(sub.nodes.find((node) => node.name === "Amelie").owner, "Mila", "Mila's Amelie node is still hers");
-  // And Roman's view does not contain Mila's fact edge at all.
+  // And Roman's view does not contain Mila's fact edge at all. His isolated
+  // starter mention (Coffee) is drawn but flagged.
   const romanSub = await store.subgraph({ user: "Roman" });
   assert.ok(!romanSub.edges.some((edge) => edge.type === "FRIEND_OF"));
   assert.ok(!romanSub.nodes.some((node) => node.name === "Mila"), "no other user node");
+  assert.equal(romanSub.nodes.find((node) => node.name === "Coffee").isolated, true, "Roman's isolated mention is drawn and flagged");
 });
 
 test("memory store: the signed-in user is one node (no duplicate person, no self-KNOWS)", async () => {
@@ -222,10 +233,10 @@ test("memory store: per-user isolation — each user sees only their own world",
   // because of his statement about her (owner-keyed isolation).
   const milaAfter = await store.subgraph({ user: "Mila" });
   assert.ok(!milaAfter.nodes.some((node) => node.name === "Pizza"), `no other user's entity leaks: ${JSON.stringify(milaAfter.nodes.map((node) => node.name))}`);
-  // Status counts are scoped the same way: Mila has one extra drawn fact
-  // (OWNS Car, stated by her), so her node count is higher. Note the known
-  // but unlinked "Berlin" (starter graph) counts for neither user — isolated
-  // mentions are not drawn.
+  // Status counts are scoped the same way: Mila owns more entities (Rocky,
+  // Berlin, Kokoro, Lego, Amelie, Car) than Roman (Coffee, Pizza, Amelie), so
+  // her node count is higher — isolated mentions (Berlin, Coffee) count too,
+  // since they are drawn (dimmed) now.
   await store.upsertTurn({
     user: "Mila",
     entities: [{ name: "Car", type: "thing", props: {} }],
@@ -245,6 +256,39 @@ test("memory store: per-user isolation — each user sees only their own world",
   const pizzaId = roman.nodes.find((node) => node.name === "Pizza").id;
   const centeredPizza = await store.subgraph({ user: "Roman", center: pizzaId });
   assert.equal(centeredPizza.nodes.length, 3, "Pizza plus Roman's node and Mila's account marker");
+});
+
+test("memory store: the admin sees the whole graph (every user's nodes, owners and facts)", async () => {
+  const store = graphdb.createMemoryStore(["Mila", "Roman", "admin"]);
+  // Roman adds a private fact on top of the starter world.
+  await store.upsertTurn({
+    user: "Roman",
+    entities: [{ name: "Pizza", type: "thing", props: {} }],
+    relations: [{ from: "Roman", to: "Pizza", type: "LIKES" }],
+  });
+  // The admin's panel view is the WHOLE graph: every account node, every
+  // owner-keyed entity (isolated ones flagged) and every fact edge.
+  const adminStatus = await store.status({ user: "admin", admin: true });
+  assert.equal(adminStatus.nodes, 7, JSON.stringify(adminStatus));
+  assert.equal(adminStatus.edges, 2, JSON.stringify(adminStatus));
+  const adminSub = await store.subgraph({ user: "admin", admin: true });
+  const names = adminSub.nodes.map((node) => node.name);
+  assert.ok(names.includes("Mila") && names.includes("Roman"), `every user's account node: ${JSON.stringify(names)}`);
+  assert.ok(names.includes("Rocky") && names.includes("Coffee") && names.includes("Pizza"), "every user's entities are drawn");
+  // Same-named entities of different owners would both appear; here the
+  // owner field is what keeps copies tellable apart.
+  assert.equal(adminSub.nodes.find((node) => node.name === "Pizza").owner, "Roman");
+  assert.equal(adminSub.nodes.find((node) => node.name === "Rocky").owner, "Mila");
+  // Isolated mentions keep their flag in the admin view, too.
+  assert.equal(adminSub.nodes.find((node) => node.name === "Berlin").isolated, true);
+  assert.equal(adminSub.nodes.find((node) => node.name === "Pizza").isolated, false, "Pizza has a fact edge");
+  // A regular user is unaffected: no admin flag -> no cross-user data.
+  const milaSub = await store.subgraph({ user: "Mila", admin: false });
+  assert.ok(!milaSub.nodes.some((node) => node.name === "Pizza"), "Mila never sees Roman's entity");
+  // The admin may centre on ANY node, whoever owns it.
+  const rockyId = adminSub.nodes.find((node) => node.name === "Rocky").id;
+  const centered = await store.subgraph({ user: "admin", admin: true, center: rockyId });
+  assert.ok(centered.nodes.some((node) => node.name === "Kokoro-82M"), "admin centre reaches any neighbour");
 });
 
 // --- neo4j store (mock driver) --------------------------------------------------
@@ -423,11 +467,69 @@ test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and ret
   const centerQuery = calls.find((call) => call.cypher.includes("elementId(a) = $center"));
   assert.ok(centerQuery, "expected the centred subgraph query");
   assert.ok(centerQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${centerQuery.cypher}`);
+  // A centre with no fact edges must still come back: with a null r,
+  // type(r) is null, so the filter needs an explicit r IS NULL disjunct or
+  // the centre view is empty.
+  assert.ok(centerQuery.cypher.includes("r IS NULL OR"), `null-safe centre filter: ${centerQuery.cypher}`);
   // The centre must be the user's own node or an entity they own ...
   assert.ok(centerQuery.cypher.includes("(a:Entity AND a.owner = $user)"), centerQuery.cypher);
   // ... and neighbours are the user's own entities or :User account markers
   // (never another user's entity).
   assert.ok(centerQuery.cypher.includes("(b:User OR (b:Entity AND b.owner = $user))"), centerQuery.cypher);
+  // The newest-mode view returns the user node plus owned entities; the mock
+  // returns one owned entity (Lego) and no fact edge, so it is drawn but
+  // flagged `isolated` (the UI dims it).
+  const world = await store.subgraph({ user: "Mila", limit: 20 });
+  const lego = world.nodes.find((node) => node.name === "Lego");
+  assert.ok(lego, "the owned entity is drawn");
+  assert.equal(lego.isolated, true, "no fact edge touches it -> isolated");
+});
+
+test("neo4j store: the admin subgraph queries are global (no user or owner pinning)", async () => {
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
+        async run(cypher, params) { calls.push({ cypher, params }); return { records: [] }; },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+  });
+  await store.subgraph({ user: "admin", admin: true });
+  // Every account node and every owner-keyed entity — no query in the admin
+  // branch is pinned to a user (the flag is set by the backend, never the
+  // client), so nothing can be scoped down to one user's world.
+  const userQuery = calls.find((call) => call.cypher.includes("MATCH (u:User)"));
+  assert.ok(userQuery, "the admin fetches every :User node");
+  assert.doesNotMatch(userQuery.cypher, /\{name: \$user\}/, "no name pinning in the admin user query");
+  const entityQuery = calls.find((call) => call.cypher.includes("MATCH (e:Entity) ORDER BY"));
+  assert.ok(entityQuery, "the admin fetches every :Entity node");
+  assert.doesNotMatch(entityQuery.cypher, /owner: \$user/, "no owner pinning in the admin entity query");
+  assert.ok(calls.every((call) => !call.params || !("user" in call.params)), "no $user parameter in any admin query");
+  // The edge query is scoped to the fetched world (at least one endpoint in
+  // it) and includes user-to-user edges, which the per-user query excludes.
+  const edgeQuery = calls.find((call) => call.cypher.includes("elementId(a) IN $ids OR elementId(b) IN $ids"));
+  assert.ok(edgeQuery, "expected the global edge query");
+  assert.ok(edgeQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${edgeQuery.cypher}`);
+  assert.doesNotMatch(edgeQuery.cypher, /NOT \(a:User AND b:User\)/, "no user-to-user restriction for the admin");
+  // The admin may centre on any node, and an isolated centre still comes
+  // back (null-safe filter).
+  calls.length = 0;
+  await store.subgraph({ user: "admin", admin: true, center: "someId" });
+  const adminCenterQuery = calls.find((call) => call.cypher.includes("elementId(a) = $center"));
+  assert.ok(adminCenterQuery, "expected the admin centred query");
+  assert.ok(adminCenterQuery.cypher.includes("r IS NULL OR"), `null-safe centre filter: ${adminCenterQuery.cypher}`);
+  assert.ok(adminCenterQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${adminCenterQuery.cypher}`);
+  assert.doesNotMatch(adminCenterQuery.cypher, /owner = \$user/, "the admin centre is not owner-restricted");
 });
 
 test("neo4j store: the user's own person is not MERGEd as an :Entity and user relations target the :User node", async () => {
@@ -533,10 +635,12 @@ before(async () => {
   const unconfigured = await startBackend({ BRAIN_BASE_URL: base, WHISPER_ENDPOINTS: "" });
   backends.push(unconfigured);
   origins.push(unconfigured.origin);
-  // Configured with the in-memory store and the mock MCP server.
+  // Configured with the in-memory store and the mock MCP server. The user
+  // list includes the admin account (password = name, like every user).
   const configured = await startBackend({
     BRAIN_BASE_URL: base,
     WHISPER_ENDPOINTS: "",
+    USERS: "Mila,Roman,admin",
     NEO4J_URI: "bolt://mock:7687",
     NEO4J_READ_USER: "jarvis_read",
     NEO4J_READ_PASSWORD: "read-secret",
@@ -640,14 +744,16 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   const backend = backends[1];
   const cookie = await login(origin);
 
-  // The status is scoped to the signed-in user's drawn world: Mila's node
-  // plus the entities a visible fact edge touches (Rocky and Kokoro, via
-  // Rocky -USES->). The known but unlinked "Berlin" is an isolated mention
-  // and does not count. Nothing of another user's counts in.
+  // The status is scoped to the signed-in user's drawn world: Mila's node,
+  // the entities she owns (Rocky and Kokoro via Rocky -USES->, plus the
+  // isolated mention Berlin — drawn, flagged for the UI to dim) and the fact
+  // edges. Nothing of another user's counts in.
   const status = await (await auth(origin, "/api/graph/status", cookie)).json();
-  assert.equal(status.nodes, 3, JSON.stringify(status));
+  assert.equal(status.nodes, 4, JSON.stringify(status));
   assert.equal(status.edges, 1, JSON.stringify(status));
   assert.ok(status.labels.includes("Entity"));
+  const earlySub = await (await auth(origin, "/api/graph/subgraph?limit=60", cookie)).json();
+  assert.equal(earlySub.nodes.find((node) => node.name === "Berlin").isolated, true, "isolated mention is drawn and flagged");
 
   const schema = await (await auth(origin, "/api/graph/schema", cookie)).json();
   assert.ok(schema.relTypes.includes("USES"));
@@ -760,4 +866,47 @@ test("raw Cypher is not on the tool surface: the old read-cypher call is rejecte
     activity.entries.some((entry) => entry.kind === "brain_query" && entry.tool === "read-cypher" && !entry.ok),
     JSON.stringify(activity.entries),
   );
+});
+
+test("admin session: global panel, cross-owner brain tools, full activity feed", async () => {
+  const origin = origins[1];
+  const backend = backends[1];
+  const adminCookie = await login(origin, "admin");
+  // The admin's panel is the WHOLE graph: every user's account node and
+  // entity, whoever owns them.
+  const status = await (await auth(origin, "/api/graph/status", adminCookie)).json();
+  assert.ok(status.nodes >= 6, `admin sees the whole graph: ${JSON.stringify(status)}`);
+  const subgraph = await (await auth(origin, "/api/graph/subgraph?limit=60", adminCookie)).json();
+  const names = subgraph.nodes.map((node) => node.name);
+  assert.ok(names.includes("Mila") && names.includes("Roman"), `every user's nodes: ${JSON.stringify(names)}`);
+  assert.ok(names.includes("Rocky") && names.includes("Coffee"), `every user's entities: ${JSON.stringify(names)}`);
+  // Roman's isolated starter mention is drawn but flagged in the admin view.
+  assert.equal(subgraph.nodes.find((node) => node.name === "Coffee").isolated, true, JSON.stringify(subgraph.nodes));
+  // A non-admin user is unaffected by the admin's presence in USERS.
+  const milaCookie = await login(origin, "Mila");
+  const milaStatus = await (await auth(origin, "/api/graph/status", milaCookie)).json();
+  assert.ok(milaStatus.nodes < status.nodes, "Mila's view is still scoped to her world");
+  // The admin's brain tools run across all owners: the backend injects the
+  // admin flag, and the prompt tells the brain this is the admin session.
+  toolRequests = [];
+  finalRequests = [];
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: adminCookie },
+    body: JSON.stringify({ prompt: "Tell me about all graph db entries of all users", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(toolRequests.length, 1);
+  const adminSystem = toolRequests[0].messages.map((message) => String(message.content || "")).join("\n");
+  assert.match(adminSystem, /administrator/);
+  assert.match(adminSystem, /ALL users' data/);
+  assert.doesNotMatch(adminSystem, /never another user's data/, "the per-user privacy line does not apply to the admin");
+  // The tool call carried the injected admin flag (the mock MCP logs the args
+  // to stderr; the backend JSON-stringifies that line, so quotes are escaped).
+  assert.match(backend.logs, /\\"user\\":\\"admin\\",\\"admin\\":true/);
+  // The admin's activity feed is global: it includes Mila's earlier brain read.
+  const activity = await (await auth(origin, "/api/graph/activity", adminCookie)).json();
+  assert.ok(activity.entries.some((entry) => entry.kind === "brain_query" && entry.user === "Mila"), JSON.stringify(activity.entries));
+  // ...while Mila's own feed does not include the admin's brain read.
+  const milaActivity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
+  assert.ok(!milaActivity.entries.some((entry) => entry.user === "admin"), JSON.stringify(milaActivity.entries));
 });
