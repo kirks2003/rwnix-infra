@@ -659,6 +659,19 @@ progress {
   cursor: pointer;
 }
 
+/* Relation-type label on a 2D link; the dark outline keeps it readable
+   where it crosses the lines. */
+.graph-canvas .edge-label {
+  font-size: 9px;
+  fill: var(--muted);
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: #02050b;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
 .graph-views {
   display: inline-flex;
   gap: 4px;
@@ -720,6 +733,13 @@ progress {
 
 .graph-3d-labels span.user {
   color: var(--cyan);
+}
+
+/* Relation-type label floating at a 3D link's midpoint (non-interactive). */
+.graph-3d-labels span.edge {
+  font-size: 8px;
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 .graph-side {

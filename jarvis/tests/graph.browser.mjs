@@ -36,8 +36,11 @@ const GRAPH_FIXTURE = {
     { id: "n3", name: "Berlin", type: "place", common: true },
     { id: "n4", name: "Kokoro-82M", type: "thing", common: true },
   ],
+  // n0 and n1 carry two edges at once (KNOWS + LIKES), like the live graph
+  // ("Mila knows Lego" + "Mila likes Lego"): parallel-edge label stacking.
   edges: [
     { source: "n0", target: "n1", type: "KNOWS" },
+    { source: "n0", target: "n1", type: "LIKES" },
     { source: "n1", target: "n2", type: "USES" },
     { source: "n1", target: "n3", type: "LIVES_IN" },
     { source: "n2", target: "n4", type: "USES" },
@@ -67,7 +70,7 @@ async function routeGraphApi(page, { configured = true } = {}) {
     graphConfigured: configured,
   } }));
   if (configured) {
-    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 5, edges: 4, labels: ["User", "Entity"], relTypes: ["KNOWS", "LIVES_IN", "USES"] } }));
+    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 5, edges: 5, labels: ["User", "Entity"], relTypes: ["KNOWS", "LIKES", "LIVES_IN", "USES"] } }));
     await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: GRAPH_FIXTURE }));
     await page.route("**/api/graph/schema", (route) => route.fulfill({ json: { labels: ["User", "Entity"], relTypes: ["LIVES_IN", "USES"], propertyKeys: ["name", "type"] } }));
     await page.route("**/api/graph/activity", (route) => route.fulfill({ json: { entries: [
@@ -92,12 +95,18 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   const page = await openPanel(t);
   await page.click("#graphView2dButton"); // the 3D view is the default
   await page.waitForSelector("#graphCanvas circle");
-  assert.match(await page.textContent("#graphStatus"), /5 nodes · 4 links/);
+  assert.match(await page.textContent("#graphStatus"), /5 nodes · 5 links/);
   assert.equal(await page.locator("#graphCanvas circle").count(), 5);
   const labels = await page.locator("#graphCanvas text").allTextContents();
   assert.ok(labels.includes("Mila"), "node labels should be drawn");
   // The signed-in user's account node is drawn distinctly from the person entity.
   assert.ok(labels.includes("Mila (you)"), "the :User node should be labelled as the signed-in user");
+  const edgeLabels = await page.locator("#graphCanvas text.edge-label").allTextContents();
+  assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
+  assert.ok(edgeLabels.includes("knows"), "relation types are shown in plain words");
+  assert.ok(edgeLabels.includes("lives in"), "underscored relation types render as words");
+  // Parallel edges on the same pair (KNOWS + LIKES) both get a label.
+  assert.ok(edgeLabels.includes("likes"), "parallel edges are both labelled");
   assert.match(await page.textContent("#graphSchema"), /Labels: User, Entity/);
   const activity = await page.locator("#graphActivity li").allTextContents();
   assert.equal(activity.length, 2);
@@ -142,9 +151,15 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
   await page.waitForTimeout(1000);
   const shot2 = await canvas.screenshot();
   assert.notDeepEqual(shot1, shot2, "the 3D view should keep animating");
-  const labels = await page.locator(".graph-3d-labels span").allTextContents();
+  const labels = await page.locator(".graph-3d-labels span:not(.edge)").allTextContents();
   assert.ok(labels.includes("Mila (you)"), `labels: ${JSON.stringify(labels)}`);
   assert.ok(labels.includes("Rocky"), "entity labels are drawn");
+  const edgeLabels = await page.locator(".graph-3d-labels span.edge").allTextContents();
+  assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
+  assert.ok(edgeLabels.includes("knows"), "relation types are shown in plain words");
+  assert.ok(edgeLabels.includes("lives in"), "underscored relation types render as words");
+  // Parallel edges on the same pair (KNOWS + LIKES) both get a label.
+  assert.ok(edgeLabels.includes("likes"), "parallel edges are both labelled");
   // The wrap must reserve the canvas height in 3D mode (the hidden 2D SVG
   // contributes no flow height), or the stage paints over the panels below.
   const boxes = await page.evaluate(() => {
@@ -189,7 +204,7 @@ test("the 3D view: new data appears live on the next refresh", async (t) => {
   } }));
   await page.click("#graphRefreshButton");
   await page.waitForSelector('.graph-3d-labels span:has-text("Paris")');
-  assert.equal(await page.locator(".graph-3d-labels span").count(), GRAPH_FIXTURE.nodes.length + 1);
+  assert.equal(await page.locator(".graph-3d-labels span:not(.edge)").count(), GRAPH_FIXTURE.nodes.length + 1);
 });
 
 test("the 3D view falls back to 2D when WebGL is unavailable", async (t) => {

@@ -446,6 +446,16 @@ function renderGraph(subgraph) {
   }
   const NS = "http://www.w3.org/2000/svg";
   const colors = { person: "var(--green)", place: "var(--amber)", organization: "var(--blue)", event: "var(--purple)", topic: "var(--cyan)", thing: "var(--muted)" };
+  // Parallel edges between the same pair share a midpoint; stack their
+  // labels so they do not paint on top of each other.
+  const pairCount = new Map();
+  const pairIndex = new Map();
+  for (const edge of edges) {
+    const key = [edge.source, edge.target].sort().join("~");
+    const index = pairCount.get(key) || 0;
+    pairIndex.set(edge, index);
+    pairCount.set(key, index + 1);
+  }
   for (const edge of edges) {
     const a = position.get(edge.source);
     const b = position.get(edge.target);
@@ -457,6 +467,14 @@ function renderGraph(subgraph) {
     line.style.stroke = "rgba(66, 217, 255, 0.25)";
     line.setAttribute("stroke-width", "1");
     svg.appendChild(line);
+    // The relation type in plain words, so a link reads like a sentence with
+    // its two node labels ("Mila" —likes→ "Lego").
+    const label = document.createElementNS(NS, "text");
+    label.setAttribute("x", String((a.x + b.x) / 2));
+    label.setAttribute("y", String((a.y + b.y) / 2 - 3 - pairIndex.get(edge) * 10));
+    label.setAttribute("class", "edge-label");
+    label.textContent = String(edge.type || "link").toLowerCase().replace(/_/g, " ");
+    svg.appendChild(label);
   }
   for (const node of nodes) {
     // :User nodes carry no type: the account the knowledge belongs to, so
