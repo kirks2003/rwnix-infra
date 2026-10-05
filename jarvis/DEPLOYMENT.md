@@ -1226,3 +1226,26 @@ browser-test regression pins the wrap height, the stage staying inside the
 wrap, and the panels toggle row starting below the graph panel. Redeployed
 (backup `jarvis-code.bak-20261005_090500.tgz`) and re-verified live: wrap
 320 px, stage inside the wrap, the panels row 18 px below the graph section.
+
+## Relation-type link labels (2026-10-05, PR #30)
+
+Both graph views now label every link with its relation type in plain words
+(`KNOWS` → knows, `LIKES` → likes, `LIVES_IN` → lives in), so the graph reads
+like sentences together with the node labels (Mila —knows→ Lego, Mila
+—likes→ Lego). 2D: an SVG text at each edge's midpoint with a dark
+`paint-order` outline so it stays readable over the lines. 3D: a DOM label
+projected onto each link's midpoint every frame (the same technique as the
+node labels; non-interactive, smaller and dimmer). Parallel edges between the
+same pair stack their labels (10 px per extra edge) instead of painting on top
+of each other, in both views.
+
+Finding from the first live verification: the 3D edge-label diff keyed labels
+by `source->target` only, so a pair carrying two edges at once (the live
+graph's Mila KNOWS Lego + Mila LIKES Lego) silently dropped the second
+label. The id now includes the relation type and the text is refreshed on
+change; the browser-test fixture gained a parallel edge pair (KNOWS + LIKES on
+the same nodes) so the scenario is pinned in both views.
+
+Deployed (backup `jarvis-code.bak-20261005_091708.tgz`) and verified live in
+both views: the 3D scene shows both `knows` and `likes` between Mila (you) and
+Lego, as does the 2D view.

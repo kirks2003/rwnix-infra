@@ -71,6 +71,9 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
 
   // id -> { mesh, label, pos }
   const nodeState = new Map();
+  // `${source}->${target}` -> { label, source, target, offset }; the offset
+  // stacks the labels of parallel edges that share a midpoint.
+  const edgeLabels = new Map();
   let edges = [];
   let alpha = 0;
   let disposed = false;
@@ -138,6 +141,38 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
     edges = (subgraph.edges || [])
       .filter((edge) => byId.has(edge.source) && byId.has(edge.target))
       .slice(0, MAX_EDGES);
+    // Relation-type labels, diffed like the nodes so the view keeps them
+    // between updates.
+    // The id carries the relation type: a pair can carry several edges at
+    // once (Mila -KNOWS-> Lego AND Mila -LIKES-> Lego) and each needs its
+    // own label.
+    const pairCount = new Map();
+    const incomingEdgeIds = new Set();
+    for (const edge of edges) {
+      const id = `${edge.source}->${edge.target}:${edge.type}`;
+      const key = [edge.source, edge.target].sort().join("~");
+      const index = pairCount.get(key) || 0;
+      pairCount.set(key, index + 1);
+      incomingEdgeIds.add(id);
+      const text = String(edge.type || "link").toLowerCase().replace(/_/g, " ");
+      const existing = edgeLabels.get(id);
+      if (existing) {
+        existing.offset = index;
+        if (existing.label.textContent !== text) existing.label.textContent = text;
+      } else {
+        const label = document.createElement("span");
+        label.className = "edge";
+        label.textContent = text;
+        labelLayer.appendChild(label);
+        edgeLabels.set(id, { label, source: edge.source, target: edge.target, offset: index });
+      }
+    }
+    for (const id of [...edgeLabels.keys()]) {
+      if (!incomingEdgeIds.has(id)) {
+        edgeLabels.get(id).label.remove();
+        edgeLabels.delete(id);
+      }
+    }
     if (edgeLines) {
       scene.remove(edgeLines);
       edgeLines.geometry.dispose();
@@ -230,6 +265,26 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
       attribute.setXYZ(i * 2 + 1, b.x, b.y, b.z);
     }
     attribute.needsUpdate = true;
+  }
+
+  // Project link midpoints onto the screen for the relation-type labels.
+  function updateEdgeLabels(width, height) {
+    for (const entry of edgeLabels.values()) {
+      const a = nodeState.get(entry.source);
+      const b = nodeState.get(entry.target);
+      if (!a || !b) continue;
+      projected
+        .set((a.pos.x + b.pos.x) / 2, (a.pos.y + b.pos.y) / 2, (a.pos.z + b.pos.z) / 2)
+        .project(camera);
+      if (projected.z > 1) {
+        entry.label.style.display = "none";
+        continue;
+      }
+      entry.label.style.display = "";
+      const x = (projected.x * 0.5 + 0.5) * width;
+      const y = (-projected.y * 0.5 + 0.5) * height - entry.offset * 10;
+      entry.label.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -50%)`;
+    }
   }
 
   function updateCamera(deltaMs) {
@@ -325,6 +380,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
     updateEdgePositions();
     updateCamera(deltaMs);
     updateLabels(stage.clientWidth, stage.clientHeight);
+    updateEdgeLabels(stage.clientWidth, stage.clientHeight);
     renderer.render(scene, camera);
   }
   resize();
