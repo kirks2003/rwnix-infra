@@ -1741,3 +1741,51 @@ knowledge base (pre-#33 wording).
   separately by recreating the original state exactly (flag: true).
 - Final DB state: `Mila:User`, `Roman:User`, `Lego(thing, owner: Mila,
   mention_count 11)`, one edge `Mila:User -[:LIKES]-> Lego(owner: Mila)`.
+
+## Honest ingest feed: user-account mentions are not entities (2026-10-05, PR #39)
+
+**Report (as Roman):** the activity feed showed "20:11:28 · stored 1 entity"
+but no new entity appeared in the 3D panel.
+
+**Root cause (live forensics):** the DB held only the three known nodes
+(Mila:User, Roman:User, Lego(owner: Mila)) — no new entity, no delete after
+19:08 (feed audit), Neo4j up 23 h (no restart), and the container log showed
+`graph_ingest_success {entities: 1, relations: 0}` for exactly that turn. The
+only code path where `upsertTurn` succeeds while creating zero `:Entity`
+nodes is an extracted entity **named after a registered user** (Mila/Roman/
+admin) — by design (documented in README) that person is their `:User`
+account node, never an entity, so the store correctly wrote nothing (and
+with `relations: 0` no account marker is pulled into the panel either). The
+bug was the *report*: the activity feed and the log counted
+`extraction.entities.length` (what the extractor *emitted*), not what the
+write *stored* — so a turn that only named a person read "stored 1 entity"
+while nothing was stored.
+
+**Fix**
+
+- `server.js` `ingestTurn`: uses the store's return value
+  (`{ upserted, relations: linked }`, both stores already returned it) — the
+  activity entry now carries `entities: upserted, relations: linked,
+  skippedUsers: extracted - upserted`; the log records `extracted` vs
+  `stored` plus `skippedUsers` for the same reason.
+- `public/app.js`: the feed line is computed by `ingestLine()` — stored
+  entities/links as before, but a turn that stored only user mentions reads
+  "N user-account mention(s) — nothing stored as an entity" (links-only
+  turns read "updated N link(s)"; "no new graph data" as the last resort)
+  instead of "stored 0 entities".
+
+**Tests:** unit **105/105** (103 + 2: memory store — a mention of a
+registered user stores nothing and reports `{upserted: 0, relations: 0}`
+with the user's world unchanged; integration — a turn whose extraction only
+names another registered user stores nothing, the activity entry reports
+`entities: 0, relations: 0, skippedUsers: 1`, and the panel is unchanged).
+Browser **38 pass + 2 opt-in skips** (activity fixture gained the
+0-stored/2-skipped entry; asserts the "2 user-account mentions — nothing
+stored as an entity" line).
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261005_202834.tgz`; synced
+`server.js`, `public/app.js`, `tests/graph.test.mjs`, `tests/graph.browser.mjs`
+(+ docs), md5-verified, image rebuilt, container healthy, `/api/health` ok.
+The user's live DB is untouched by this change (no data migration needed —
+nothing was ever lost; the "stored 1 entity" turn simply stored nothing by
+design).

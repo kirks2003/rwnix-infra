@@ -161,6 +161,23 @@ test("memory store: the signed-in user is one node (no duplicate person, no self
   assert.ok(!schema.relTypes.includes("KNOWS"), "the schema line must not advertise KNOWS");
 });
 
+test("memory store: a mention of a registered user stores nothing and counts it as skipped", async () => {
+  const store = graphdb.createMemoryStore(["Mila", "Roman", "admin"]);
+  const before = (await store.subgraph({ user: "Roman" })).nodes.length;
+  // The extractor named a person who has their own account: that person is
+  // their :User node, never an :Entity — and the counts must say so, or the
+  // activity feed lies about "stored N entities".
+  const result = await store.upsertTurn({
+    user: "Roman",
+    entities: [{ name: "Mila", type: "person", props: {} }],
+    relations: [],
+  });
+  assert.deepEqual(result, { upserted: 0, relations: 0 });
+  const after = await store.subgraph({ user: "Roman" });
+  assert.equal(after.nodes.length, before, "no new node for the user mention");
+  assert.ok(!after.nodes.some((node) => node.name === "Mila"), "no Mila node appears in Roman's world");
+});
+
 test("memory store: negation is a flag on the same edge and flips on re-statement", async () => {
   const store = graphdb.createMemoryStore();
   await store.upsertTurn({
@@ -661,6 +678,12 @@ const EXTRACT_JSON = JSON.stringify({
   entities: [{ name: "Amelie", type: "person", props: {} }],
   relations: [{ from: "Amelie", to: "Mila", type: "FRIEND_OF" }],
 });
+// A turn whose only extracted entity is a registered user: the store writes
+// nothing (the person is their account node) and must report it as skipped.
+const USER_MENTION_JSON = JSON.stringify({
+  entities: [{ name: "Mila", type: "person", props: {} }],
+  relations: [],
+});
 
 before(async () => {
   upstream = createServer(async (req, res) => {
@@ -672,7 +695,8 @@ before(async () => {
     const systemText = (body.messages || []).map(textOf).join("\n");
     res.setHeader("content-type", "application/json");
     if (systemText.includes("extract knowledge-graph entities")) {
-      return res.end(JSON.stringify({ choices: [{ message: { content: EXTRACT_JSON } }] }));
+      const userMention = systemText.includes("user-account-mention");
+      return res.end(JSON.stringify({ choices: [{ message: { content: userMention ? USER_MENTION_JSON : EXTRACT_JSON } }] }));
     }
     const lastUser = [...(body.messages || [])].reverse().find((message) => message.role === "user");
     const wantsDelete = String(lastUser?.content || "").includes("Delete everything");
@@ -891,6 +915,32 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   assert.equal(amelie.type, "person");
   assert.equal(amelie.owner, "Mila", "entities are owner-keyed to the signed-in user");
   assert.ok(subgraph.edges.some((edge) => edge.type === "FRIEND_OF"));
+});
+
+test("mentioning a registered user stores no entity and the feed says so", async () => {
+  const origin = origins[1];
+  const romanCookie = await login(origin, "Roman");
+  const before = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: romanCookie },
+    body: JSON.stringify({ prompt: "user-account-mention: who is Mila?", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  // Ingestion is fire-and-forget: poll until the memory store recorded it.
+  const ingest = await waitFor(async () => {
+    const entries = (await (await auth(origin, "/api/graph/activity", romanCookie)).json()).entries;
+    return entries.find((entry) => entry.kind === "ingest" && entry.user === "Roman");
+  });
+  // The extractor emitted one entity, but it was a user account: nothing was
+  // stored, and the feed reports that honestly instead of "stored 1 entity".
+  assert.equal(ingest.entities, 0, JSON.stringify(ingest));
+  assert.equal(ingest.relations, 0, JSON.stringify(ingest));
+  assert.equal(ingest.skippedUsers, 1, JSON.stringify(ingest));
+  // Roman's world is unchanged: no new node, and no Mila marker either
+  // (with no fact edge there is no neighbour pulling her in).
+  const after = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
+  assert.equal(after.nodes.length, before.nodes.length, JSON.stringify({ before, after }));
+  assert.ok(!after.nodes.some((node) => node.name === "Mila"), JSON.stringify(after.nodes));
 });
 
 test("the graph tool budget leaves room for schema plus follow-up queries (five rounds)", async () => {

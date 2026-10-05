@@ -86,6 +86,8 @@ async function routeGraphApi(page, { configured = true } = {}) {
     await page.route("**/api/graph/activity", (route) => route.fulfill({ json: { entries: [
       { at: new Date().toISOString(), kind: "brain_query", user: "Mila", tool: "list-my-facts", detail: "facts for Mila (mock)", ok: true, ms: 12 },
       { at: new Date().toISOString(), kind: "ingest", user: "Mila", entities: 2, relations: 1 },
+      // 0 stored / 2 skipped: the extractor only named registered users.
+      { at: new Date().toISOString(), kind: "ingest", user: "Mila", entities: 0, relations: 0, skippedUsers: 2 },
     ] } }));
   }
 }
@@ -128,10 +130,13 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   assert.ok(!edgeLabels.includes("knows"), "KNOWS is not rendered");
   assert.match(await page.textContent("#graphSchema"), /Labels: User, Entity/);
   const activity = await page.locator("#graphActivity li").allTextContents();
-  assert.equal(activity.length, 2);
+  assert.equal(activity.length, 3);
   assert.match(activity[0], /brain read list-my-facts/);
   // The feed is scoped to the session user, so no per-entry user suffix.
   assert.match(activity[1], /stored 2 entities \+ 1 link$/);
+  // Nothing stored (the mentions were user accounts) must not read as
+  // "stored 0 entities" — the feed says what actually happened.
+  assert.match(activity[2], /2 user-account mentions — nothing stored as an entity$/);
 });
 
 test("clicking a node re-centres the panel on its neighbourhood", async (t) => {
