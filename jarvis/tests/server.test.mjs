@@ -63,7 +63,7 @@ before(async () => {
         const body = JSON.parse(received.toString("utf8") || "{}");
         const isExtraction = String(body.messages?.[0]?.content || "").includes("knowledge-graph entities");
         res.end(isExtraction
-          ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\",\\"common\\":false},{\\"name\\":\\"Lego\\",\\"type\\":\\"thing\\",\\"common\\":true}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Lego\\",\\"type\\":\\"LIKES\\"}]}"}}]}'
+          ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Lego\\",\\"type\\":\\"thing\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Lego\\",\\"type\\":\\"LIKES\\"}]}"}}]}'
           : '{"choices":[{"message":{"content":"Noted: Lego."}}]}');
         return;
       }

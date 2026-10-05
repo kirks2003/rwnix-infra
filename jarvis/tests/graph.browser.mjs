@@ -28,17 +28,18 @@ after(async () => {
 });
 
 // The shape of the API's per-user scoped subgraph: the signed-in user's
-// type-less node, the entities they know, one entity-hop of world knowledge
-// around those, and the edges between them. Never another user's node or
-// edge, and never the bookkeeping KNOWS edges.
+// type-less node, the entities they own, and the fact edges between them
+// (ownership bounds the world; :User account markers may appear as edge
+// endpoints). Never another user's node or edge, and never the bookkeeping
+// KNOWS edges.
 const GRAPH_FIXTURE = {
   nodes: [
     // :User nodes carry no type: the account the knowledge belongs to.
-    { id: "n0", name: "Mila", common: false },
-    { id: "n1", name: "Rocky", type: "thing", common: true },
-    { id: "n2", name: "Berlin", type: "place", common: true },
-    { id: "n3", name: "Amelie", type: "person", common: false },
-    { id: "n4", name: "Lego", type: "thing", common: true },
+    { id: "n0", name: "Mila", owner: null },
+    { id: "n1", name: "Rocky", type: "thing", owner: "Mila" },
+    { id: "n2", name: "Berlin", type: "place", owner: "Mila" },
+    { id: "n3", name: "Amelie", type: "person", owner: "Mila" },
+    { id: "n4", name: "Lego", type: "thing", owner: "Mila" },
   ],
   // Only real facts, one of them negative. n3 and n2 carry two edges at once
   // (LIVES_IN + WORKS_AT): parallel-edge label stacking.
@@ -213,7 +214,7 @@ test("the 3D view: new data appears live on the next refresh", async (t) => {
   assert.equal(await page.locator('.graph-3d-labels span:has-text("Paris")').count(), 0);
   // Registered last, so it wins: the graph gained a node and a link.
   await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: {
-    nodes: [...GRAPH_FIXTURE.nodes, { id: "n5", name: "Paris", type: "place", common: true }],
+    nodes: [...GRAPH_FIXTURE.nodes, { id: "n5", name: "Paris", type: "place", owner: "Mila" }],
     edges: [...GRAPH_FIXTURE.edges, { source: "n3", target: "n5", type: "LOCATED_IN" }],
   } }));
   await page.click("#graphRefreshButton");

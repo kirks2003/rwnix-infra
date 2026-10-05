@@ -9,9 +9,9 @@ import graphdb from "../graphdb.js";
 // --- parseExtraction ---------------------------------------------------------
 
 test("parseExtraction handles plain, fenced and prose-wrapped JSON", () => {
-  const plain = graphdb.parseExtraction('{"entities":[{"name":"Mila","type":"person","common":false}],"relations":[{"from":"Mila","to":"Berlin","type":"LIVES_IN"}]}');
+  const plain = graphdb.parseExtraction('{"entities":[{"name":"Mila","type":"person"}],"relations":[{"from":"Mila","to":"Berlin","type":"LIVES_IN"}]}');
   assert.deepEqual(plain, {
-    entities: [{ name: "Mila", type: "person", common: false, props: {} }],
+    entities: [{ name: "Mila", type: "person", props: {} }],
     relations: [{ from: "Mila", to: "Berlin", type: "LIVES_IN", negative: false }],
   });
   const fenced = graphdb.parseExtraction('Here you go:\n```json\n{"entities":[{"name":"Berlin","type":"place"}],"relations":[]}\n```\nDone.');
@@ -70,14 +70,13 @@ test("parseExtraction carries the negation flag (only boolean true counts)", () 
   ]);
 });
 
-test("formatGraphContext renders user and shared lines, empty stays empty", () => {
+test("formatGraphContext renders the user's own entities only (no shared tier)", () => {
   const text = graphdb.formatGraphContext({
     userEntities: [{ name: "Berlin", type: "place" }],
-    commonEntities: [{ name: "Kokoro-82M", type: "thing" }],
   });
   assert.match(text, /Known to this user so far: Berlin \(place\)/);
-  assert.match(text, /Shared knowledge: Kokoro-82M \(thing\)/);
-  assert.equal(graphdb.formatGraphContext({ userEntities: [], commonEntities: [] }), "");
+  assert.doesNotMatch(text, /Shared knowledge/);
+  assert.equal(graphdb.formatGraphContext({ userEntities: [] }), "");
 });
 
 // --- memory store -------------------------------------------------------------
@@ -94,10 +93,13 @@ test("memory store: status, context, upsert, per-user scope and neighbourhood", 
   assert.equal(status.edges, 1, JSON.stringify(status));
   const context = await store.readContext("Mila");
   assert.ok(context.userEntities.some((entity) => entity.name === "Rocky"));
-  assert.ok(context.commonEntities.some((entity) => entity.name === "Berlin"));
+  // Berlin is Mila's own entity now (owner-keyed) — the brain context has no
+  // shared tier any more.
+  assert.ok(context.userEntities.some((entity) => entity.name === "Berlin"));
+  assert.equal(context.commonEntities, undefined, "no shared tier in the brain context");
   await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Amelie", type: "person", common: false, props: { city: "Leipzig" } }],
+    entities: [{ name: "Amelie", type: "person", props: { city: "Leipzig" } }],
     relations: [{ from: "Amelie", to: "Mila", type: "FRIEND_OF" }],
   });
   let sub = await store.subgraph({ user: "Mila" });
@@ -110,11 +112,11 @@ test("memory store: status, context, upsert, per-user scope and neighbourhood", 
   // Mila->Amelie KNOWS edge from the upsert stays out of the panel data.
   assert.equal(centered.edges.length, 1);
   assert.equal(centered.edges[0].type, "FRIEND_OF");
-  // Roman learns about Amelie too: no "shared" flag is derived from that —
-  // it would leak that another user mentioned her (per-user isolation).
-  await store.upsertTurn({ user: "Roman", entities: [{ name: "Amelie", type: "person", common: false, props: {} }], relations: [] });
+  // Roman mentions Amelie too: he gets his OWN copy (owner Roman) — Mila's
+  // node is a different node and stays untouched (owner-keyed isolation).
+  await store.upsertTurn({ user: "Roman", entities: [{ name: "Amelie", type: "person", props: {} }], relations: [] });
   sub = await store.subgraph({ user: "Mila" });
-  assert.equal(sub.nodes.find((node) => node.name === "Amelie").common, false);
+  assert.equal(sub.nodes.find((node) => node.name === "Amelie").owner, "Mila", "Mila's Amelie node is still hers");
   // And Roman's view does not contain Mila's fact edge at all.
   const romanSub = await store.subgraph({ user: "Roman" });
   assert.ok(!romanSub.edges.some((edge) => edge.type === "FRIEND_OF"));
@@ -127,8 +129,8 @@ test("memory store: the signed-in user is one node (no duplicate person, no self
     user: "Mila",
     // The extraction always lists the user themselves as a person entity.
     entities: [
-      { name: "Mila", type: "person", common: false, props: {} },
-      { name: "Lego", type: "thing", common: true, props: {} },
+      { name: "Mila", type: "person", props: {} },
+      { name: "Lego", type: "thing", props: {} },
     ],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
@@ -152,7 +154,7 @@ test("memory store: negation is a flag on the same edge and flips on re-statemen
   const store = graphdb.createMemoryStore();
   await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    entities: [{ name: "Lego", type: "thing", props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
   let sub = await store.subgraph({ user: "Mila" });
@@ -160,7 +162,7 @@ test("memory store: negation is a flag on the same edge and flips on re-statemen
   // "I don't like Lego anymore": the same edge flips, no second edge appears.
   await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    entities: [{ name: "Lego", type: "thing", props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES", negative: true }],
   });
   sub = await store.subgraph({ user: "Mila" });
@@ -170,7 +172,7 @@ test("memory store: negation is a flag on the same edge and flips on re-statemen
   // And a positive re-statement flips it back.
   await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    entities: [{ name: "Lego", type: "thing", props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
   sub = await store.subgraph({ user: "Mila" });
@@ -183,12 +185,12 @@ test("memory store: per-user isolation — each user sees only their own world",
   // Each user keeps a private fact; both share the starter world (Rocky, ...).
   await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    entities: [{ name: "Lego", type: "thing", props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
   await store.upsertTurn({
     user: "Roman",
-    entities: [{ name: "Pizza", type: "thing", common: false, props: {} }],
+    entities: [{ name: "Pizza", type: "thing", props: {} }],
     relations: [{ from: "Roman", to: "Pizza", type: "LIKES" }],
   });
   const roman = await store.subgraph({ user: "Roman" });
@@ -202,24 +204,31 @@ test("memory store: per-user isolation — each user sees only their own world",
   assert.ok(mila.nodes.some((node) => node.name === "Lego"));
   assert.ok(!mila.nodes.some((node) => node.name === "Pizza"));
   assert.ok(!mila.nodes.some((node) => node.name === "Roman"));
-  // A fact Roman states ABOUT Mila lands on her user node: her data, not his.
-  // No "Mila" person entity is created (that would be a proxy for her
-  // personal data and would appear in Roman's panel).
+  // A fact Roman states ABOUT Mila lands on her :User node — an account
+  // marker (name only, no personal data), never a "Mila" person entity.
   await store.upsertTurn({
     user: "Roman",
-    entities: [{ name: "Mila", type: "person", common: false, props: {} }],
+    entities: [{ name: "Mila", type: "person", props: {} }],
     relations: [{ from: "Mila", to: "Pizza", type: "LIKES" }],
   });
   const romanAfter = await store.subgraph({ user: "Roman" });
-  assert.equal(romanAfter.edges.filter((edge) => edge.type === "LIKES").length, 1, "still only Roman's own fact edge");
-  assert.ok(!romanAfter.nodes.some((node) => node.name === "Mila"), JSON.stringify(romanAfter.nodes.map((node) => node.name)));
+  // His own fact plus the one he stated about Mila, whose node appears as a
+  // type-less account marker — never as a person entity or with her data.
+  assert.equal(romanAfter.edges.filter((edge) => edge.type === "LIKES").length, 2, JSON.stringify(romanAfter.edges));
+  const milaMarker = romanAfter.nodes.find((node) => node.name === "Mila");
+  assert.ok(milaMarker, "Mila appears as an account marker");
+  assert.equal(milaMarker.type, undefined, "the marker is type-less, not a person entity");
+  // And the other direction holds: Mila never sees Roman's entity "Pizza"
+  // because of his statement about her (owner-keyed isolation).
+  const milaAfter = await store.subgraph({ user: "Mila" });
+  assert.ok(!milaAfter.nodes.some((node) => node.name === "Pizza"), `no other user's entity leaks: ${JSON.stringify(milaAfter.nodes.map((node) => node.name))}`);
   // Status counts are scoped the same way: Mila has one extra drawn fact
   // (OWNS Car, stated by her), so her node count is higher. Note the known
   // but unlinked "Berlin" (starter graph) counts for neither user — isolated
   // mentions are not drawn.
   await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Car", type: "thing", common: false, props: {} }],
+    entities: [{ name: "Car", type: "thing", props: {} }],
     relations: [{ from: "Mila", to: "Car", type: "OWNS" }],
   });
   const romanStatus = await store.status({ user: "Roman" });
@@ -235,7 +244,7 @@ test("memory store: per-user isolation — each user sees only their own world",
   assert.ok(own.nodes.some((node) => node.name === "Pizza"));
   const pizzaId = roman.nodes.find((node) => node.name === "Pizza").id;
   const centeredPizza = await store.subgraph({ user: "Roman", center: pizzaId });
-  assert.equal(centeredPizza.nodes.length, 2, "Pizza plus Roman's node via the fact edge");
+  assert.equal(centeredPizza.nodes.length, 3, "Pizza plus Roman's node and Mila's account marker");
 });
 
 // --- neo4j store (mock driver) --------------------------------------------------
@@ -302,12 +311,17 @@ test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", asy
   });
   await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    entities: [{ name: "Lego", type: "thing", props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
   assert.ok(calls.length >= 3, "user MERGE, entity MERGE and relation MERGE must all run");
   assert.ok(calls.every((cypher) => !/-\[:[A-Z_]+<-\]/.test(cypher)), JSON.stringify(calls));
-  assert.ok(calls.some((cypher) => cypher.includes("MERGE (u)-[:KNOWS]->(e)")), JSON.stringify(calls));
+  // Entities are written owner-keyed (name+type+owner = the turn user) and no
+  // KNOWS bookkeeping edge is written any more — ownership IS provenance.
+  const entityMerge = calls.find((cypher) => cypher.includes("MERGE (e:Entity"));
+  assert.ok(entityMerge, "the entity MERGE must run");
+  assert.ok(entityMerge.includes("MERGE (e:Entity {name: row.name, type: row.type, owner: $user})"), entityMerge);
+  assert.ok(!calls.some((cypher) => cypher.includes("KNOWS")), JSON.stringify(calls));
   // The relation MERGE stores the negation flag; SET (not ON CREATE) is what
   // lets a later "I don't like X" flip an existing edge.
   const relationMerge = calls.find((cypher) => cypher.includes("r:LIKES"));
@@ -344,8 +358,8 @@ test("neo4j store: endpoints named after other users target their :User node, ne
   await store.upsertTurn({
     user: "Roman",
     entities: [
-      { name: "Mila", type: "person", common: false, props: {} },
-      { name: "Lego", type: "thing", common: true, props: {} },
+      { name: "Mila", type: "person", props: {} },
+      { name: "Lego", type: "thing", props: {} },
     ],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
@@ -358,10 +372,11 @@ test("neo4j store: endpoints named after other users target their :User node, ne
   const userMerge = calls.find((call) => call.cypher.includes("MERGE (u:User {name: name})"));
   assert.ok(userMerge, "referenced users' :User nodes must be merged");
   assert.ok(userMerge.params.names.includes("Mila") && userMerge.params.names.includes("Roman"));
-  // ... and the fact edge targets that :User node, not an :Entity.
+  // ... and the fact edge targets that :User node, not an :Entity — and the
+  // entity endpoint is owner-scoped to the turn user.
   const relationMerge = calls.find((call) => call.cypher.includes("r:LIKES"));
   assert.ok(relationMerge.cypher.includes("MATCH (a:User {name: row.from})"), relationMerge.cypher);
-  assert.ok(relationMerge.cypher.includes("MATCH (b:Entity {name: row.to})"), relationMerge.cypher);
+  assert.ok(relationMerge.cypher.includes("MATCH (b:Entity {name: row.to, owner: $user})"), relationMerge.cypher);
 });
 
 test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and returns the negation flag", async () => {
@@ -373,8 +388,8 @@ test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and ret
           calls.push({ cypher, params });
           const records = cypher.includes("MATCH (u:User {name: $user}) RETURN elementId(u)")
             ? [{ toObject: () => ({ id: "u1", name: "Mila" }) }]
-            : cypher.includes("MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity)")
-              ? [{ toObject: () => ({ id: "n1", name: "Lego", type: "thing", common: true, lastSeen: "now" }) }]
+            : cypher.includes("MATCH (e:Entity {owner: $user})")
+              ? [{ toObject: () => ({ id: "n1", name: "Lego", type: "thing", owner: "Mila" }) }]
               : [];
           return { records };
         },
@@ -401,14 +416,18 @@ test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and ret
   assert.ok(edgeQuery, "expected the newest-mode edge query");
   assert.ok(edgeQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${edgeQuery.cypher}`);
   assert.ok(edgeQuery.cypher.includes("coalesce(r.negative, false)"), `negation must be returned: ${edgeQuery.cypher}`);
+  // Every :Entity endpoint must be in the user's owned set; :User endpoints
+  // are account markers; pure user-to-user edges are limited to their parties.
+  assert.ok(edgeQuery.cypher.includes("(a:User OR elementId(a) IN $ids)"), `entity endpoints must be owner-scoped: ${edgeQuery.cypher}`);
+  assert.ok(edgeQuery.cypher.includes("NOT (a:User AND b:User)"), `user-to-user edges limited to their parties: ${edgeQuery.cypher}`);
   const centerQuery = calls.find((call) => call.cypher.includes("elementId(a) = $center"));
   assert.ok(centerQuery, "expected the centred subgraph query");
   assert.ok(centerQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${centerQuery.cypher}`);
-  // The centre must be a node visible to the user (own node, known entity,
-  // or one entity-hop around a known one) ...
-  assert.ok(centerQuery.cypher.includes("EXISTS { (u)-[:KNOWS]->(a) }"), centerQuery.cypher);
-  // ... and neighbours are never another user's node.
-  assert.ok(centerQuery.cypher.includes("(NOT (b:User) OR elementId(b) = elementId(u))"), centerQuery.cypher);
+  // The centre must be the user's own node or an entity they own ...
+  assert.ok(centerQuery.cypher.includes("(a:Entity AND a.owner = $user)"), centerQuery.cypher);
+  // ... and neighbours are the user's own entities or :User account markers
+  // (never another user's entity).
+  assert.ok(centerQuery.cypher.includes("(b:User OR (b:Entity AND b.owner = $user))"), centerQuery.cypher);
 });
 
 test("neo4j store: the user's own person is not MERGEd as an :Entity and user relations target the :User node", async () => {
@@ -434,8 +453,8 @@ test("neo4j store: the user's own person is not MERGEd as an :Entity and user re
   await store.upsertTurn({
     user: "Mila",
     entities: [
-      { name: "Mila", type: "person", common: false, props: {} },
-      { name: "Lego", type: "thing", common: true, props: {} },
+      { name: "Mila", type: "person", props: {} },
+      { name: "Lego", type: "thing", props: {} },
     ],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
@@ -444,11 +463,12 @@ test("neo4j store: the user's own person is not MERGEd as an :Entity and user re
   // The user's own person must not be part of the entity rows (that would
   // create the duplicate "Mila" node the panel used to show).
   assert.ok(!JSON.stringify(entityMerge.params.rows).includes("Mila"), JSON.stringify(entityMerge.params.rows));
-  // The LIKES relation named after the user must target their :User node.
+  // The LIKES relation named after the user must target their :User node, and
+  // the entity endpoint is owner-scoped to the turn user.
   const likes = calls.find((call) => call.cypher.includes("r:LIKES"));
   assert.ok(likes, "expected the LIKES MERGE");
   assert.ok(likes.cypher.includes("MATCH (a:User {name: row.from})"), likes.cypher);
-  assert.ok(likes.cypher.includes("MATCH (b:Entity {name: row.to})"), likes.cypher);
+  assert.ok(likes.cypher.includes("MATCH (b:Entity {name: row.to, owner: $user})"), likes.cypher);
 });
 
 // --- backend integration -------------------------------------------------------
@@ -461,7 +481,7 @@ let finalRequests = [];
 let receivedChat;
 const MOCK_MCP = fileURLToPath(new URL("./mock-graph-mcp.mjs", import.meta.url));
 const EXTRACT_JSON = JSON.stringify({
-  entities: [{ name: "Amelie", type: "person", common: false, props: {} }],
+  entities: [{ name: "Amelie", type: "person", props: {} }],
   relations: [{ from: "Amelie", to: "Mila", type: "FRIEND_OF" }],
 });
 
@@ -686,6 +706,7 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   const amelie = subgraph.nodes.find((node) => node.name === "Amelie");
   assert.ok(amelie, "the extracted entity should be in the graph");
   assert.equal(amelie.type, "person");
+  assert.equal(amelie.owner, "Mila", "entities are owner-keyed to the signed-in user");
   assert.ok(subgraph.edges.some((edge) => edge.type === "FRIEND_OF"));
 });
 

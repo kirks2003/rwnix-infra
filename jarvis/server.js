@@ -266,9 +266,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Per-user isolation: every graph endpoint is scoped to the signed-in
-    // user's visible world (their node, what they know, one entity-hop of
-    // world knowledge around it). The store builds the queries; a foreign
-    // `center` elementId simply comes back empty.
+    // user's world (their node, the entities they own, and the fact edges
+    // between them — ownership bounds the world, there is no shared tier).
+    // The store builds the queries; a foreign `center` elementId simply
+    // comes back empty.
     if (req.method === "GET" && pathname === "/api/graph/status") {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
       try {
@@ -810,8 +811,8 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
         const graphText = graphdb.formatGraphContext(context);
         if (graphText) graphMessage = { role: "system", content: graphText };
         mcpStates.push(graphText
-          ? "The knowledge graph (MCP graph server) is ON: what this user and the shared knowledge know is in a separate message, and you can call four read-only tools about the graph: get-schema (labels, relation types, property keys), get-entity(name) (one entity's data and its links to other entities), list-my-knowledge (the entities this user has told you about) and list-my-facts(about?, relation?) (the facts stored about this user — likes, ownership, family, home, work). If the user asks what you remember or know about them, answer from the graph context, these tools and the conversation history. Privacy: your view of the graph is this user's private view — you can only see data that belongs to the signed-in user plus shared/public knowledge, never another user's data. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess."
-          : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the shared graph with the get-schema, get-entity, list-my-knowledge and list-my-facts tools. New facts are stored automatically after every answer.");
+          ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call four read-only tools about the graph: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about) and list-my-facts(about?, relation?) (the facts stored about this user — likes, ownership, family, home, work). If the user asks what you remember or know about them, answer from the graph context, these tools and the conversation history. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess."
+          : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with the get-schema, get-entity, list-my-knowledge and list-my-facts tools. New facts are stored automatically after every answer.");
       } catch (error) {
         if (signal.aborted) throw error;
         console.log(JSON.stringify({ level: "warn", requestId, msg: "graph_context_failed", error: error.message }));
@@ -883,7 +884,7 @@ const graphTools = [
     type: "function",
     function: {
       name: "get-entity",
-      description: "Look up one entity (person, place, thing, ...) by name: its data and its links to other entities. Returns nothing if the entity is unknown.",
+      description: "Look up one of the signed-in user's own entities (person, place, thing, ...) by name: its data and its links. Returns nothing if the user has no such entity.",
       parameters: { type: "object", properties: { name: { type: "string", description: "The entity name, e.g. 'Berlin'." } }, required: ["name"] },
     },
   },
@@ -988,19 +989,19 @@ async function runBrain({ messages, user, useTools, requestId, signal, headers, 
 
 const EXTRACT_SYSTEM_PROMPT = `You extract knowledge-graph entities from a voice-assistant conversation turn.
 Return ONLY a JSON object, no prose, with this exact shape:
-{"entities":[{"name":"...","type":"person|place|organization|event|topic|thing","common":true,"props":{"key":"value"}}],"relations":[{"from":"EntityName","to":"EntityName","type":"RELATION_TYPE","negative":false}]}
+{"entities":[{"name":"...","type":"person|place|organization|event|topic|thing","props":{"key":"value"}}],"relations":[{"from":"EntityName","to":"EntityName","type":"RELATION_TYPE","negative":false}]}
 Rules:
 - Extract from the prompt, the web search results and the answer together.
 - "name" is a short canonical name (e.g. "Mila", "Berlin", "Kokoro-82M"), at most a few words.
 - type must be exactly one of: person, place, organization, event, topic, thing.
-- "common" is true only for general knowledge shared by everyone (public people, cities, products, concepts); false for personal data (family, friends, routines, preferences, private plans).
-- Always include the signed-in user (the name on the "user:" line) as a person entity with common false and their exact name.
+- The graph is the signed-in user's private world: every extracted entity is stored under their name, so no shared/public flag exists and nothing you extract is visible to any other user.
+- Always include the signed-in user (the name on the "user:" line) as a person entity with their exact name.
 - First-person statements in the prompt are facts to store, never skip them: "I like X" -> LIKES, "I own X" or "I have X" -> OWNS, "I live in X" -> LIVES_IN, "I work at X" -> WORKS_AT, "my friend/mother/family is Y" -> FRIEND_OF/FAMILY_OF, always with "from" set to the user's entity name.
 - Negation is the "negative" flag, never a new relation type: "I don't like X" / "I no longer own X" -> the same type with "negative": true (e.g. LIKES + negative). A negative statement overwrites an earlier positive one about the same pair; do not emit both.
 - Example: user "Mila", prompt "I like Lego." ->
-  {"entities":[{"name":"Mila","type":"person","common":false},{"name":"Lego","type":"thing","common":true}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":false}]}
+  {"entities":[{"name":"Mila","type":"person"},{"name":"Lego","type":"thing"}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":false}]}
 - Example: user "Mila", prompt "I don't like Lego anymore." ->
-  {"entities":[{"name":"Mila","type":"person","common":false},{"name":"Lego","type":"thing","common":true}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":true}]}
+  {"entities":[{"name":"Mila","type":"person"},{"name":"Lego","type":"thing"}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":true}]}
 - relations use UPPERCASE_SNAKE types, one of: WORKS_AT, LIVES_IN, STUDIES_AT, BORN_IN, FRIEND_OF, FAMILY_OF, PART_OF, LOCATED_IN, RELATED_TO, MENTIONED_IN, LIKES, WENT_TO, OWNS, USES. "from" and "to" must be entity names from your entities list.
 - At most 12 entities and 15 relations. Prefer a few high-confidence facts over many guesses; return {"entities":[],"relations":[]} only for turns that carry no facts at all (e.g. "thanks").`;
 

@@ -49,7 +49,7 @@ async function handleMessage(message) {
       process.stderr.write(`MOCK_GRAPH_CALL ${name} ${JSON.stringify(args)}\n`);
       const user = String(args.user || "?");
       if (name === "get-schema") {
-        return respond(id, { content: [{ type: "text", text: "Labels: User, Entity. Relationship types: LIKES, USES. Property keys: name, type, common." }] });
+        return respond(id, { content: [{ type: "text", text: "Labels: User, Entity. Relationship types: LIKES, USES. Property keys: name, type, owner." }] });
       }
       if (name === "get-entity") {
         const entityName = String(args.name || "unknown");

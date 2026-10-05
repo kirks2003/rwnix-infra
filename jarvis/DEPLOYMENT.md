@@ -1505,3 +1505,91 @@ you … I can only see data belonging to you (Roman) plus shared/public
 knowledge. I have no access to other users' preferences or facts, so I can't
 say whether any other user likes Lego." — scoped, honest, no global claim, no
 leak.
+
+## Ownership model: every entity is private to its owner (2026-10-05, PR #36)
+
+User question: the MCP `get-entity` tool reported the `Lego` entity as
+*public* ("Lego (thing), public knowledge") even though it was only ever
+"liked" by Mila. Follow-up security question: if Mila mentioned a credit card
+number, could Roman's brain or panel see it?
+
+Audit of every read path found **three leak paths**, all rooted in the same
+design: entities were global nodes with a `common` flag, and the flag was set
+by the LLM extractor (it flagged `Lego` as general knowledge — the same model
+would flag a credit card number as a "thing"):
+
+1. **`get-entity(name)` was not owner-scoped** (`mcp/graph.mjs`):
+   `MATCH (e:Entity {name: $name})` returned the full `properties(e)` of any
+   entity regardless of the requesting user; the injected `user` only computed
+   a `known` flag. Any entity the extractor marked `common: true` was readable
+   by every user's brain — names *and* properties.
+2. **The brain context injected shared knowledge into every user**:
+   `readContext` put every `common: true` entity name into *every* user's
+   context block ("Shared knowledge: …"), so a sensitive entity wrongly
+   flagged public leaked its name to all brains.
+3. **The panel's one-entity-hop expansion** could pull another user's private
+   entity into a panel: a shared entity connected to a private one made the
+   private one appear in the other user's world.
+
+Decision (user-confirmed): **everything private, owner-keyed entities.** No
+shared/public tier at all. Admins keep direct-DB visibility (`MATCH
+(e:Entity {name: "Lego"})` returns every owner's copy — the per-user guarantee
+is application-layer, as it always was; Community Edition has no RBAC).
+
+Model:
+- `:Entity` is keyed by `(name, type, owner)`; `owner` = the signed-in user of
+  the turn that mentioned it. "Lego" mentioned by Mila and by Roman is two
+  nodes. The `common` flag is gone (extractor prompt, store, panel API); the
+  `(:User)-[:KNOWS]->(:Entity)` bookkeeping edge is gone — ownership *is* the
+  provenance.
+- Read paths, all pinned to the session user: `get-entity` matches
+  `{name: $name, owner: $user}` (foreign = nonexistent — no enumeration);
+  `list-my-knowledge` matches `{owner: $user}`; `list-my-facts` is unchanged
+  (facts stored about the user, on their `:User` node); `readContext` returns
+  only the user's own entities (no shared line).
+- Panel `visibleWorld`: user node + owned entities + fact edges between them —
+  no neighbour expansion at all, so nothing can leak through it. A fact edge
+  is visible when every `:Entity` endpoint is the user's; `:User` endpoints
+  are account markers (name only) and may appear as edge endpoints; a pure
+  user-to-user edge is visible only to its two parties. Centre mode: the
+  centre must be the user's own node or an owned entity; neighbours are owned
+  entities and `:User` markers.
+- Ingestion: `MERGE (e:Entity {name, type, owner: $user})`; relation entity
+  endpoints match `{name, owner: $user}` (the turn user's own copies); no
+  `KNOWS` write, no `common` write.
+- `mcp/graph.mjs` restructured: the owner-scoped Cypher strings are exported
+  as `QUERIES` (pinned by `tests/mcp-graph.test.mjs`), the result formatting
+  is exported pure, and the stdio server only starts when run directly
+  (importing the module in tests opens no driver, reads no stdin).
+
+Live migration (one-time, after the new build was up so the old writer could
+no longer run): full JSON dump backup first, then ONE atomic transaction —
+create an owned copy of each ownerless entity for every user that `KNOWS` it
+or has a fact edge to it (props copied, no `common`), re-point every fact edge
+(user → ownerless entity) to the copy owned by that user, `DETACH DELETE` the
+ownerless originals, delete all `KNOWS` edges. State before: `Lego`
+(ownerless, `common: true`, 11 mentions), `KNOWS` from Mila and Roman,
+`Mila -[:LIKES]-> Lego`. State after: `Lego(owner: Mila)` + `Lego(owner:
+Roman)`, `Mila:User -[:LIKES]-> Lego(owner: Mila)` (props preserved), zero
+`KNOWS`, zero ownerless, zero `common`. (Migration note: the first run lost
+the re-pointed `LIKES` edge — the driver helper read only the first row of the
+`RETURN DISTINCT type(r)` result, so the per-type loop only saw `KNOWS` and
+the later `DETACH DELETE` dropped the still-attached `LIKES`; the backup dump
+made the restore a single statement. Helper fixed; the sequence itself is
+idempotent-safe because tx/commit is atomic.)
+
+Tests: unit 91/91 (memory store owner-keyed isolation incl. the account-marker
+case — a fact one user states about the other lands on the other's type-less
+`:User` marker and never leaks an entity; neo4j mock pins for the owner-keyed
+`MERGE`, owner-scoped relation endpoints, the owner-scoped subgraph/centre
+queries and the user-to-user edge clause; new `tests/mcp-graph.test.mjs`
+query pins + formatting; integration test asserts the ingested node's
+`owner`), browser 37 pass + 2 opt-in skips (fixture nodes now carry `owner`).
+
+Deployed (backup `jarvis-code.bak-20261005_170657.tgz`; `graphdb.js`,
+`server.js`, `mcp/graph.mjs` synced, md5-verified, image rebuilt, container
+healthy) and verified live: **Mila** sees `Mila(you)` + `Lego(owner: Mila)`
+with the `LIKES` edge and no foreign nodes; **Roman** sees only his own node
+(his isolated `Lego` copy is not drawn) with zero edges and no `Mila` node;
+admin `MATCH (e:Entity {name: "Lego"})` returns both owner copies — per-user
+privacy for users, full visibility for the admin.
