@@ -84,11 +84,13 @@ test("formatGraphContext renders user and shared lines, empty stays empty", () =
 
 test("memory store: status, context, upsert, per-user scope and neighbourhood", async () => {
   const store = graphdb.createMemoryStore();
-  // Mila's visible world: her node, what she knows (Rocky, Berlin) and one
-  // entity-hop around that (Kokoro, via Rocky -USES-> Kokoro). Roman's
-  // private data is not in the counts.
+  // Mila's drawn world: her node plus the entities a visible fact edge
+  // touches — Rocky and Kokoro, via Rocky -USES-> Kokoro. Berlin is known
+  // but an isolated mention (no fact edge touches it), so it is neither
+  // drawn nor counted; KNOWS keeps it in the brain context. Roman's private
+  // data is not in the counts.
   const status = await store.status({ user: "Mila" });
-  assert.equal(status.nodes, 4, JSON.stringify(status));
+  assert.equal(status.nodes, 3, JSON.stringify(status));
   assert.equal(status.edges, 1, JSON.stringify(status));
   const context = await store.readContext("Mila");
   assert.ok(context.userEntities.some((entity) => entity.name === "Rocky"));
@@ -211,8 +213,15 @@ test("memory store: per-user isolation — each user sees only their own world",
   const romanAfter = await store.subgraph({ user: "Roman" });
   assert.equal(romanAfter.edges.filter((edge) => edge.type === "LIKES").length, 1, "still only Roman's own fact edge");
   assert.ok(!romanAfter.nodes.some((node) => node.name === "Mila"), JSON.stringify(romanAfter.nodes.map((node) => node.name)));
-  // Status counts are scoped the same way: Mila knows one extra entity
-  // (Berlin, from the starter graph), so her node count is higher.
+  // Status counts are scoped the same way: Mila has one extra drawn fact
+  // (OWNS Car, stated by her), so her node count is higher. Note the known
+  // but unlinked "Berlin" (starter graph) counts for neither user — isolated
+  // mentions are not drawn.
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [{ name: "Car", type: "thing", common: false, props: {} }],
+    relations: [{ from: "Mila", to: "Car", type: "OWNS" }],
+  });
   const romanStatus = await store.status({ user: "Roman" });
   const milaStatus = await store.status({ user: "Mila" });
   assert.notEqual(romanStatus.nodes, milaStatus.nodes, `node counts differ per user: ${JSON.stringify({ romanStatus, milaStatus })}`);
@@ -611,11 +620,12 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   const backend = backends[1];
   const cookie = await login(origin);
 
-  // The status is scoped to the signed-in user's world: Mila's node, the
-  // entities she knows (Rocky, Berlin) and one entity-hop (Kokoro, via
-  // Rocky -USES->). Nothing of another user's counts in.
+  // The status is scoped to the signed-in user's drawn world: Mila's node
+  // plus the entities a visible fact edge touches (Rocky and Kokoro, via
+  // Rocky -USES->). The known but unlinked "Berlin" is an isolated mention
+  // and does not count. Nothing of another user's counts in.
   const status = await (await auth(origin, "/api/graph/status", cookie)).json();
-  assert.equal(status.nodes, 4, JSON.stringify(status));
+  assert.equal(status.nodes, 3, JSON.stringify(status));
   assert.equal(status.edges, 1, JSON.stringify(status));
   assert.ok(status.labels.includes("Entity"));
 

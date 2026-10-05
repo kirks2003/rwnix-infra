@@ -1416,3 +1416,50 @@ md5-verified, image rebuilt without the Python layer) and verified live:
 - Write path end-to-end: the live chat turns (real extractor + ingestion on
   the new code) re-created no user-named entity — the graph after the
   verification chats still holds exactly `Lego` as the only entity.
+
+## Hide isolated mentions in the panel (2026-10-05, PR #34)
+
+User question: "If there is no connection between user Roman and Lego, why do
+you show Lego in the 3D graph?" After #33 the panel drew every entity the
+user *knows* (`KNOWS`), even when no visible fact edge touched it — so Roman's
+panel showed a floating `Lego` node (he knows it, but the only fact edge is
+Mila's private `LIKES`). Chosen behaviour: an entity is drawn **only if at
+least one visible fact edge touches it** in the user's world. Isolated
+mentions stay in the database — `KNOWS` is intact, so the brain's context and
+`list-my-knowledge` still see them — but they are neither drawn nor counted.
+
+Changes (`graphdb.js`, both stores; no API shape change, no frontend change —
+the panel just draws whatever the subgraph returns):
+- **Neo4j store:** the newest-mode `subgraph` queries (user node, known
+  entities, one entity-hop neighbours, fact edges between them) now run in a
+  shared `visibleWorld(user, cap)` helper that also marks `drawn` on the user
+  node plus every entity a returned fact edge touches. `subgraph` returns
+  only the drawn nodes; `status({ user })` counts exactly the drawn nodes and
+  edges (same helper, cap 60 = the panel's default `?limit=60`), so the
+  node/link counter and the drawing can never disagree. The centred mode is
+  unchanged (an explicit click on a visible node still shows its
+  neighbourhood).
+- **Memory store:** the same `visibleWorld(user, cap)` helper (candidate
+  world = user + known + one entity-hop, drawn = user node + fact-edge
+  endpoints), used by both `status` and the newest-mode `subgraph`.
+- **Tests:** the starter-graph `Berlin` is now an isolated mention, so
+  `status`/subgraph expectations for the bare starter world changed from
+  4 nodes to 3 (Mila/Roman + Rocky + Kokoro via `Rocky -USES-> Kokoro`); the
+  per-user isolation test gains a drawn `Mila -OWNS-> Car` fact so the two
+  users' counts still differ (the old "Berlin makes Mila higher" reasoning no
+  longer holds); the Neo4j mock pins are unchanged (same query strings).
+- **Docs:** README isolation bullet + Panel paragraph describe the drawn
+  world and isolated mentions.
+
+Tests: unit 84/84, browser 37 pass + 2 opt-in skips.
+
+Deployed (backup `jarvis-code.bak-20261005_131654.tgz`; only `graphdb.js`
+synced, md5-verified, image rebuilt) and verified live:
+- As **Roman**: `/api/graph/status` → `1 node · 0 links`, subgraph returns
+  only `Roman (you)` — the isolated `Lego` mention no longer floats.
+- As **Mila**: `2 nodes · 1 link` — `Mila (you)` + `Lego:thing` with the
+  `LIKES` edge, her real fact intact.
+- DB check: `KNOWS` edges `Mila->Lego` and `Roman->Lego` untouched, so the
+  brain context and `list-my-knowledge` still see the mention.
+- Browsers need a hard refresh (Ctrl+Shift+R) to pick up the (unchanged)
+  static assets; the panel polls, so the new data shows without a refresh.
