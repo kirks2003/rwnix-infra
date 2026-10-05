@@ -631,6 +631,35 @@ progress {
   font-size: 0.85rem;
 }
 
+/* The entity/link-text size sliders: compact row under the panel head. The
+   scales land on CSS custom properties the 2D SVG and the 3D label layer
+   read (see the calc() rules below). */
+.graph-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 2px 12px 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.graph-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.graph-controls input[type="range"] {
+  width: 120px;
+}
+
+.graph-controls-help {
+  margin: 2px 12px 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 .graph-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
@@ -662,7 +691,8 @@ progress {
 /* Relation-type label on a 2D link; the dark outline keeps it readable
    where it crosses the lines. */
 .graph-canvas .edge-label {
-  font-size: 9px;
+  /* Scaled by the panel's "Link text" slider (--graph-text-scale). */
+  font-size: calc(9px * var(--graph-text-scale, 1));
   fill: var(--muted);
   text-anchor: middle;
   paint-order: stroke;
@@ -722,7 +752,8 @@ progress {
   position: absolute;
   left: 0;
   top: 0;
-  font-size: 10px;
+  /* Node names scale with the "Entities" slider (--graph-node-scale). */
+  font-size: calc(10px * var(--graph-node-scale, 1));
   color: var(--muted);
   white-space: nowrap;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
@@ -742,7 +773,8 @@ progress {
 
 /* Relation-type label floating at a 3D link's midpoint (non-interactive). */
 .graph-3d-labels span.edge {
-  font-size: 8px;
+  /* Scaled by the panel's "Link text" slider (--graph-text-scale). */
+  font-size: calc(8px * var(--graph-text-scale, 1));
   opacity: 0.6;
   pointer-events: none;
 }

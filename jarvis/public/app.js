@@ -16,8 +16,9 @@ const el = Object.fromEntries([
   "languageSwitch", "languageStatus",
   "mcpSwitches",
   "speakSwitch", "speakStatus",
-  "graphStatus", "graphRefreshButton", "graphRemoveButton", "graphCanvas", "graph3dStage",
+  "graphPanel", "graphStatus", "graphRefreshButton", "graphRemoveButton", "graphCanvas", "graph3dStage",
   "graphView2dButton", "graphView3dButton", "graphSchema", "graphActivity",
+  "graphNodeSize", "graphNodeSizeValue", "graphTextSize", "graphTextSizeValue",
   "panelsToggle", "panelsBelow",
   "loginPanel", "loginForm", "loginUsername", "loginPassword", "loginButton", "loginStatus",
   "userLine", "signOutButton",
@@ -30,6 +31,7 @@ const voiceSpeedStorageKey = "jarvis.voiceSpeed";
 const languageStorageKey = "jarvis.language";
 const speakEnabledStorageKey = "jarvis.speakEnabled";
 const panelsStorageKey = "jarvis.panelsVisible";
+const graphSizesStorageKey = "jarvis.graphSizes";
 const silenceStorageKey = "jarvis.silenceMs";
 let config;
 let authedUser = null;
@@ -308,6 +310,39 @@ let graph3d = null; // created lazily on first switch to the 3D view
 let graph3dFailed = false; // WebGL unavailable -> stick to 2D
 let lastSubgraph = null; // kept so the 3D scene can be (re)filled on view switch
 
+// Display scales for the graph views, from the two sliders (50–200%):
+// node size (entities + their names) and link-text size. Both views apply
+// them live; the values are persisted per browser. The 3D label layer and
+// the 2D edge labels read the scales as CSS custom properties; the 2D node
+// geometry (and the 3D spheres) is scaled in JS.
+const graphScales = { node: 1, text: 1 };
+
+function applyGraphScales() {
+  el.graphPanel.style.setProperty("--graph-node-scale", String(graphScales.node));
+  el.graphPanel.style.setProperty("--graph-text-scale", String(graphScales.text));
+  el.graphNodeSizeValue.textContent = `${Math.round(graphScales.node * 100)}%`;
+  el.graphTextSizeValue.textContent = `${Math.round(graphScales.text * 100)}%`;
+  if (graph3d) graph3d.setNodeScale(graphScales.node);
+  // The 2D view renders the node geometry from the scale at draw time:
+  // re-render the current world (deterministic layout -> no position jump).
+  if (lastSubgraph && !el.graphCanvas.hasAttribute("hidden")) renderGraph(lastSubgraph);
+}
+
+function onGraphScaleInput() {
+  graphScales.node = Number(el.graphNodeSize.value) / 100;
+  graphScales.text = Number(el.graphTextSize.value) / 100;
+  try {
+    localStorage.setItem(graphSizesStorageKey, JSON.stringify({ node: el.graphNodeSize.value, text: el.graphTextSize.value }));
+  } catch {
+    // Storage unavailable (private mode): the sliders still work for the
+    // session.
+  }
+  applyGraphScales();
+}
+
+el.graphNodeSize.addEventListener("input", onGraphScaleInput);
+el.graphTextSize.addEventListener("input", onGraphScaleInput);
+
 function setGraphView(view) {
   graphView = view;
   const use3d = view === "3d" && !graph3dFailed && Boolean(config?.graphConfigured);
@@ -322,6 +357,7 @@ function setGraphView(view) {
   if (use3d && !graph3d) {
     graph3d = createGraph3D(el.graph3dStage, {
       userName: config?.user || null,
+      nodeScale: graphScales.node,
       onNodeClick: (nodeId) => loadGraph(nodeId),
       onFallback: () => {
         // No WebGL in this browser: fall back to the static 2D view.
@@ -546,7 +582,8 @@ function renderGraph(subgraph) {
     const circle = document.createElementNS(NS, "circle");
     circle.setAttribute("cx", String(point.x));
     circle.setAttribute("cy", String(point.y));
-    circle.setAttribute("r", isUser ? "9" : "7");
+    // The "Entities" slider scales the node (the :User node stays larger).
+    circle.setAttribute("r", String(isUser ? 9 * graphScales.node : 7 * graphScales.node));
     circle.style.fill = isUser ? "var(--cyan)" : (colors[node.type] || "var(--muted)");
     // An isolated mention (owned, but no fact edge touches it) is drawn
     // dimmed — what the brain's list-my-knowledge reports is what the panel
@@ -556,9 +593,11 @@ function renderGraph(subgraph) {
     circle.addEventListener("click", () => loadGraph(node.id));
     const label = document.createElementNS(NS, "text");
     label.setAttribute("x", String(point.x));
-    label.setAttribute("y", String(point.y - 11));
+    // The node name follows the "Entities" slider (font and offset), so it
+    // tracks the scaled node.
+    label.setAttribute("y", String(point.y - 11 * graphScales.node));
     label.setAttribute("text-anchor", "middle");
-    label.setAttribute("font-size", "10");
+    label.setAttribute("font-size", String(10 * graphScales.node));
     label.style.fill = "var(--muted)";
     const suffix = isUser && config?.user === node.name ? " (you)" : "";
     // In the admin view every owner's copy of an entity is drawn; the owner
@@ -1500,6 +1539,23 @@ async function loadConfig(userFromLogin) {
       setMcpFlag(server.id, saved === "true", false);
       document.getElementById(`mcpSwitch-${server.id}`).disabled = false;
     }
+    // The graph size sliders: restore the persisted values (50–200) before
+    // the 3D view is created, so the first render already uses them.
+    let savedGraphSizes = null;
+    try {
+      savedGraphSizes = JSON.parse(localStorage.getItem(graphSizesStorageKey) || "null");
+    } catch (error) {
+      log("settings", "Could not load graph sizes setting");
+    }
+    if (savedGraphSizes) {
+      for (const [key, slider] of [["node", el.graphNodeSize], ["text", el.graphTextSize]]) {
+        const value = Number(savedGraphSizes[key]);
+        if (Number.isFinite(value) && value >= 50 && value <= 200) slider.value = String(value);
+      }
+    }
+    graphScales.node = Number(el.graphNodeSize.value) / 100;
+    graphScales.text = Number(el.graphTextSize.value) / 100;
+    applyGraphScales();
     el.graphRefreshButton.disabled = false;
     setGraphView("3d"); // the live 3D view is the default panel view
     loadGraph();
