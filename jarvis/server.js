@@ -265,10 +265,14 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // Per-user isolation: every graph endpoint is scoped to the signed-in
+    // user's visible world (their node, what they know, one entity-hop of
+    // world knowledge around it). The store builds the queries; a foreign
+    // `center` elementId simply comes back empty.
     if (req.method === "GET" && pathname === "/api/graph/status") {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
       try {
-        return json(res, 200, { requestId, ...(await graphStore.status()) });
+        return json(res, 200, { requestId, ...(await graphStore.status({ user: req.user })) });
       } catch (error) {
         return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
       }
@@ -278,7 +282,7 @@ const server = http.createServer(async (req, res) => {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
       const center = String(url.searchParams.get("center") || "").slice(0, 128) || null;
       try {
-        return json(res, 200, { requestId, ...(await graphStore.subgraph({ limit: Number(url.searchParams.get("limit")) || 60, center })) });
+        return json(res, 200, { requestId, ...(await graphStore.subgraph({ user: req.user, limit: Number(url.searchParams.get("limit")) || 60, center })) });
       } catch (error) {
         return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
       }
@@ -293,9 +297,11 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Only this user's own activity — another user's stored turns or brain
+    // queries are their personal data, not something to display here.
     if (req.method === "GET" && pathname === "/api/graph/activity") {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
-      return json(res, 200, { requestId, entries: graphActivity.slice(-30).reverse() });
+      return json(res, 200, { requestId, entries: graphActivity.filter((entry) => entry.user === req.user).slice(-30).reverse() });
     }
 
     if (req.method === "POST" && pathname === "/api/transcribe") {
@@ -388,7 +394,10 @@ function isGraphConfigured() {
 // Knowledge graph store (null when unconfigured). GRAPH_MEMORY=1 swaps in the
 // in-memory store with a small starter graph for tests and demos.
 const graphStore = (() => {
-  if (process.env.GRAPH_MEMORY === "1") return graphdb.createMemoryStore();
+  // The registered user list is part of the isolation rule: any entity or
+  // relation endpoint named after a user resolves to that user's :User node,
+  // never to an :Entity (see graphdb.upsertTurn).
+  if (process.env.GRAPH_MEMORY === "1") return graphdb.createMemoryStore(config.users);
   if (!isGraphConfigured()) return null;
   try {
     return graphdb.createGraphStore({
@@ -398,6 +407,7 @@ const graphStore = (() => {
       readPassword: config.graph.readPassword,
       writeUser: config.graph.writeUser,
       writePassword: config.graph.writePassword,
+      users: config.users,
     });
   } catch (error) {
     console.log(JSON.stringify({ level: "warn", msg: "graph_store_unavailable", error: error.message }));
@@ -708,19 +718,23 @@ class McpClient {
 // uses the real DuckDuckGo/Wikipedia search server.
 const mcpWebSearch = new McpClient(process.execPath, [process.env.MCP_SEARCH_SCRIPT || path.join(__dirname, "mcp", "websearch.mjs")]);
 
-// The official neo4j-mcp server (stdio) for the knowledge graph. Read-only is
-// FORCED here, not taken from the host environment: NEO4J_MCP_READ_ONLY removes
-// the write-cypher tool from the tool list, and read-cypher itself rejects
-// write Cypher via Neo4j's query classification, so no chat turn can write to
-// the graph via MCP. (Neo4j Community Edition has no RBAC, so there is no
-// DB-level read-only user — the guarantee is enforced by the MCP server, see
-// DEPLOYMENT.md, "Knowledge graph".)
-// MCP_GRAPH_COMMAND/MCP_GRAPH_ARGS let tests point the client at a mock
+// The knowledge-graph MCP server (our own, mcp/graph.mjs, stdio). It exposes
+// four parameterized read tools and NO free-form Cypher: Neo4j Community has
+// no RBAC, so a raw read tool would let the brain (or a prompt injection)
+// reach every node — including other users' personal data. Instead each
+// query is built inside the server, pinned to the signed-in user that this
+// backend injects into the arguments of every call, over the read-only
+// database user. MCP_GRAPH_SCRIPT lets tests point the client at a mock
 // server, same pattern as MCP_SEARCH_SCRIPT.
 const mcpGraph = new McpClient(
-  process.env.MCP_GRAPH_COMMAND || "python3",
-  process.env.MCP_GRAPH_ARGS ? JSON.parse(process.env.MCP_GRAPH_ARGS) : ["-m", "neo4j_mcp_server"],
-  { NEO4J_MCP_READ_ONLY: "true", NEO4J_MCP_TELEMETRY: "false" },
+  process.execPath,
+  [process.env.MCP_GRAPH_SCRIPT || path.join(__dirname, "mcp", "graph.mjs")],
+  {
+    NEO4J_URI: process.env.NEO4J_URI || "",
+    NEO4J_DATABASE: process.env.NEO4J_DATABASE || "neo4j",
+    NEO4J_READ_USER: process.env.NEO4J_READ_USER || "",
+    NEO4J_READ_PASSWORD: process.env.NEO4J_READ_PASSWORD || "",
+  },
 );
 
 // Runs the web_search tool of the MCP server and resolves with the result
@@ -796,8 +810,8 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
         const graphText = graphdb.formatGraphContext(context);
         if (graphText) graphMessage = { role: "system", content: graphText };
         mcpStates.push(graphText
-          ? "The knowledge graph (MCP graph server) is ON: what this user and the shared knowledge know is in a separate message, and you can call the get-schema and read-cypher tools to inspect or query the graph read-only for anything deeper. If the user asks what you remember or know about them, answer from the graph context and the conversation history. Graph model: :User nodes are the signed-in accounts (one per user, e.g. Mila, Roman) and :Entity nodes are everything else (people, places, things). A user's stored facts are the outgoing relations of their :User node — LIKES, OWNS, LIVES_IN, WORKS_AT, FRIEND_OF, FAMILY_OF and friends (the full list is in get-schema) — so to answer \"what does X like?\" or \"what do you know about X?\", query those relations, e.g. MATCH (u:User {name: 'X'})-[r]->(t) RETURN type(r), t.name, instead of just RETURNing the node."
-          : "The knowledge graph (MCP graph server) is ON but holds nothing relevant yet; you can still inspect it with the get-schema and read-cypher tools. New facts are stored automatically after every answer.");
+          ? "The knowledge graph (MCP graph server) is ON: what this user and the shared knowledge know is in a separate message, and you can call four read-only tools about the graph: get-schema (labels, relation types, property keys), get-entity(name) (one entity's data and its links to other entities), list-my-knowledge (the entities this user has told you about) and list-my-facts(about?, relation?) (the facts stored about this user — likes, ownership, family, home, work). If the user asks what you remember or know about them, answer from the graph context, these tools and the conversation history. Privacy: you can only see data that belongs to the signed-in user plus public knowledge; other users' personal data is not accessible to you — if asked about another user's preferences, habits or facts, say you have no stored information about them. Do not guess."
+          : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the shared graph with the get-schema, get-entity, list-my-knowledge and list-my-facts tools. New facts are stored automatically after every answer.");
       } catch (error) {
         if (signal.aborted) throw error;
         console.log(JSON.stringify({ level: "warn", requestId, msg: "graph_context_failed", error: error.message }));
@@ -848,39 +862,58 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
 }
 
 // The graph tools offered to the brain when the knowledge graph toggle is on.
-// Names match the neo4j-mcp server's tools 1:1; the server runs read-only
-// (NEO4J_MCP_READ_ONLY forced in mcpGraph) and read-cypher enforces read-only
-// via Neo4j's query classification.
-// Five rounds: a schema call plus a few follow-up queries is the common
-// pattern (live case: "what does Mila like?" needed schema + user lookup +
-// relation query, and three rounds left no room for the last one).
+// Parameterized reads only — there is no Cypher on the surface: mcp/graph.mjs
+// builds every query itself, pinned to the signed-in user (injected by this
+// backend per call), so a chat turn can neither write to the graph nor reach
+// another user's data.
+// Five rounds: a schema call plus a few follow-ups is the common pattern.
 const GRAPH_TOOL_ROUNDS = 5;
 const GRAPH_TOOL_TIMEOUT_MS = 15000;
+const GRAPH_TOOL_NAMES = new Set(["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"]);
 const graphTools = [
   {
     type: "function",
     function: {
       name: "get-schema",
-      description: "Inspect the knowledge graph schema: node labels, relationship types and property keys. Call this before writing Cypher so the query uses the real labels.",
+      description: "Inspect the knowledge graph schema: node labels, relationship types and property keys.",
       parameters: { type: "object", properties: {} },
     },
   },
   {
     type: "function",
     function: {
-      name: "read-cypher",
-      description: "Run a read-only Cypher query (MATCH/RETURN) against the knowledge graph and get the rows back. Write queries are rejected.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "The read-only Cypher query to run." },
-          params: { type: "object", description: "Optional query parameters, e.g. { \"name\": \"Mila\" }." },
-        },
-        required: ["query"],
-      },
+      name: "get-entity",
+      description: "Look up one entity (person, place, thing, ...) by name: its data and its links to other entities. Returns nothing if the entity is unknown.",
+      parameters: { type: "object", properties: { name: { type: "string", description: "The entity name, e.g. 'Berlin'." } }, required: ["name"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list-my-knowledge",
+      description: "List the entities the signed-in user has told you about (their stored knowledge).",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list-my-facts",
+      description: "List the facts stored about the signed-in user (likes, ownership, family, home, work, ...), optionally filtered to one entity (about) or one relation type (relation, e.g. LIKES).",
+      parameters: { type: "object", properties: { about: { type: "string", description: "Optional: only facts about this entity name." }, relation: { type: "string", description: "Optional: only this relation type, e.g. LIKES." } } },
     },
   },
 ];
+
+// One short, loggable description of a tool call for the activity feed —
+// never raw Cypher (there is none on the surface anymore).
+function graphToolDetail(name, args) {
+  const parts = [];
+  if (args.name) parts.push(`name=${args.name}`);
+  if (args.about) parts.push(`about=${args.about}`);
+  if (args.relation) parts.push(`relation=${String(args.relation).toUpperCase()}`);
+  return parts.length ? `${name}: ${parts.join(", ")}` : name;
+}
 
 async function runBrain({ messages, user, useTools, requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
@@ -929,20 +962,23 @@ async function runBrain({ messages, user, useTools, requestId, signal, headers, 
       let args = {};
       try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* malformed args -> error result below */ }
       const started = Date.now();
-      if (name !== "get-schema" && name !== "read-cypher") {
+      if (!GRAPH_TOOL_NAMES.has(name)) {
         recordGraphActivity({ kind: "brain_query", user, tool: name, ok: false, error: "unknown tool", ms: 0 });
-        local.push({ role: "tool", tool_call_id: call.id, content: "Unknown tool. Use get-schema or read-cypher." });
+        local.push({ role: "tool", tool_call_id: call.id, content: "Unknown tool. Use get-schema, get-entity, list-my-knowledge or list-my-facts." });
         continue;
       }
       try {
-        const result = await withAbort(mcpGraph.call(name, args, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
+        // The session user is injected HERE, not in the brain's tool schema:
+        // the brain (or a prompt injection riding on it) can only ever target
+        // the signed-in user's own data.
+        const result = await withAbort(mcpGraph.call(name, { ...args, user }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
         const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
-        recordGraphActivity({ kind: "brain_query", user, tool: name, cypher: String(args.query || "").slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
+        recordGraphActivity({ kind: "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
         local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
       } catch (error) {
         if (totalSignal.aborted) throw error;
-        recordGraphActivity({ kind: "brain_query", user, tool: name, cypher: String(args.query || "").slice(0, 200), ok: false, error: error.message.slice(0, 200), ms: Date.now() - started });
-        local.push({ role: "tool", tool_call_id: call.id, content: `Graph query failed: ${error.message}. Answer from what you know.` });
+        recordGraphActivity({ kind: "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: false, error: error.message.slice(0, 200), ms: Date.now() - started });
+        local.push({ role: "tool", tool_call_id: call.id, content: `Graph lookup failed: ${error.message}. Answer from what you know.` });
       }
     }
   }

@@ -82,11 +82,14 @@ test("formatGraphContext renders user and shared lines, empty stays empty", () =
 
 // --- memory store -------------------------------------------------------------
 
-test("memory store: status, context, upsert, shared flag and neighbourhood", async () => {
+test("memory store: status, context, upsert, per-user scope and neighbourhood", async () => {
   const store = graphdb.createMemoryStore();
-  const status = await store.status();
-  assert.ok(status.nodes >= 5);
-  assert.ok(status.edges >= 4);
+  // Mila's visible world: her node, what she knows (Rocky, Berlin) and one
+  // entity-hop around that (Kokoro, via Rocky -USES-> Kokoro). Roman's
+  // private data is not in the counts.
+  const status = await store.status({ user: "Mila" });
+  assert.equal(status.nodes, 4, JSON.stringify(status));
+  assert.equal(status.edges, 1, JSON.stringify(status));
   const context = await store.readContext("Mila");
   assert.ok(context.userEntities.some((entity) => entity.name === "Rocky"));
   assert.ok(context.commonEntities.some((entity) => entity.name === "Berlin"));
@@ -95,20 +98,25 @@ test("memory store: status, context, upsert, shared flag and neighbourhood", asy
     entities: [{ name: "Amelie", type: "person", common: false, props: { city: "Leipzig" } }],
     relations: [{ from: "Amelie", to: "Mila", type: "FRIEND_OF" }],
   });
-  let sub = await store.subgraph({ limit: 60 });
+  let sub = await store.subgraph({ user: "Mila" });
   assert.ok(sub.nodes.some((node) => node.name === "Amelie"));
   assert.ok(sub.edges.some((edge) => edge.type === "FRIEND_OF"));
   const amelieId = sub.nodes.find((node) => node.name === "Amelie").id;
-  const centered = await store.subgraph({ center: amelieId });
+  const centered = await store.subgraph({ user: "Mila", center: amelieId });
   assert.ok(centered.nodes.some((node) => node.name === "Mila"));
   // Only the real fact (Amelie->Mila FRIEND_OF) is drawn; the bookkeeping
   // Mila->Amelie KNOWS edge from the upsert stays out of the panel data.
   assert.equal(centered.edges.length, 1);
   assert.equal(centered.edges[0].type, "FRIEND_OF");
-  // Roman learns about Amelie too -> the entity becomes shared knowledge.
+  // Roman learns about Amelie too: no "shared" flag is derived from that —
+  // it would leak that another user mentioned her (per-user isolation).
   await store.upsertTurn({ user: "Roman", entities: [{ name: "Amelie", type: "person", common: false, props: {} }], relations: [] });
-  sub = await store.subgraph({ limit: 60 });
-  assert.equal(sub.nodes.find((node) => node.name === "Amelie").common, true);
+  sub = await store.subgraph({ user: "Mila" });
+  assert.equal(sub.nodes.find((node) => node.name === "Amelie").common, false);
+  // And Roman's view does not contain Mila's fact edge at all.
+  const romanSub = await store.subgraph({ user: "Roman" });
+  assert.ok(!romanSub.edges.some((edge) => edge.type === "FRIEND_OF"));
+  assert.ok(!romanSub.nodes.some((node) => node.name === "Mila"), "no other user node");
 });
 
 test("memory store: the signed-in user is one node (no duplicate person, no self-KNOWS)", async () => {
@@ -122,7 +130,7 @@ test("memory store: the signed-in user is one node (no duplicate person, no self
     ],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
-  const sub = await store.subgraph({ limit: 60 });
+  const sub = await store.subgraph({ user: "Mila" });
   assert.equal(sub.nodes.filter((node) => node.name === "Mila").length, 1, "exactly one Mila node");
   assert.ok(sub.nodes.some((node) => node.name === "Lego" && node.type === "thing"));
   const milaId = sub.nodes.find((node) => node.name === "Mila").id;
@@ -145,7 +153,7 @@ test("memory store: negation is a flag on the same edge and flips on re-statemen
     entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
-  let sub = await store.subgraph({ limit: 60 });
+  let sub = await store.subgraph({ user: "Mila" });
   assert.equal(sub.edges.filter((edge) => edge.type === "LIKES")[0].negative, false);
   // "I don't like Lego anymore": the same edge flips, no second edge appears.
   await store.upsertTurn({
@@ -153,7 +161,7 @@ test("memory store: negation is a flag on the same edge and flips on re-statemen
     entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES", negative: true }],
   });
-  sub = await store.subgraph({ limit: 60 });
+  sub = await store.subgraph({ user: "Mila" });
   const likes = sub.edges.filter((edge) => edge.type === "LIKES");
   assert.equal(likes.length, 1, "one LIKES edge, not a new one");
   assert.equal(likes[0].negative, true, "the flag flipped to negative");
@@ -163,8 +171,62 @@ test("memory store: negation is a flag on the same edge and flips on re-statemen
     entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
-  sub = await store.subgraph({ limit: 60 });
+  sub = await store.subgraph({ user: "Mila" });
   assert.equal(sub.edges.filter((edge) => edge.type === "LIKES")[0].negative, false);
+});
+
+test("memory store: per-user isolation — each user sees only their own world", async () => {
+  // The registered user list is what makes "Mila" a user, not an entity.
+  const store = graphdb.createMemoryStore(["Mila", "Roman"]);
+  // Each user keeps a private fact; both share the starter world (Rocky, ...).
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+  });
+  await store.upsertTurn({
+    user: "Roman",
+    entities: [{ name: "Pizza", type: "thing", common: false, props: {} }],
+    relations: [{ from: "Roman", to: "Pizza", type: "LIKES" }],
+  });
+  const roman = await store.subgraph({ user: "Roman" });
+  const romanNames = roman.nodes.map((node) => node.name);
+  assert.ok(romanNames.includes("Roman") && romanNames.includes("Pizza"));
+  assert.ok(!romanNames.includes("Mila"), `no other user node: ${JSON.stringify(romanNames)}`);
+  assert.ok(!romanNames.includes("Lego"), `no other user's entity: ${JSON.stringify(romanNames)}`);
+  assert.ok(roman.edges.some((edge) => edge.type === "LIKES"), "Roman's own fact is visible");
+  // Mila's world is symmetric: her fact and entity, nothing of Roman's.
+  const mila = await store.subgraph({ user: "Mila" });
+  assert.ok(mila.nodes.some((node) => node.name === "Lego"));
+  assert.ok(!mila.nodes.some((node) => node.name === "Pizza"));
+  assert.ok(!mila.nodes.some((node) => node.name === "Roman"));
+  // A fact Roman states ABOUT Mila lands on her user node: her data, not his.
+  // No "Mila" person entity is created (that would be a proxy for her
+  // personal data and would appear in Roman's panel).
+  await store.upsertTurn({
+    user: "Roman",
+    entities: [{ name: "Mila", type: "person", common: false, props: {} }],
+    relations: [{ from: "Mila", to: "Pizza", type: "LIKES" }],
+  });
+  const romanAfter = await store.subgraph({ user: "Roman" });
+  assert.equal(romanAfter.edges.filter((edge) => edge.type === "LIKES").length, 1, "still only Roman's own fact edge");
+  assert.ok(!romanAfter.nodes.some((node) => node.name === "Mila"), JSON.stringify(romanAfter.nodes.map((node) => node.name)));
+  // Status counts are scoped the same way: Mila knows one extra entity
+  // (Berlin, from the starter graph), so her node count is higher.
+  const romanStatus = await store.status({ user: "Roman" });
+  const milaStatus = await store.status({ user: "Mila" });
+  assert.notEqual(romanStatus.nodes, milaStatus.nodes, `node counts differ per user: ${JSON.stringify({ romanStatus, milaStatus })}`);
+  // A centre the user cannot see (another user's node) comes back empty.
+  const milaNodeId = mila.nodes.find((node) => node.name === "Mila").id;
+  const foreign = await store.subgraph({ user: "Roman", center: milaNodeId });
+  assert.equal(foreign.nodes.length, 0, "foreign centre must not be drawable");
+  // But the user can centre on their own node and on known entities.
+  const romanNodeId = roman.nodes.find((node) => node.name === "Roman").id;
+  const own = await store.subgraph({ user: "Roman", center: romanNodeId });
+  assert.ok(own.nodes.some((node) => node.name === "Pizza"));
+  const pizzaId = roman.nodes.find((node) => node.name === "Pizza").id;
+  const centeredPizza = await store.subgraph({ user: "Roman", center: pizzaId });
+  assert.equal(centeredPizza.nodes.length, 2, "Pizza plus Roman's node via the fact edge");
 });
 
 // --- neo4j store (mock driver) --------------------------------------------------
@@ -178,7 +240,12 @@ test("neo4j store: subgraph LIMIT is an integer parameter (the JS driver sends p
       return {
         async run(cypher, params) {
           calls.push({ cypher, params });
-          return { records: [] };
+          // The scoped subgraph starts from the user's :User node; without a
+          // row it would stop before the LIMIT query.
+          const records = cypher.includes("MATCH (u:User {name: $user}) RETURN elementId(u)")
+            ? [{ toObject: () => ({ id: "u1", name: "Mila" }) }]
+            : [];
+          return { records };
         },
         async close() {},
       };
@@ -193,7 +260,7 @@ test("neo4j store: subgraph LIMIT is an integer parameter (the JS driver sends p
     writePassword: "w",
     driverFactory: fakeFactory,
   });
-  await store.subgraph({ limit: 20 });
+  await store.subgraph({ user: "Mila", limit: 20 });
   const limitCall = calls.find((call) => call.cypher.includes("LIMIT $limit"));
   assert.ok(limitCall, "expected the LIMIT $limit query");
   assert.equal(limitCall.params.limit.toNumber(), 20);
@@ -222,33 +289,84 @@ test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", asy
     writeUser: "w",
     writePassword: "w",
     driverFactory: fakeFactory,
+    users: ["Mila", "Roman"],
   });
   await store.upsertTurn({
     user: "Mila",
     entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
-  assert.ok(calls.length >= 3, "entity MERGE, shared-knowledge and relation MERGE must all run");
+  assert.ok(calls.length >= 3, "user MERGE, entity MERGE and relation MERGE must all run");
   assert.ok(calls.every((cypher) => !/-\[:[A-Z_]+<-\]/.test(cypher)), JSON.stringify(calls));
-  assert.ok(calls.some((cypher) => cypher.includes("(:User)-[:KNOWS]->(e:Entity)")), JSON.stringify(calls));
+  assert.ok(calls.some((cypher) => cypher.includes("MERGE (u)-[:KNOWS]->(e)")), JSON.stringify(calls));
   // The relation MERGE stores the negation flag; SET (not ON CREATE) is what
   // lets a later "I don't like X" flip an existing edge.
   const relationMerge = calls.find((cypher) => cypher.includes("r:LIKES"));
   assert.ok(relationMerge, "expected the LIKES MERGE");
   assert.ok(relationMerge.includes("SET r.last_seen = row.now, r.negative = row.negative"), relationMerge);
+  // The old "known by two or more users" shared-flag step is gone: it derived
+  // common-ness from other users' mentions (a privacy leak under isolation).
+  assert.ok(!calls.some((cypher) => cypher.includes("count(*) AS knownBy")), JSON.stringify(calls));
 });
 
-test("neo4j store: the panel subgraph hides KNOWS and returns the negation flag", async () => {
+test("neo4j store: endpoints named after other users target their :User node, never an :Entity", async () => {
   const calls = [];
   const fakeFactory = () => ({
     session() {
       return {
-        // One node so the default path also runs its edge query.
+        async run(cypher, params) { calls.push({ cypher, params }); return { records: [] }; },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+    users: ["Mila", "Roman"],
+  });
+  // Roman reports what Mila likes: "Mila" must stay a :User, never an :Entity
+  // (a person entity with a user's name is a proxy for that user's personal
+  // data and would show up in the other users' panels).
+  await store.upsertTurn({
+    user: "Roman",
+    entities: [
+      { name: "Mila", type: "person", common: false, props: {} },
+      { name: "Lego", type: "thing", common: true, props: {} },
+    ],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+  });
+  // The person entity "Mila" is user Mila: it must not be created as an :Entity.
+  const entityMerge = calls.find((call) => call.cypher.includes("MERGE (e:Entity"));
+  assert.ok(entityMerge, "the non-user entities still get merged");
+  assert.ok(!entityMerge.params.rows.some((row) => row.name === "Mila"), JSON.stringify(entityMerge.params.rows));
+  assert.ok(entityMerge.params.rows.some((row) => row.name === "Lego"));
+  // The referenced user's :User node is ensured to exist ...
+  const userMerge = calls.find((call) => call.cypher.includes("MERGE (u:User {name: name})"));
+  assert.ok(userMerge, "referenced users' :User nodes must be merged");
+  assert.ok(userMerge.params.names.includes("Mila") && userMerge.params.names.includes("Roman"));
+  // ... and the fact edge targets that :User node, not an :Entity.
+  const relationMerge = calls.find((call) => call.cypher.includes("r:LIKES"));
+  assert.ok(relationMerge.cypher.includes("MATCH (a:User {name: row.from})"), relationMerge.cypher);
+  assert.ok(relationMerge.cypher.includes("MATCH (b:Entity {name: row.to})"), relationMerge.cypher);
+});
+
+test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and returns the negation flag", async () => {
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
         async run(cypher, params) {
           calls.push({ cypher, params });
-          const records = cypher.includes("elementId(n)")
-            ? [{ toObject: () => ({ id: "n1", name: "Mila", type: "person", common: false, lastSeen: "now" }) }]
-            : [];
+          const records = cypher.includes("MATCH (u:User {name: $user}) RETURN elementId(u)")
+            ? [{ toObject: () => ({ id: "u1", name: "Mila" }) }]
+            : cypher.includes("MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity)")
+              ? [{ toObject: () => ({ id: "n1", name: "Lego", type: "thing", common: true, lastSeen: "now" }) }]
+              : [];
           return { records };
         },
         async close() {},
@@ -264,14 +382,24 @@ test("neo4j store: the panel subgraph hides KNOWS and returns the negation flag"
     writePassword: "w",
     driverFactory: fakeFactory,
   });
-  await store.subgraph({ limit: 20 });
-  await store.subgraph({ center: "someId" });
-  const subgraphCalls = calls.filter((call) => call.cypher.includes("elementId(a)"));
-  assert.equal(subgraphCalls.length, 2, "default and centred subgraph queries");
-  for (const call of subgraphCalls) {
-    assert.ok(call.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered in: ${call.cypher}`);
-    assert.ok(call.cypher.includes("coalesce(r.negative, false)"), `negation must be returned: ${call.cypher}`);
-  }
+  await store.subgraph({ user: "Mila", limit: 20 });
+  await store.subgraph({ user: "Mila", center: "someId" });
+  // Every query that takes the user is pinned to the session user (the edge
+  // query is scoped through the $ids it was given instead).
+  assert.ok(calls.every((call) => !("user" in call.params) || call.params.user === "Mila"), JSON.stringify(calls.map((call) => call.params)));
+  assert.ok(calls.filter((call) => "user" in call.params).length >= 2, "user-scoped queries must run");
+  const edgeQuery = calls.find((call) => call.cypher.includes("elementId(a) IN $ids"));
+  assert.ok(edgeQuery, "expected the newest-mode edge query");
+  assert.ok(edgeQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${edgeQuery.cypher}`);
+  assert.ok(edgeQuery.cypher.includes("coalesce(r.negative, false)"), `negation must be returned: ${edgeQuery.cypher}`);
+  const centerQuery = calls.find((call) => call.cypher.includes("elementId(a) = $center"));
+  assert.ok(centerQuery, "expected the centred subgraph query");
+  assert.ok(centerQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${centerQuery.cypher}`);
+  // The centre must be a node visible to the user (own node, known entity,
+  // or one entity-hop around a known one) ...
+  assert.ok(centerQuery.cypher.includes("EXISTS { (u)-[:KNOWS]->(a) }"), centerQuery.cypher);
+  // ... and neighbours are never another user's node.
+  assert.ok(centerQuery.cypher.includes("(NOT (b:User) OR elementId(b) = elementId(u))"), centerQuery.cypher);
 });
 
 test("neo4j store: the user's own person is not MERGEd as an :Entity and user relations target the :User node", async () => {
@@ -292,6 +420,7 @@ test("neo4j store: the user's own person is not MERGEd as an :Entity and user re
     writeUser: "w",
     writePassword: "w",
     driverFactory: fakeFactory,
+    users: ["Mila", "Roman"],
   });
   await store.upsertTurn({
     user: "Mila",
@@ -309,7 +438,7 @@ test("neo4j store: the user's own person is not MERGEd as an :Entity and user re
   // The LIKES relation named after the user must target their :User node.
   const likes = calls.find((call) => call.cypher.includes("r:LIKES"));
   assert.ok(likes, "expected the LIKES MERGE");
-  assert.ok(likes.cypher.includes("MATCH (a:User {name: $user})"), likes.cypher);
+  assert.ok(likes.cypher.includes("MATCH (a:User {name: row.from})"), likes.cypher);
   assert.ok(likes.cypher.includes("MATCH (b:Entity {name: row.to})"), likes.cypher);
 });
 
@@ -345,16 +474,23 @@ before(async () => {
     // the server-side round budget is exercised; like a real brain, it stops
     // looping once told the budget is reached.
     const loopTools = String(lastUser?.content || "").includes("Loop the tools") && !systemText.includes("Tool budget reached");
-    const cypher = wantsDelete ? "MATCH (e:Entity) DETACH DELETE e" : "MATCH (e:Entity) RETURN e.name AS name LIMIT 5";
     const hasToolResult = (body.messages || []).some((message) => message.role === "tool");
     if (body.tools && (!hasToolResult || loopTools)) {
       toolRequests.push(body);
+      // The "Delete everything" turn tries the OLD raw-Cypher tool, which is
+      // no longer on the surface: the server must reject it as unknown and
+      // never forward it to the MCP server.
+      const tool = wantsDelete
+        ? { name: "read-cypher", arguments: JSON.stringify({ query: "MATCH (e:Entity) DETACH DELETE e" }) }
+        : loopTools
+          ? { name: "list-my-knowledge", arguments: "{}" }
+          : { name: "list-my-facts", arguments: "{}" };
       return res.end(JSON.stringify({
         choices: [{
           message: {
             role: "assistant",
             content: null,
-            tool_calls: [{ id: "call_1", type: "function", function: { name: "read-cypher", arguments: JSON.stringify({ query: cypher }) } }],
+            tool_calls: [{ id: "call_1", type: "function", function: tool }],
           },
         }],
       }));
@@ -378,8 +514,7 @@ before(async () => {
     NEO4J_WRITE_USER: "jarvis_write",
     NEO4J_WRITE_PASSWORD: "write-secret",
     GRAPH_MEMORY: "1",
-    MCP_GRAPH_COMMAND: process.execPath,
-    MCP_GRAPH_ARGS: JSON.stringify([MOCK_MCP]),
+    MCP_GRAPH_SCRIPT: MOCK_MCP,
   });
   backends.push(configured);
   origins.push(configured.origin);
@@ -476,9 +611,12 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   const backend = backends[1];
   const cookie = await login(origin);
 
+  // The status is scoped to the signed-in user's world: Mila's node, the
+  // entities she knows (Rocky, Berlin) and one entity-hop (Kokoro, via
+  // Rocky -USES->). Nothing of another user's counts in.
   const status = await (await auth(origin, "/api/graph/status", cookie)).json();
-  assert.ok(status.nodes >= 5);
-  assert.ok(status.edges >= 4);
+  assert.equal(status.nodes, 4, JSON.stringify(status));
+  assert.equal(status.edges, 1, JSON.stringify(status));
   assert.ok(status.labels.includes("Entity"));
 
   const schema = await (await auth(origin, "/api/graph/schema", cookie)).json();
@@ -493,29 +631,37 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.answer, "I checked the graph.");
-
-  // The brain got the tools and the user's stored context.
+// The brain got the parameterized read tools (no Cypher on the surface) and
+  // the user's stored context.
   assert.equal(toolRequests.length, 1);
   const names = toolRequests[0].tools.map((tool) => tool.function.name);
-  assert.deepEqual(names, ["get-schema", "read-cypher"]);
+  assert.deepEqual(names, ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"]);
   const systemText = toolRequests[0].messages.map((message) => String(message.content || "")).join("\n");
   assert.match(systemText, /Knowledge graph context/);
   assert.match(systemText, /Known to this user so far:.*Rocky/);
-  // The brain is told where user facts live (relations on the :User node) so
-  // "what does X like?" queries the relations instead of just the node.
-  assert.match(systemText, /outgoing relations of their :User node/);
-  assert.match(systemText, /MATCH \(u:User \{name: 'X'\}\)-\[r\]->\(t\) RETURN type\(r\), t\.name/);
+  // The privacy rule: other users' personal data is not accessible to the
+  // brain, so it cannot answer "what does Mila like?" for Roman.
+  assert.match(systemText, /list-my-facts\(about\?, relation\?\)/);
+  assert.match(systemText, /other users' personal data is not accessible/);
+
   // The tool result came back through the MCP server and was fed to the brain.
   assert.ok(finalRequests.length >= 1);
   const toolMessage = finalRequests[0].messages.find((message) => message.role === "tool");
   assert.ok(toolMessage, "the brain should receive the tool result");
   assert.match(toolMessage.content, /mock data/);
-  // The mock MCP saw the read call; no write tool exists on the surface.
-  assert.match(backend.logs, /MOCK_GRAPH_CALL read-cypher/);
-  assert.doesNotMatch(backend.logs, /MOCK_GRAPH_CALL write-cypher/);
+  // The mock MCP saw the scoped read call — with the user the backend
+  // injected — and there is no raw-Cypher tool left to call.
+  assert.match(backend.logs, /MOCK_GRAPH_CALL list-my-facts/);
+  assert.match(backend.logs, /"user":"Mila"/);
+  assert.doesNotMatch(backend.logs, /MOCK_GRAPH_CALL read-cypher/);
   // The activity ring recorded the brain read.
   const activity = await (await auth(origin, "/api/graph/activity", cookie)).json();
   assert.ok(activity.entries.some((entry) => entry.kind === "brain_query" && entry.ok));
+  // Per-user isolation: the feed is scoped to the session user, so Roman's
+  // view does not contain Mila's brain query.
+  const romanCookie = await login(origin, "Roman");
+  const romanActivity = await (await auth(origin, "/api/graph/activity", romanCookie)).json();
+  assert.equal(romanActivity.entries.length, 0, JSON.stringify(romanActivity.entries));
 
   // Ingestion runs fire-and-forget after the answer: poll until the memory
   // store shows the extracted entity and the activity shows the ingest.
@@ -554,10 +700,11 @@ test("the graph tool budget leaves room for schema plus follow-up queries (five 
   );
 });
 
-test("a write Cypher through the read-only tool surface is rejected and reported", async () => {
+test("raw Cypher is not on the tool surface: the old read-cypher call is rejected as unknown", async () => {
   const origin = origins[1];
   const backend = backends[1];
   const cookie = await login(origin);
+  finalRequests = [];
   const response = await fetch(`${origin}/api/chat`, {
     method: "POST", headers: { "content-type": "application/json", cookie },
     body: JSON.stringify({ prompt: "Delete everything", mcp: { graph: true, websearch: false } }),
@@ -565,11 +712,18 @@ test("a write Cypher through the read-only tool surface is rejected and reported
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.ok(result.answer, "the brain should still answer from the error tool result");
-  // The delete Cypher reached the MCP (and would reach the DB), but the
-  // read-only layer rejected it; the brain got the failure as a tool result.
-  assert.match(backend.logs, /MOCK_GRAPH_CALL read-cypher/);
-  assert.match(backend.logs, /DETACH DELETE/);
+  // The raw-Cypher tool is gone from the surface: the server rejects the
+  // call as unknown and the Cypher never reaches the MCP server (there is
+  // nothing there that accepts it), so no write — or foreign read — is
+  // possible through the brain.
+  assert.doesNotMatch(backend.logs, /MOCK_GRAPH_CALL read-cypher/);
+  assert.doesNotMatch(backend.logs, /DETACH DELETE/);
   const lastFinal = finalRequests[finalRequests.length - 1];
   const toolMessage = [...lastFinal.messages].reverse().find((message) => message.role === "tool");
-  assert.match(String(toolMessage?.content), /read-only/);
+  assert.match(String(toolMessage?.content), /Unknown tool/);
+  const activity = await (await auth(origin, "/api/graph/activity", cookie)).json();
+  assert.ok(
+    activity.entries.some((entry) => entry.kind === "brain_query" && entry.tool === "read-cypher" && !entry.ok),
+    JSON.stringify(activity.entries),
+  );
 });

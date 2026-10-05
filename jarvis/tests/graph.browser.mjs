@@ -27,24 +27,27 @@ after(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
 });
 
+// The shape of the API's per-user scoped subgraph: the signed-in user's
+// type-less node, the entities they know, one entity-hop of world knowledge
+// around those, and the edges between them. Never another user's node or
+// edge, and never the bookkeeping KNOWS edges.
 const GRAPH_FIXTURE = {
   nodes: [
     // :User nodes carry no type: the account the knowledge belongs to.
     { id: "n0", name: "Mila", common: false },
-    { id: "n1", name: "Mila", type: "person", common: false },
-    { id: "n2", name: "Rocky", type: "thing", common: true },
-    { id: "n3", name: "Berlin", type: "place", common: true },
-    { id: "n4", name: "Kokoro-82M", type: "thing", common: true },
+    { id: "n1", name: "Rocky", type: "thing", common: true },
+    { id: "n2", name: "Berlin", type: "place", common: true },
+    { id: "n3", name: "Amelie", type: "person", common: false },
+    { id: "n4", name: "Lego", type: "thing", common: true },
   ],
-  // The API filters the bookkeeping KNOWS edges out of the panel data, so the
-  // fixture mirrors that: only real facts, one of them negative. n1 and n2
-  // carry two edges at once (USES + LIKES): parallel-edge label stacking.
+  // Only real facts, one of them negative. n3 and n2 carry two edges at once
+  // (LIVES_IN + WORKS_AT): parallel-edge label stacking.
   edges: [
     { source: "n0", target: "n1", type: "LIKES" },
-    { source: "n1", target: "n2", type: "USES" },
-    { source: "n1", target: "n2", type: "LIKES" },
-    { source: "n1", target: "n3", type: "LIVES_IN" },
-    { source: "n2", target: "n4", type: "USES", negative: true },
+    { source: "n3", target: "n2", type: "LIVES_IN" },
+    { source: "n3", target: "n0", type: "FRIEND_OF" },
+    { source: "n1", target: "n4", type: "USES", negative: true },
+    { source: "n3", target: "n2", type: "WORKS_AT" },
   ],
 };
 
@@ -71,11 +74,14 @@ async function routeGraphApi(page, { configured = true } = {}) {
     graphConfigured: configured,
   } }));
   if (configured) {
-    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 5, edges: 5, labels: ["User", "Entity"], relTypes: ["KNOWS", "LIKES", "LIVES_IN", "USES"] } }));
+    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 5, edges: 5, labels: ["User", "Entity"], relTypes: ["FRIEND_OF", "LIKES", "LIVES_IN", "USES", "WORKS_AT"] } }));
     await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: GRAPH_FIXTURE }));
     await page.route("**/api/graph/schema", (route) => route.fulfill({ json: { labels: ["User", "Entity"], relTypes: ["LIVES_IN", "USES"], propertyKeys: ["name", "type"] } }));
+    // The feed is scoped to the session user, so entries no longer carry a
+    // visible user suffix; brain entries log the parameterized tool and its
+    // argument summary (detail), not raw Cypher.
     await page.route("**/api/graph/activity", (route) => route.fulfill({ json: { entries: [
-      { at: new Date().toISOString(), kind: "brain_query", user: "Mila", tool: "read-cypher", cypher: "MATCH (e) RETURN e LIMIT 3", ok: true, ms: 12 },
+      { at: new Date().toISOString(), kind: "brain_query", user: "Mila", tool: "list-my-facts", detail: "facts for Mila (mock)", ok: true, ms: 12 },
       { at: new Date().toISOString(), kind: "ingest", user: "Mila", entities: 2, relations: 1 },
     ] } }));
   }
@@ -99,9 +105,11 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   assert.match(await page.textContent("#graphStatus"), /5 nodes · 5 links/);
   assert.equal(await page.locator("#graphCanvas circle").count(), 5);
   const labels = await page.locator("#graphCanvas text").allTextContents();
-  assert.ok(labels.includes("Mila"), "node labels should be drawn");
-  // The signed-in user's account node is drawn distinctly from the person entity.
+  assert.ok(labels.includes("Rocky"), "entity labels should be drawn");
+  // Per-user isolation: the user appears exactly once, as the type-less
+  // account node — there is no second person entity for the signed-in user.
   assert.ok(labels.includes("Mila (you)"), "the :User node should be labelled as the signed-in user");
+  assert.equal(labels.filter((label) => label.startsWith("Mila")).length, 1, `one Mila node: ${JSON.stringify(labels)}`);
   const edgeLabels = await page.locator("#graphCanvas text.edge-label").allTextContents();
   assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
   assert.ok(edgeLabels.includes("likes"), "relation types are shown in plain words");
@@ -113,8 +121,9 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   assert.match(await page.textContent("#graphSchema"), /Labels: User, Entity/);
   const activity = await page.locator("#graphActivity li").allTextContents();
   assert.equal(activity.length, 2);
-  assert.match(activity[0], /brain read read-cypher/);
-  assert.match(activity[1], /stored 2 entities \+ 1 link \(Mila\)/);
+  assert.match(activity[0], /brain read list-my-facts/);
+  // The feed is scoped to the session user, so no per-entry user suffix.
+  assert.match(activity[1], /stored 2 entities \+ 1 link$/);
 });
 
 test("clicking a node re-centres the panel on its neighbourhood", async (t) => {

@@ -1321,3 +1321,98 @@ question as Roman now gets `get-schema` followed by
 `MATCH (u:User {name: 'Mila'})-[r:LIKES]->(e:Entity) RETURN e.name,
 r.negative, r.last_seen`, and the answer is "Mila likes Lego. That's the only
 thing stored in the knowledge graph about her preferences."
+
+## Per-user data isolation (2026-10-05, PR #33)
+
+User request: signed in as Roman, the user must not see — in the graph panel
+or via the brain's MCP access — any user-related data of other users (Mila's
+`:User` node, her `LIKES`/fact edges, her `KNOWS` edges).
+
+Why the pre-#33 panel and MCP could not guarantee this:
+1. The panel endpoints (`/api/graph/status`, `/api/graph/subgraph`) returned a
+   global newest-N subgraph: every user's nodes and fact edges were visible to
+   everyone.
+2. The brain's graph MCP server was the official `neo4j-mcp` with a
+   free-form `read-cypher` tool. Neo4j Community has no RBAC, so any raw read
+   is a bypass: `MATCH (e)-[r]-(x) RETURN x` reaches another user's node
+   without ever naming the `:User` label. A read-only flag is not enough;
+   only a surface with no Cypher at all is.
+3. A legacy data shape made the leak concrete: pre-`af0d338` ingestion created
+   a person `:Entity` named after a user (a proxy for their personal data).
+   The live DB held `Mila:Entity` with `Mila:Entity -[:LIKES]-> Lego` and
+   `Roman -[:KNOWS]-> Mila:Entity`, so Roman's panel showed "Mila likes Lego"
+   as world knowledge even after the panel was scoped.
+
+Changes:
+- **`mcp/graph.mjs` (new):** own stdio MCP server (Node, newline JSON-RPC)
+  replacing `neo4j-mcp`. Four parameterized read tools — `get-schema`,
+  `get-entity(name)`, `list-my-knowledge`, `list-my-facts(about?, relation?)`
+  — no write tool, no Cypher tool. Every query is built inside the file,
+  `MATCH`/`RETURN` only, pinned to a `user` argument the backend injects per
+  call; the tool schema the brain sees has no `user` parameter, and the
+  server fails calls that arrive without one (defense in depth). Connects
+  with the read-only `jarvis_read` credentials passed via env at spawn.
+- **`server.js`:** `mcpGraph` now spawns `mcp/graph.mjs` (env
+  `NEO4J_URI`/`NEO4J_DATABASE`/`NEO4J_READ_USER`/`NEO4J_READ_PASSWORD`;
+  `MCP_GRAPH_SCRIPT` overrides for tests, same pattern as
+  `MCP_SEARCH_SCRIPT`). The brain gets the four tools plus a privacy line in
+  its prompt ("other users' personal data is not accessible to you"). The
+  tool loop injects the session user into every call (`{ ...args, user }`, so
+  a brain-supplied `user` could never win), logs a short
+  `tool: arguments` summary (`detail`) instead of raw Cypher, and rejects
+  unknown tool names with a corrective tool result. `/api/graph/status`,
+  `/api/graph/subgraph` and `/api/graph/activity` are scoped to `req.user`
+  (the activity feed is filtered to the session user's entries; the per-line
+  `(user)` suffix in the panel is gone with it).
+- **`graphdb.js` (both stores):** `status({ user })` counts the signed-in
+  user's visible world (user node + known entities + one entity-hop
+  neighbours, fact edges + entity↔entity edges, `KNOWS` filtered from
+  `relTypes`). `subgraph({ user, limit, center })` returns that world;
+  `center` is only honoured if it is the user's own node, a known entity, or
+  an entity one entity-hop from a known one, and neighbours are `:Entity`
+  nodes plus the user's own node — a foreign elementId comes back empty, and
+  the Cypher pins the same guard server-side. `upsertTurn` keeps the
+  one-node-per-user invariant for **every registered user** (the user list is
+  passed from `config.users`): entities named after a user are dropped,
+  referenced users' `:User` nodes are `MERGE`d, and relation endpoints named
+  after a user resolve to `:User {name: row.from/row.to}` — so a fact stated
+  about another user is stored *on* that user, visible only to them. The old
+  `knownBy >= 2 → common` auto-flag is removed (it derived common-ness from
+  other users' mentions); `common` is now only ever the extractor's flag.
+- **`public/app.js`:** the activity line renders `entry.detail` (tool +
+  argument summary) instead of raw Cypher, without a per-entry user suffix.
+- **`Dockerfile`:** the `python3`/`pip neo4j-mcp-server==1.6.0` layer is gone;
+  the graph MCP server runs from the copied Node source (only `neo4j-driver`
+  is needed, already a production dependency). The now-unused
+  `NEO4J_MCP_*` variables in `.env` are harmless leftovers.
+
+Live data cleanup (one-off, via the Neo4j HTTP API in the jarvis container):
+`MATCH (e:Entity {name: 'Mila'}) DETACH DELETE e` — the legacy proxy node and
+its `LIKES` edge, whose fact is already carried canonically by
+`Mila:User -[:LIKES]-> Lego`. After cleanup the graph holds exactly the
+users `Mila`/`Roman`, the entity `Lego`, the fact edge above, and the two
+`KNOWS` edges to `Lego`.
+
+Tests: unit 84/84 (new: the memory-store per-user isolation test, the
+"endpoints named after other users target their `:User` node" Cypher pin for
+the Neo4j store, the unknown-tool/rejected-`read-cypher` test; reworked:
+scoped `status`/`subgraph` calls, `knownBy` expectations removed, the mock
+MCP implements the four tools, the browser fixture is a per-user subgraph
+shape with no `KNOWS` edges and the activity mock uses `detail`), browser
+37 pass + 2 opt-in skips.
+
+Deployed (backups `jarvis-code.bak-20261005_120148.tgz` and
+`jarvis-code.bak-20261005_122521.tgz`; `server.js`, `graphdb.js`,
+`public/app.js`, `mcp/graph.mjs`, `tests/*`, `Dockerfile` synced,
+md5-verified, image rebuilt without the Python layer) and verified live:
+- As **Roman**: `/api/graph/subgraph` returns `Roman, Lego` with zero edges —
+  no Mila node, no Mila edge; activity feed scoped to his entries only.
+- As **Mila**: her world is intact — `Mila, Lego` with the
+  `Mila -LIKES-> Lego` edge (positive), no Roman node.
+- As **Roman**, "What does Mila like?" → "I don't have any information about
+  Mila or what she likes" (the tools are pinned to Roman; `get-entity` finds
+  no `Mila` entity, `list-my-facts` has nothing about her). As **Mila**,
+  "What do I like?" → "You like Lego, Mila".
+- Write path end-to-end: the live chat turns (real extractor + ingestion on
+  the new code) re-created no user-named entity — the graph after the
+  verification chats still holds exactly `Lego` as the only entity.

@@ -377,8 +377,8 @@ async function loadGraph(center) {
         const item = document.createElement("li");
         const when = new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         item.textContent = entry.kind === "ingest"
-          ? `${when} · stored ${entry.entities} entit${entry.entities === 1 ? "y" : "ies"}${entry.relations ? ` + ${entry.relations} link${entry.relations === 1 ? "" : "s"}` : ""} (${entry.user})`
-          : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.cypher ? `: ${entry.cypher}` : entry.error ? `: ${entry.error}` : ""}`;
+          ? `${when} · stored ${entry.entities} entit${entry.entities === 1 ? "y" : "ies"}${entry.relations ? ` + ${entry.relations} link${entry.relations === 1 ? "" : "s"}` : ""}`
+          : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.detail ? `: ${entry.detail}` : entry.error ? `: ${entry.error}` : ""}`;
         return item;
       }));
     } else {
