@@ -31,7 +31,8 @@ after(async () => {
 // type-less node, the entities they own, and the fact edges between them
 // (ownership bounds the world; :User account markers may appear as edge
 // endpoints). Never another user's node or edge, and never the bookkeeping
-// KNOWS edges.
+// KNOWS edges. An owned entity no fact edge touches (Vienna) is drawn too,
+// flagged `isolated` so the view renders it dimmed.
 const GRAPH_FIXTURE = {
   nodes: [
     // :User nodes carry no type: the account the knowledge belongs to.
@@ -40,6 +41,7 @@ const GRAPH_FIXTURE = {
     { id: "n2", name: "Berlin", type: "place", owner: "Mila" },
     { id: "n3", name: "Amelie", type: "person", owner: "Mila" },
     { id: "n4", name: "Lego", type: "thing", owner: "Mila" },
+    { id: "n6", name: "Vienna", type: "place", owner: "Mila", isolated: true },
   ],
   // Only real facts, one of them negative. n3 and n2 carry two edges at once
   // (LIVES_IN + WORKS_AT): parallel-edge label stacking.
@@ -75,7 +77,7 @@ async function routeGraphApi(page, { configured = true } = {}) {
     graphConfigured: configured,
   } }));
   if (configured) {
-    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 5, edges: 5, labels: ["User", "Entity"], relTypes: ["FRIEND_OF", "LIKES", "LIVES_IN", "USES", "WORKS_AT"] } }));
+    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 6, edges: 5, labels: ["User", "Entity"], relTypes: ["FRIEND_OF", "LIKES", "LIVES_IN", "USES", "WORKS_AT"] } }));
     await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: GRAPH_FIXTURE }));
     await page.route("**/api/graph/schema", (route) => route.fulfill({ json: { labels: ["User", "Entity"], relTypes: ["LIVES_IN", "USES"], propertyKeys: ["name", "type"] } }));
     // The feed is scoped to the session user, so entries no longer carry a
@@ -103,10 +105,15 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   const page = await openPanel(t);
   await page.click("#graphView2dButton"); // the 3D view is the default
   await page.waitForSelector("#graphCanvas circle");
-  assert.match(await page.textContent("#graphStatus"), /5 nodes · 5 links/);
-  assert.equal(await page.locator("#graphCanvas circle").count(), 5);
+  assert.match(await page.textContent("#graphStatus"), /6 nodes · 5 links/);
+  assert.equal(await page.locator("#graphCanvas circle").count(), 6);
   const labels = await page.locator("#graphCanvas text").allTextContents();
   assert.ok(labels.includes("Rocky"), "entity labels should be drawn");
+  assert.ok(labels.includes("Vienna"), "the isolated mention is drawn, not hidden");
+  // Isolated mentions (owned, no fact edge) render dimmed; linked nodes do
+  // not. Node order in the fixture: Mila, Rocky, Berlin, Amelie, Lego, Vienna.
+  const opacities = await page.$$eval("#graphCanvas circle", (circles) => circles.map((circle) => circle.style.fillOpacity));
+  assert.deepEqual(opacities, ["0.65", "0.65", "0.65", "0.65", "0.65", "0.35"], `isolated node dimmed: ${JSON.stringify(opacities)}`);
   // Per-user isolation: the user appears exactly once, as the type-less
   // account node — there is no second person entity for the signed-in user.
   assert.ok(labels.includes("Mila (you)"), "the :User node should be labelled as the signed-in user");
@@ -167,6 +174,8 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
   const labels = await page.locator(".graph-3d-labels span:not(.edge)").allTextContents();
   assert.ok(labels.includes("Mila (you)"), `labels: ${JSON.stringify(labels)}`);
   assert.ok(labels.includes("Rocky"), "entity labels are drawn");
+  assert.ok(labels.includes("Vienna"), "the isolated mention is drawn in 3D too");
+  assert.equal(await page.locator(".graph-3d-labels span.isolated").count(), 1, "the isolated mention's label carries the dimming class");
   const edgeLabels = await page.locator(".graph-3d-labels span.edge").allTextContents();
   assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
   assert.ok(edgeLabels.includes("likes"), "relation types are shown in plain words");
@@ -241,5 +250,5 @@ test("the 3D view falls back to 2D when WebGL is unavailable", async (t) => {
   assert.equal(await page.locator("#graph3dStage").isHidden(), true, "the 3D stage stays hidden without WebGL");
   assert.equal(await page.locator("#graph3dStage canvas").count(), 0, "no 3D canvas is created");
   assert.equal(await page.locator("#graphView3dButton").isDisabled(), true, "the 3D toggle is disabled");
-  assert.equal(await page.locator("#graphCanvas circle").count(), 5, "the 2D view renders instead");
+  assert.equal(await page.locator("#graphCanvas circle").count(), 6, "the 2D view renders instead");
 });

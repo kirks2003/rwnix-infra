@@ -94,8 +94,13 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
   function makeLabel(node) {
     const label = document.createElement("span");
     const suffix = !node.type && userName && node.name === userName ? " (you)" : "";
-    label.textContent = `${String(node.name || node.type).slice(0, 24)}${suffix}`;
+    // Admin view: every owner's copy of an entity is drawn, so same-named
+    // copies (two "Lego") need the owner in the label. For a regular user
+    // this never fires (own entities have owner === them; markers have none).
+    const ownerSuffix = node.owner && node.owner !== userName ? ` (${node.owner})` : "";
+    label.textContent = `${String(node.name || node.type).slice(0, 24)}${ownerSuffix}${suffix}`;
     if (!node.type) label.classList.add("user");
+    if (node.isolated) label.classList.add("isolated");
     label.addEventListener("click", () => onNodeClick?.(node.id));
     labelLayer.appendChild(label);
     return label;
@@ -123,7 +128,10 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
     for (const node of incoming) {
       let entry = nodeState.get(node.id);
       if (!entry) {
-        const mesh = new THREE.Mesh(sphereGeometry, new THREE.MeshLambertMaterial({ color: nodeColor(node) }));
+        // Isolated mentions (owned, no fact edge) render dimmed, like the
+        // 2D view; transparent from the start so the opacity can flip later
+        // when a fact edge appears.
+        const mesh = new THREE.Mesh(sphereGeometry, new THREE.MeshLambertMaterial({ color: nodeColor(node), transparent: true, opacity: node.isolated ? 0.35 : 1 }));
         // The :User account node renders distinctly, like the 2D view.
         mesh.scale.setScalar(node.type ? 1.7 : 2.7);
         const pos = new THREE.Vector3(
@@ -137,6 +145,8 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
         nodeState.set(node.id, entry);
       }
       entry.mesh.material.color.setHex(nodeColor(node));
+      entry.mesh.material.opacity = node.isolated ? 0.35 : 1;
+      entry.label.classList.toggle("isolated", Boolean(node.isolated));
     }
     const byId = nodeState;
     edges = (subgraph.edges || [])

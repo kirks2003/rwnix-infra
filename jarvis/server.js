@@ -30,6 +30,11 @@ const config = {
   // Multi-user login: comma-separated user names. Each user's password is
   // their own name (Mila signs in with "Mila"/"Mila").
   users: splitCsv(process.env.USERS || "Mila,Roman"),
+  // The admin session: signs in like any user (ADMIN_USERS must be a subset
+  // of USERS) and sees every user's data — the panel shows the whole graph
+  // and the brain's graph tools run across all owners. The flag is derived
+  // from the session, never from the client.
+  admins: splitCsv(process.env.ADMIN_USERS || "admin"),
   // Neo4j knowledge graph. The read user is used for the brain context, the
   // /api/graph/* panel endpoints and (via the MCP server) the brain's own
   // read-only queries; the write user is used ONLY by the backend's turn
@@ -63,6 +68,13 @@ function canonicalUser(name) {
   const wanted = String(name || "").trim().toLowerCase();
   for (const user of config.users) if (user.toLowerCase() === wanted) return user;
   return null;
+}
+
+// The admin session is a session property, never client input: it is derived
+// from the signed-in user and drives the global panel view, the cross-owner
+// brain tools and the full activity feed.
+function isAdmin(user) {
+  return Boolean(user) && config.admins.includes(user);
 }
 
 function sameSecret(a, b) {
@@ -269,11 +281,13 @@ const server = http.createServer(async (req, res) => {
     // user's world (their node, the entities they own, and the fact edges
     // between them — ownership bounds the world, there is no shared tier).
     // The store builds the queries; a foreign `center` elementId simply
-    // comes back empty.
+    // comes back empty. The ONE exception is the admin session (`admin` is
+    // derived from the signed-in user, never from the query): its view is the
+    // whole graph — every user's nodes, entities and facts.
     if (req.method === "GET" && pathname === "/api/graph/status") {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
       try {
-        return json(res, 200, { requestId, ...(await graphStore.status({ user: req.user })) });
+        return json(res, 200, { requestId, ...(await graphStore.status({ user: req.user, admin: isAdmin(req.user) })) });
       } catch (error) {
         return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
       }
@@ -283,7 +297,7 @@ const server = http.createServer(async (req, res) => {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
       const center = String(url.searchParams.get("center") || "").slice(0, 128) || null;
       try {
-        return json(res, 200, { requestId, ...(await graphStore.subgraph({ user: req.user, limit: Number(url.searchParams.get("limit")) || 60, center })) });
+        return json(res, 200, { requestId, ...(await graphStore.subgraph({ user: req.user, limit: Number(url.searchParams.get("limit")) || 60, center, admin: isAdmin(req.user) })) });
       } catch (error) {
         return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
       }
@@ -299,10 +313,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Only this user's own activity — another user's stored turns or brain
-    // queries are their personal data, not something to display here.
+    // queries are their personal data, not something to display here. The
+    // admin session sees the whole feed (every user's reads and ingests).
     if (req.method === "GET" && pathname === "/api/graph/activity") {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
-      return json(res, 200, { requestId, entries: graphActivity.filter((entry) => entry.user === req.user).slice(-30).reverse() });
+      const entries = isAdmin(req.user) ? graphActivity : graphActivity.filter((entry) => entry.user === req.user);
+      return json(res, 200, { requestId, entries: entries.slice(-30).reverse() });
     }
 
     if (req.method === "POST" && pathname === "/api/transcribe") {
@@ -810,9 +826,16 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
         const context = await withAbort(graphStore.readContext(user), signal);
         const graphText = graphdb.formatGraphContext(context);
         if (graphText) graphMessage = { role: "system", content: graphText };
-        mcpStates.push(graphText
-          ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call four read-only tools about the graph: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about) and list-my-facts(about?, relation?) (the facts stored about this user — likes, ownership, family, home, work). If the user asks what you remember or know about them, answer from the graph context, these tools and the conversation history. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess."
-          : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with the get-schema, get-entity, list-my-knowledge and list-my-facts tools. New facts are stored automatically after every answer.");
+        if (isAdmin(user)) {
+          // The admin session is the one place allowed to see every user's
+          // data: the tools run across all owners, so the privacy line above
+          // (which would contradict that) is NOT added here.
+          mcpStates.push("The knowledge graph (MCP graph server) is ON and you are the administrator of it: the four read-only tools show you ALL users' data — get-schema (labels, relation types, property keys), get-entity(name) (every owner's copy of an entity, its data and its links), list-my-knowledge (every user's stored entities, grouped per user) and list-my-facts(about?, relation?) (every user's stored facts — likes, ownership, family, home, work). When asked what is stored about the graph or about any user, answer from these tools and attribute each item to its user (e.g. 'Mila: likes Lego; Roman: no stored facts'). Seeing other users' data is allowed in this admin session only — never present another user's data as the admin's own, and do not guess.");
+        } else {
+          mcpStates.push(graphText
+            ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call four read-only tools about the graph: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about) and list-my-facts(about?, relation?) (the facts stored about this user — likes, ownership, family, home, work). If the user asks what you remember or know about them, answer from the graph context, these tools and the conversation history. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess."
+            : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with the get-schema, get-entity, list-my-knowledge and list-my-facts tools. New facts are stored automatically after every answer.");
+        }
       } catch (error) {
         if (signal.aborted) throw error;
         console.log(JSON.stringify({ level: "warn", requestId, msg: "graph_context_failed", error: error.message }));
@@ -840,7 +863,7 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const data = await runBrain({ messages, user, useTools: Boolean(mcpFlags.graph && graphStore), requestId, signal, headers,
+  const data = await runBrain({ messages, user, useTools: Boolean(mcpFlags.graph && graphStore), admin: isAdmin(user), requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -866,45 +889,55 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
 // Parameterized reads only — there is no Cypher on the surface: mcp/graph.mjs
 // builds every query itself, pinned to the signed-in user (injected by this
 // backend per call), so a chat turn can neither write to the graph nor reach
-// another user's data.
+// another user's data. For the admin session the same four tool names run
+// across all owners (the backend injects `admin: true` per call — never the
+// brain), and the descriptions say so.
 // Five rounds: a schema call plus a few follow-ups is the common pattern.
 const GRAPH_TOOL_ROUNDS = 5;
 const GRAPH_TOOL_TIMEOUT_MS = 15000;
 const GRAPH_TOOL_NAMES = new Set(["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"]);
-const graphTools = [
-  {
-    type: "function",
-    function: {
-      name: "get-schema",
-      description: "Inspect the knowledge graph schema: node labels, relationship types and property keys.",
-      parameters: { type: "object", properties: {} },
+function graphTools(admin) {
+  return [
+    {
+      type: "function",
+      function: {
+        name: "get-schema",
+        description: "Inspect the knowledge graph schema: node labels, relationship types and property keys.",
+        parameters: { type: "object", properties: {} },
+      },
     },
-  },
-  {
-    type: "function",
-    function: {
-      name: "get-entity",
-      description: "Look up one of the signed-in user's own entities (person, place, thing, ...) by name: its data and its links. Returns nothing if the user has no such entity.",
-      parameters: { type: "object", properties: { name: { type: "string", description: "The entity name, e.g. 'Berlin'." } }, required: ["name"] },
+    {
+      type: "function",
+      function: {
+        name: "get-entity",
+        description: admin
+          ? "Look up an entity by name: every user's copy of it (one per owner), its data and its links. Returns nothing if no user has such an entity."
+          : "Look up one of the signed-in user's own entities (person, place, thing, ...) by name: its data and its links. Returns nothing if the user has no such entity.",
+        parameters: { type: "object", properties: { name: { type: "string", description: "The entity name, e.g. 'Berlin'." } }, required: ["name"] },
+      },
     },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list-my-knowledge",
-      description: "List the entities the signed-in user has told you about (their stored knowledge).",
-      parameters: { type: "object", properties: {} },
+    {
+      type: "function",
+      function: {
+        name: "list-my-knowledge",
+        description: admin
+          ? "List every user's stored entities (all knowledge in the graph, grouped per user)."
+          : "List the entities the signed-in user has told you about (their stored knowledge).",
+        parameters: { type: "object", properties: {} },
+      },
     },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list-my-facts",
-      description: "List the facts stored about the signed-in user (likes, ownership, family, home, work, ...), optionally filtered to one entity (about) or one relation type (relation, e.g. LIKES).",
-      parameters: { type: "object", properties: { about: { type: "string", description: "Optional: only facts about this entity name." }, relation: { type: "string", description: "Optional: only this relation type, e.g. LIKES." } } },
+    {
+      type: "function",
+      function: {
+        name: "list-my-facts",
+        description: admin
+          ? "List every user's stored facts (likes, ownership, family, home, work, ...), optionally filtered to one entity (about) or one relation type (relation, e.g. LIKES)."
+          : "List the facts stored about the signed-in user (likes, ownership, family, home, work, ...), optionally filtered to one entity (about) or one relation type (relation, e.g. LIKES).",
+        parameters: { type: "object", properties: { about: { type: "string", description: "Optional: only facts about this entity name." }, relation: { type: "string", description: "Optional: only this relation type, e.g. LIKES." } } },
+      },
     },
-  },
-];
+  ];
+}
 
 // One short, loggable description of a tool call for the activity feed —
 // never raw Cypher (there is none on the surface anymore).
@@ -916,7 +949,7 @@ function graphToolDetail(name, args) {
   return parts.length ? `${name}: ${parts.join(", ")}` : name;
 }
 
-async function runBrain({ messages, user, useTools, requestId, signal, headers, deadlineMs }) {
+async function runBrain({ messages, user, useTools, admin = false, requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
   const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
   for (let round = 0; ; round += 1) {
@@ -930,7 +963,7 @@ async function runBrain({ messages, user, useTools, requestId, signal, headers, 
       // budget at the measured ~150 tok/s while staying inside the timeout.
       max_tokens: 4096,
     };
-    if (useTools) body.tools = graphTools;
+    if (useTools) body.tools = graphTools(admin);
     let data;
     try {
       const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
@@ -969,10 +1002,11 @@ async function runBrain({ messages, user, useTools, requestId, signal, headers, 
         continue;
       }
       try {
-        // The session user is injected HERE, not in the brain's tool schema:
-        // the brain (or a prompt injection riding on it) can only ever target
-        // the signed-in user's own data.
-        const result = await withAbort(mcpGraph.call(name, { ...args, user }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
+        // The session user (and the admin flag) are injected HERE, not in
+        // the brain's tool schema: the brain (or a prompt injection riding on
+        // it) can only ever target the signed-in user's own data — and the
+        // cross-owner admin queries are reachable only for the admin session.
+        const result = await withAbort(mcpGraph.call(name, { ...args, user, admin }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
         const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
         recordGraphActivity({ kind: "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
         local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });

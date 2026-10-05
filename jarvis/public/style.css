@@ -735,6 +735,11 @@ progress {
   color: var(--cyan);
 }
 
+/* Isolated mention (owned, but no fact edge touches it): drawn, but dimmed. */
+.graph-3d-labels span.isolated {
+  opacity: 0.5;
+}
+
 /* Relation-type label floating at a 3D link's midpoint (non-interactive). */
 .graph-3d-labels span.edge {
   font-size: 8px;
