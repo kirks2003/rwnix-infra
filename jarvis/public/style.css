@@ -674,10 +674,12 @@ progress {
   opacity: 1;
 }
 
-/* The live 3D view: the canvas fills the stage, labels float on top. */
+/* The live 3D view: the canvas fills the stage, labels float on top. The
+   stage is in normal flow (not absolute) so the wrap always reserves the
+   320 px canvas height — the hidden 2D SVG otherwise contributes none and
+   the stage would paint over the panels below. */
 .graph-3d-stage {
-  position: absolute;
-  inset: 0;
+  position: relative;
   height: 320px;
   border: 1px solid rgba(66, 217, 255, 0.12);
   border-radius: 12px;

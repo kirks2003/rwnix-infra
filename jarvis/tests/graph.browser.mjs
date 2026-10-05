@@ -145,6 +145,23 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
   const labels = await page.locator(".graph-3d-labels span").allTextContents();
   assert.ok(labels.includes("Mila (you)"), `labels: ${JSON.stringify(labels)}`);
   assert.ok(labels.includes("Rocky"), "entity labels are drawn");
+  // The wrap must reserve the canvas height in 3D mode (the hidden 2D SVG
+  // contributes no flow height), or the stage paints over the panels below.
+  const boxes = await page.evaluate(() => {
+    const wrap = document.querySelector(".graph-canvas-wrap");
+    const stage = document.getElementById("graph3dStage");
+    const section = document.querySelector(".graph-panel");
+    const next = document.querySelector(".panels-toggle-row");
+    return {
+      wrap: wrap.getBoundingClientRect().toJSON(),
+      stage: stage.getBoundingClientRect().toJSON(),
+      sectionBottom: section.getBoundingClientRect().bottom,
+      nextTop: next.getBoundingClientRect().top,
+    };
+  });
+  assert.ok(boxes.wrap.height >= 319, `wrap reserves the 320px canvas height (got ${boxes.wrap.height})`);
+  assert.ok(boxes.stage.bottom <= boxes.wrap.bottom + 1, "the 3D stage stays inside its wrap");
+  assert.ok(boxes.nextTop >= boxes.sectionBottom, "the panels toggle row starts below the graph panel");
 });
 
 test("the 3D view: clicking a node label re-centres the panel", async (t) => {

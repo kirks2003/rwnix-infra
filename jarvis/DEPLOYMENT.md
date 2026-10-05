@@ -1214,3 +1214,15 @@ headless SwiftShader here fires a spurious `webglcontextcreationerror` ("Canvas
 has an existing context of a different type") even though the
 `getContext("webgl2")` call succeeds — the renderer is created and renders
 normally, so the console line is cosmetic.
+
+**Fix after rollout (2026-10-05, PR #29).** User report: in 3D mode the graph
+rectangle overlapped the "Panels off/on" row and everything below it. Cause:
+the 3D stage was `position: absolute` inside `.graph-canvas-wrap`, while the
+hidden 2D SVG contributes no flow height in 3D mode — the wrap collapsed to
+0 px and the 320 px stage painted over the following panels. The stage is now
+an in-flow element (`position: relative`, the same fixed 320 px height the 2D
+SVG reserves), so the wrap always holds the canvas height in both views. A
+browser-test regression pins the wrap height, the stage staying inside the
+wrap, and the panels toggle row starting below the graph panel. Redeployed
+(backup `jarvis-code.bak-20261005_090500.tgz`) and re-verified live: wrap
+320 px, stage inside the wrap, the panels row 18 px below the graph section.
