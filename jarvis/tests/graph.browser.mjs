@@ -51,6 +51,9 @@ const GRAPH_FIXTURE = {
     { source: "n3", target: "n0", type: "FRIEND_OF" },
     { source: "n1", target: "n4", type: "USES", negative: true },
     { source: "n3", target: "n2", type: "WORKS_AT" },
+    // A type introduced by ingestion (not in the static label map): the
+    // views must render it through the plain-word fallback.
+    { source: "n0", target: "n2", type: "INTERESTED_IN" },
   ],
 };
 
@@ -77,7 +80,7 @@ async function routeGraphApi(page, { configured = true } = {}) {
     graphConfigured: configured,
   } }));
   if (configured) {
-    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 6, edges: 5, labels: ["User", "Entity"], relTypes: ["FRIEND_OF", "LIKES", "LIVES_IN", "USES", "WORKS_AT"] } }));
+    await page.route("**/api/graph/status", (route) => route.fulfill({ json: { nodes: 6, edges: 6, labels: ["User", "Entity"], relTypes: ["FRIEND_OF", "INTERESTED_IN", "LIKES", "LIVES_IN", "USES", "WORKS_AT"] } }));
     await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: GRAPH_FIXTURE }));
     await page.route("**/api/graph/schema", (route) => route.fulfill({ json: { labels: ["User", "Entity"], relTypes: ["LIVES_IN", "USES"], propertyKeys: ["name", "type"] } }));
     // The feed is scoped to the session user, so entries no longer carry a
@@ -107,7 +110,7 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   const page = await openPanel(t);
   await page.click("#graphView2dButton"); // the 3D view is the default
   await page.waitForSelector("#graphCanvas circle");
-  assert.match(await page.textContent("#graphStatus"), /6 nodes · 5 links/);
+  assert.match(await page.textContent("#graphStatus"), /6 nodes · 6 links/);
   assert.equal(await page.locator("#graphCanvas circle").count(), 6);
   const labels = await page.locator("#graphCanvas text").allTextContents();
   assert.ok(labels.includes("Rocky"), "entity labels should be drawn");
@@ -124,6 +127,7 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
   assert.ok(edgeLabels.includes("likes"), "relation types are shown in plain words");
   assert.ok(edgeLabels.includes("lives in"), "underscored relation types render as words");
+  assert.ok(edgeLabels.includes("interested in"), "introduced types render via the plain-word fallback");
   // The negative flag renders as the negative form.
   assert.ok(edgeLabels.includes("doesn't use"), `negation: ${JSON.stringify(edgeLabels)}`);
   // The bookkeeping KNOWS edge never reaches the panel.
@@ -262,6 +266,7 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
   assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
   assert.ok(edgeLabels.includes("likes"), "relation types are shown in plain words");
   assert.ok(edgeLabels.includes("lives in"), "underscored relation types render as words");
+  assert.ok(edgeLabels.includes("interested in"), `introduced type in 3D: ${JSON.stringify(edgeLabels)}`);
   // The negative flag renders as the negative form.
   assert.ok(edgeLabels.includes("doesn't use"), `negation: ${JSON.stringify(edgeLabels)}`);
   // The bookkeeping KNOWS edge never reaches the panel.
