@@ -27,15 +27,21 @@
 //   - Google News RSS (free-form topics only) as a breadth backup: its links
 //     are JS-only wrappers (the 200 page is an app shell, no server-side
 //     redirect), so it only fills slots the primary sources left empty
-// Measured availability from the production server IP (2026-10-05): DuckDuckGo
-// (HTML and instant) is unreachable (connection refused), GDELT times out;
-// Bing News RSS, Google News RSS, Bing HTML, Wikipedia and all interest feeds
-// work. See DEPLOYMENT.md, "Live web news".
+// Measured availability from the production server IP (2026-10-05, twice):
+// DuckDuckGo is *intermittent* from datacenter IPs (connection-level refusal
+// on the first probe, HTTP 200 again hours later — a rate limit, not a ban);
+// GDELT times out; Bing News RSS, Google News RSS, Bing HTML, Wikipedia and
+// all interest feeds work consistently. Search requests therefore carry a
+// full Chrome header set with a language-aware Accept-Language
+// (browserHeaders in engines.mjs) so they look like a normal user request —
+// a bare user-agent is the classic bot tell, and Accept-Language is what
+// gets German queries to return German results. See DEPLOYMENT.md, "Live web
+// search + news for the brain".
 
 import readline from "node:readline";
 import {
   cleanHtml, decodeDuckDuckGoHref, decodeBingUrl, mergeResults, formatSearchResults,
-  normalizeUrlForDedupe, INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems,
+  normalizeUrlForDedupe, browserHeaders, INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems,
 } from "./engines.mjs";
 
 const TOOL = {
@@ -88,7 +94,7 @@ async function handleMessage(message) {
       return respond(id, {
         protocolVersion: params?.protocolVersion || "2025-06-18",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "jarvis-websearch", version: "1.2.0" },
+        serverInfo: { name: "jarvis-websearch", version: "1.3.0" },
       });
     case "notifications/initialized":
     case "notifications/cancelled":
@@ -107,8 +113,9 @@ async function handleMessage(message) {
         return respond(id, { content: [{ type: "text", text: "Empty query" }], isError: true });
       }
       const maxResults = Math.min(10, Math.max(1, Number(params.arguments?.max_results) || 5));
+      const lang = params.arguments?.lang === "en" ? "en" : "de";
       try {
-        const { merged, instant } = await searchWeb(query, maxResults);
+        const { merged, instant } = await searchWeb(query, maxResults, lang);
         if (!merged.length && !instant) return respond(id, { content: [{ type: "text", text: "No results found." }] });
         return respond(id, { content: [{ type: "text", text: formatSearchResults(merged, instant) }] });
       } catch (error) {
@@ -125,7 +132,8 @@ function respond(id, result, error) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-const BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+// Descriptive UA for feed/API endpoints (RSS readers identify themselves; the
+// HTML search engines get the full browser header set via browserHeaders).
 const BOT_UA = "Jarvis/1.0 (self-hosted voice assistant)";
 
 async function fetchText(url, options = {}) {
@@ -197,7 +205,7 @@ async function searchNews(topic, maxResults, lang) {
     backup.push({ source: "Google News", url: googleNewsUrl(topic, lang), browser: true });
   }
   const fetchSource = (item) => fetchText(item.url, {
-    headers: { "user-agent": item.browser ? BROWSER_UA : BOT_UA },
+    headers: item.browser ? browserHeaders(lang, false) : { "user-agent": BOT_UA },
   });
   const [primarySettled, backupSettled] = await Promise.all([
     Promise.allSettled(primary.map(fetchSource)),
@@ -225,8 +233,8 @@ async function searchNews(topic, maxResults, lang) {
   });
   // Resolve the Bing redirects before deduping: the same article via two
   // wrappers then merges on its real URL.
-  const primaryItems = dedupe(await resolveBingNewsUrls(collect(primary, primarySettled)));
-  const backupItems = dedupe(await resolveBingNewsUrls(collect(backup, backupSettled)));
+  const primaryItems = dedupe(await resolveBingNewsUrls(collect(primary, primarySettled), lang));
+  const backupItems = dedupe(await resolveBingNewsUrls(collect(backup, backupSettled), lang));
   const merged = primaryItems.length >= maxResults
     ? primaryItems
     : [...primaryItems, ...backupItems];
@@ -236,17 +244,17 @@ async function searchNews(topic, maxResults, lang) {
 // Bing News RSS links are bing.com/news/apiclick.aspx?… redirects; follow
 // them in parallel so the brain (and the Answer panel) get the real article
 // URL. A failed resolution keeps the wrapper URL.
-async function resolveBingNewsUrls(items) {
+async function resolveBingNewsUrls(items, lang) {
   return Promise.all(items.map(async (item) => {
     if (!item.url.includes("bing.com/news/apiclick.aspx")) return item;
-    const resolved = await resolveRedirectUrl(item.url);
+    const resolved = await resolveRedirectUrl(item.url, lang);
     return resolved ? { ...item, url: resolved } : item;
   }));
 }
 
-async function resolveRedirectUrl(url) {
+async function resolveRedirectUrl(url, lang) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(5000), redirect: "follow", headers: { "user-agent": BROWSER_UA } });
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000), redirect: "follow", headers: browserHeaders(lang, true) });
     const final = response.url;
     if (response.body) await response.body.cancel().catch(() => {});
     if (final === url || final.includes("bing.com")) return "";
@@ -259,10 +267,10 @@ async function resolveRedirectUrl(url) {
 // Queries every engine in parallel; a walled or down engine degrades to zero
 // results. The instant-answer API runs alongside and is independent: the
 // merged list stands on its own when it is empty.
-async function searchWeb(query, maxResults) {
+async function searchWeb(query, maxResults, lang) {
   const engines = [
-    { engine: "duckduckgo", run: () => searchDuckDuckGo(query, maxResults) },
-    { engine: "bing", run: () => searchBing(query, maxResults) },
+    { engine: "duckduckgo", run: () => searchDuckDuckGo(query, maxResults, lang) },
+    { engine: "bing", run: () => searchBing(query, maxResults, lang) },
     { engine: "wikipedia", run: () => searchWikipedia(query, maxResults) },
   ];
   const instantPromise = searchDuckDuckGoInstant(query).catch(() => null);
@@ -276,15 +284,16 @@ async function searchWeb(query, maxResults) {
   return { merged, instant };
 }
 
-async function searchDuckDuckGo(query, maxResults) {
-  // One retry: the endpoint is occasionally flaky (ECONNRESET / 202 anomaly
-  // challenge from datacenter IPs).
+async function searchDuckDuckGo(query, maxResults, lang) {
+  // One retry: the endpoint is occasionally flaky (connection-level refusal /
+  // ECONNRESET / 202 anomaly challenge from datacenter IPs — a rate limit
+  // that clears again, not a ban).
   let lastError;
   let html;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       html = await fetchText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-        headers: { "user-agent": BROWSER_UA },
+        headers: browserHeaders(lang, true),
       });
       break;
     } catch (error) {
@@ -304,9 +313,9 @@ async function searchDuckDuckGo(query, maxResults) {
   return results;
 }
 
-async function searchBing(query, maxResults) {
+async function searchBing(query, maxResults, lang) {
   const html = await fetchText(`https://www.bing.com/search?q=${encodeURIComponent(query)}`, {
-    headers: { "user-agent": BROWSER_UA },
+    headers: browserHeaders(lang, true),
   });
   const results = [];
   for (const item of html.split('<li class="b_algo"').slice(1)) {

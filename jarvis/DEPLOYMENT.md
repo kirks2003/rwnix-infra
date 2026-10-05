@@ -2008,3 +2008,68 @@ healthy, `/api/health` ok. Live MCP smoke from the production IP: `web_news`
 URLs** (borncity.com, heise.de); "technik" → heise; "finance" → CNBC/
 MarketWatch. (Google News wrapper links are not resolved — see design; they
 only appear as backup fill.)
+
+## Search requests look like a normal browser user (2026-10-05, PR #43)
+
+**Request:** make the web-search requests look like a normal browser user
+request, so they are not blocked as a bot/AI agent.
+
+**Findings (re-probe from the production IP, a few hours after the PR #42
+probe):**
+
+- **DuckDuckGo is intermittent, not banned.** The PR #42 probe got a
+  connection-level failure (`fetch failed`); the re-probe got **HTTP 200 with
+  real results** (12 parseable result links) on both `html.duckduckgo.com`
+  and the instant-answer API. This is a rate limit against datacenter IPs
+  that clears again, not a permanent block — which is why the DDG fetch keeps
+  its one retry and degrades to zero instead of failing the search.
+- **A bare user-agent is the classic bot tell.** Real Chrome sends a full
+  header set (`Accept`, `Accept-Language`, `sec-ch-ua*`, `Sec-Fetch-*`,
+  `Upgrade-Insecure-Requests`, `Priority`). The measured effect from the
+  production IP: no change for an already-accepted request (DDG 33.6 KB with
+  UA only vs 33.4 KB with the full set), but it is the shape of a normal
+  user request, and it is what keeps datacenter traffic from standing out.
+- **`Accept-Language` is the practical win.** With
+  `Accept-Language: de-DE,de;q=0.9,…` the same German query returns German
+  results (verified: top DuckDuckGo hits for "home assistant" switched from
+  English-leaning to German pages). Previously only the user-agent was sent,
+  so the locale fell back to the engine default.
+
+**Changes:**
+
+- `mcp/engines.mjs` — new pure helper `browserHeaders(lang, navigation)`
+  (unit-tested, no network): the Chrome user-agent plus `sec-ch-ua`,
+  `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `Sec-Fetch-Dest/Mode/Site`,
+  `Priority`, `Accept-Encoding` and a language-aware `Accept-Language`
+  (`de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7` vs `en-US,en;q=0.9`).
+  `navigation=true` adds the document-load headers (`Accept: text/html…`,
+  `Sec-Fetch-User: ?1`, `Upgrade-Insecure-Requests: 1`, `Priority: u=0,i`)
+  for the search pages; `navigation=false` is the subresource shape
+  (`Accept: */*`) for RSS fetches and redirect resolution.
+- `mcp/websearch.mjs` (serverInfo 1.2.0 → 1.3.0) — every HTML search-engine
+  fetch (DuckDuckGo HTML, Bing HTML) and every news fetch (Bing News RSS,
+  Google News RSS, Bing `apiclick.aspx` redirect resolution) now uses the
+  full browser header set with the answer language; the `lang` the backend
+  injects per call is threaded through `searchWeb` → the engine functions and
+  through `searchNews` → the redirect resolution. Feed/API endpoints
+  (interest feeds, Wikipedia API, DuckDuckGo instant API) keep the
+  descriptive `Jarvis/1.0` user-agent — that is how RSS readers and API
+  clients identify themselves, and those endpoints already work.
+- The stale header note ("DuckDuckGo unreachable") was corrected to
+  "intermittent rate limiting".
+
+**Tests:** unit **115/115** (114 + 1: the header set for de-navigation and
+en-subresource — user-agent shape, both `Accept-Language` variants, the
+sec-ch-ua/sec-fetch split, and the navigation-only headers); browser
+**39 pass + 2 opt-in skips** (unchanged, no UI change).
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261005_223837.tgz`; synced
+`mcp/engines.mjs`, `mcp/websearch.mjs`, `tests/mcp.test.mjs` (+ docs),
+md5-verified (container == worktree), image rebuilt, container healthy,
+`/api/health` ok. Live: `web_search("Home Assistant News", lang:"de")`
+returns DuckDuckGo + Bing + Wikipedia merged, with Bing now answering
+German-localized results (athome.at, home24.at) via the language-aware
+`Accept-Language`; the end-to-end chat as Roman ("letzte news zu meinen
+Interessen") still resolves the Home Assistant interest from the graph,
+calls `web_news` (log: `websearch_tool tool=web_news ok=true`) and answers
+with dated German HA news.

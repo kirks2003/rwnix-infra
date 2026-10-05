@@ -2,6 +2,35 @@
 // unwrapping and result merging. No network code here, so the unit tests run
 // without internet (the MCP server in websearch.mjs owns the fetches).
 
+// A bare user-agent is the classic bot tell: real Chrome sends a full header
+// set, and a language-aware Accept-Language is what makes German queries
+// return German results. navigation=true mirrors a document load (top-level
+// search page); navigation=false a subresource fetch (RSS/redirect follow).
+// Measured from the production IP: a full set does not change an already
+// accepted request, but it is the shape of a normal user request.
+export function browserHeaders(lang = "de", navigation = false) {
+  const headers = {
+    "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "accept-language": lang === "en" ? "en-US,en;q=0.9" : "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "accept-encoding": "gzip, deflate, br",
+    "sec-ch-ua": '"Chromium";v="143", "Not A(Brand";v="24", "Google Chrome";v="143"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Linux"',
+    "sec-fetch-dest": navigation ? "document" : "empty",
+    "sec-fetch-mode": navigation ? "navigate" : "cors",
+    "sec-fetch-site": "none",
+    "priority": navigation ? "u=0,i" : "u=1,i",
+  };
+  if (navigation) {
+    headers.accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+    headers["sec-fetch-user"] = "?1";
+    headers["upgrade-insecure-requests"] = "1";
+  } else {
+    headers.accept = "*/*";
+  }
+  return headers;
+}
+
 export function cleanHtml(html) {
   return String(html)
     .replace(/<[^>]*>/g, "")
