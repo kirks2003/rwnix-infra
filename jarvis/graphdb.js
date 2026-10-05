@@ -97,7 +97,7 @@ function formatGraphContext({ userEntities = [], commonEntities = [] }) {
 
 // --- Neo4j store ------------------------------------------------------------
 
-function createGraphStore({ uri, database, readUser, readPassword, writeUser, writePassword, driverFactory }) {
+function createGraphStore({ uri, database, readUser, readPassword, writeUser, writePassword, driverFactory, users = [] }) {
   let neo4j;
   try {
     neo4j = require("neo4j-driver");
@@ -122,38 +122,63 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
   return {
     memory: false,
 
-    async status() {
-      const [nodes, edges, labels, relTypes] = await Promise.all([
-        rows(await run(readClient, "MATCH (n) RETURN count(n) AS value")),
-        rows(await run(readClient, "MATCH ()-[r]->() RETURN count(r) AS value")),
+    // Counts of the signed-in user's visible world: their :User node, the
+    // entities they know, one entity-hop of world knowledge around those, and
+    // the edges between them. Never another user's node or edge.
+    async status({ user } = {}) {
+      const [known, neighbors, factEdges, entityEdges, labels, relTypes] = await Promise.all([
+        rows(await run(readClient, "MATCH (u:User {name: $user})-[:KNOWS]->(e) RETURN count(DISTINCT e) AS value", { user })),
+        rows(await run(readClient,
+          "MATCH (u:User {name: $user})-[:KNOWS]->(a:Entity) MATCH (a)-[r]-(b:Entity) " +
+          "WHERE type(r) <> 'KNOWS' AND NOT EXISTS { (u)-[:KNOWS]->(b) } RETURN count(DISTINCT b) AS value",
+          { user },
+        )),
+        rows(await run(readClient, "MATCH (u:User {name: $user})-[r]->() WHERE type(r) <> 'KNOWS' RETURN count(r) AS value", { user })),
+        rows(await run(readClient,
+          "MATCH (u:User {name: $user})-[:KNOWS]->(a:Entity) MATCH (a)-[r]-(b:Entity) " +
+          "WHERE type(r) <> 'KNOWS' RETURN count(DISTINCT elementId(r)) AS value",
+          { user },
+        )),
         rows(await run(readClient, "MATCH (n) UNWIND labels(n) AS label RETURN DISTINCT label ORDER BY label LIMIT 50")),
         rows(await run(readClient, "MATCH ()-[r]->() UNWIND [type(r)] AS t RETURN DISTINCT t ORDER BY t LIMIT 50")),
       ]);
       return {
-        nodes: Number(nodes[0]?.value || 0),
-        edges: Number(edges[0]?.value || 0),
+        nodes: 1 + Number(known[0]?.value || 0) + Number(neighbors[0]?.value || 0),
+        edges: Number(factEdges[0]?.value || 0) + Number(entityEdges[0]?.value || 0),
         labels: labels.map((row) => row.label),
-        relTypes: relTypes.map((row) => row.t),
+        // KNOWS is bookkeeping, not a link the panel should advertise.
+        relTypes: relTypes.map((row) => row.t).filter((type) => type !== "KNOWS"),
       };
     },
 
-    // Bounded neighbourhood for the panel: the newest named nodes (or, with
-    // `center`, one node plus its direct neighbours), plus the edges between
-    // the returned nodes.
-    async subgraph({ limit = 60, center = null } = {}) {
+    // Bounded neighbourhood for the panel, scoped to the signed-in user's
+    // visible world: their :User node, the entities they know, one entity-hop
+    // of world knowledge around those (or, with `center`, one visible node
+    // plus its direct neighbours). Never another user's node or edge — the
+    // panel is per-user by construction.
+    async subgraph({ user, limit = 60, center = null } = {}) {
       const cap = Math.min(120, Math.max(1, Number(limit) || 60));
-      let nodeRows;
-      let edgeRows = [];
+      const userRows = rows(await run(readClient, "MATCH (u:User {name: $user}) RETURN elementId(u) AS id, u.name AS name", { user }));
+      if (!userRows.length) return { nodes: [], edges: [], center: null };
       if (center) {
-        // KNOWS is bookkeeping (provenance for the brain context); the panel
-        // only draws real facts, so it is excluded here, not in the UI.
-        nodeRows = rows(await run(readClient,
-          "MATCH (a) WHERE elementId(a) = $center OPTIONAL MATCH (a)-[r]-(b) WHERE type(r) <> 'KNOWS' " +
+        // The centre must be visible to this user: their own node, an entity
+        // they know, or an entity one entity-hop from a known one. Neighbours
+        // are :Entity nodes plus the user's own node — never another user's
+        // node, no matter which elementId the client sends. KNOWS is
+        // bookkeeping; the panel only draws real facts.
+        const nodeRows = rows(await run(readClient,
+          "MATCH (u:User {name: $user}) " +
+          "MATCH (a) WHERE elementId(a) = $center " +
+          "WITH u, a WHERE elementId(a) = elementId(u) " +
+          "OR (a:Entity AND EXISTS { (u)-[:KNOWS]->(a) }) " +
+          "OR (a:Entity AND EXISTS { (a)-[]-(:Entity)<-[:KNOWS]-(u) }) " +
+          "OPTIONAL MATCH (a)-[r]-(b) " +
+          "WHERE type(r) <> 'KNOWS' AND (NOT (b:User) OR elementId(b) = elementId(u)) " +
           "RETURN elementId(a) AS id, a.name AS name, a.type AS type, a.common AS common, " +
-          "elementId(b) AS other, other.name AS otherName, other.type AS otherType, other.common AS otherCommon, type(r) AS rel, " +
+          "elementId(b) AS other, b.name AS otherName, b.type AS otherType, b.common AS otherCommon, type(r) AS rel, " +
           "coalesce(r.negative, false) AS negative " +
           "LIMIT 200",
-          { center },
+          { user, center },
         ));
         const byId = new Map();
         const edges = [];
@@ -164,26 +189,41 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         }
         return { nodes: [...byId.values()], edges: edges.slice(0, 200), center };
       }
-      nodeRows = rows(await run(readClient,
-        "MATCH (n) WHERE n.name IS NOT NULL " +
-        "ORDER BY coalesce(n.last_seen, n.first_seen) DESC LIMIT $limit " +
-        "RETURN elementId(n) AS id, n.name AS name, n.type AS type, n.common AS common, " +
-        "coalesce(n.last_seen, n.first_seen) AS lastSeen",
+      const knownRows = rows(await run(readClient,
+        "MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity) " +
+        "ORDER BY e.last_seen DESC LIMIT $limit " +
+        "RETURN elementId(e) AS id, e.name AS name, e.type AS type, e.common AS common",
         // The JS driver encodes plain numbers as floats and Neo4j LIMIT
         // rejects them ("'60.0' is not a valid value"), so wrap in neo4j.int.
-        { limit: neo4j.int(cap) },
+        { user, limit: neo4j.int(cap) },
       ));
-      const ids = nodeRows.map((row) => row.id);
-      if (ids.length) {
+      const nodes = [
+        { id: userRows[0].id, name: userRows[0].name, type: null, common: false },
+        ...knownRows.map((row) => ({ id: row.id, name: row.name, type: row.type, common: row.common })),
+      ];
+      const ids = nodes.map((node) => node.id);
+      let neighborRows = [];
+      if (knownRows.length) {
+        neighborRows = rows(await run(readClient,
+          "MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity) MATCH (e)-[r]-(n:Entity) " +
+          "WHERE type(r) <> 'KNOWS' AND NOT elementId(n) IN $knownIds " +
+          "RETURN DISTINCT elementId(n) AS id, n.name AS name, n.type AS type, n.common AS common " +
+          "LIMIT $limit",
+          { user, knownIds: knownRows.map((row) => row.id), limit: neo4j.int(cap) },
+        ));
+      }
+      const allIds = [...ids, ...neighborRows.map((row) => row.id)];
+      let edgeRows = [];
+      if (allIds.length) {
         edgeRows = rows(await run(readClient,
           "MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) IN $ids AND type(r) <> 'KNOWS' " +
           "RETURN elementId(a) AS source, elementId(b) AS target, type(r) AS type, coalesce(r.negative, false) AS negative " +
           "LIMIT 300",
-          { ids },
+          { ids: allIds },
         ));
       }
       return {
-        nodes: nodeRows.map((row) => ({ id: row.id, name: row.name, type: row.type, common: row.common })),
+        nodes: [...nodes, ...neighborRows.map((row) => ({ id: row.id, name: row.name, type: row.type, common: row.common }))],
         edges: edgeRows,
         center: null,
       };
@@ -228,13 +268,21 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
     // relations (see parseExtraction).
     async upsertTurn({ user, entities = [], relations = [] }) {
       const now = new Date().toISOString();
-      // The signed-in user is ONE node: their :User account doubles as the
-      // person entity, so the model's own-person entity (same name, type
-      // person) must not become a second, same-named :Entity — that is what
-      // used to render as "Mila -> Mila -> Lego".
-      const ownEntity = entities.find((entity) => entity.name === user && entity.type === "person");
-      const otherEntities = entities.filter((entity) => entity !== ownEntity);
-      await run(writeClient, "MERGE (u:User {name: $user})", { user });
+      // Every registered user is ONE node: their :User account doubles as the
+      // person entity. So any entity or relation endpoint named after a
+      // registered user resolves to that user's :User node, never to an
+      // :Entity — a person entity carrying another user's name is a proxy for
+      // that user's personal data, and it leaked into the other users' panels
+      // as world knowledge ("Mila -LIKES-> Lego" visible while signed in as
+      // Roman). The own-person case (the old "Mila -> Mila -> Lego" duplicate)
+      // is a special case of this rule.
+      const userNames = new Set(users);
+      userNames.add(user);
+      const isUser = (name) => userNames.has(name);
+      const otherEntities = entities.filter((entity) => !isUser(entity.name));
+      // Referenced users' :User nodes must exist before relations target them.
+      const referencedUsers = new Set(relations.flatMap((relation) => [relation.from, relation.to]).filter(isUser));
+      await run(writeClient, "UNWIND $names AS name MERGE (u:User {name: name})", { names: [...new Set([user, ...referencedUsers])] });
       if (otherEntities.length) {
         await run(writeClient,
           "UNWIND $rows AS row " +
@@ -248,36 +296,34 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
           "MERGE (u)-[:KNOWS]->(e)",
           { rows: otherEntities.map((entity) => ({ name: entity.name, type: entity.type, common: entity.common, props: entity.props || {}, now })), user },
         );
-        // An entity known by two or more users is shared knowledge.
-        await run(writeClient,
-          "MATCH (:User)-[:KNOWS]->(e:Entity) WITH e, count(*) AS knownBy " +
-          "SET e.common = e.common OR knownBy >= 2",
-        );
+        // `common` is only ever the extractor's flag (public knowledge). The
+        // old "known by two or more users" auto-flag is gone: it leaked the
+        // fact that another user mentioned an entity, which per-user isolation
+        // forbids.
       }
-      const upserted = otherEntities.length;
-      // An endpoint named after the signed-in user is their :User node; every
-      // other endpoint is an :Entity. Group relations by which endpoint is the
-      // user so the MERGE targets the right labels (the parser already drops
-      // from === to, so a user->user relation cannot occur).
+    const upserted = otherEntities.length;
+      // Each endpoint is matched by the label it actually is: an endpoint
+      // named after a registered user is that user's :User node, everything
+      // else is an :Entity. Group by (type, from-label, to-label) so the
+      // MERGE targets the right nodes (the parser already drops from === to).
       const buckets = new Map();
       for (const relation of relations) {
         if (!RELATION_TYPES.has(relation.type)) continue;
-        const bucket = relation.from === user ? "userEntity" : relation.to === user ? "entityUser" : "entityEntity";
-        const key = `${relation.type}|${bucket}`;
+        const key = `${relation.type}|${isUser(relation.from) ? "U" : "E"}|${isUser(relation.to) ? "U" : "E"}`;
         const list = buckets.get(key) || [];
         list.push({ from: relation.from, to: relation.to, negative: relation.negative === true });
         buckets.set(key, list);
       }
       let linked = 0;
       for (const [key, list] of buckets) {
-        const [type, bucket] = key.split("|");
-        const fromPattern = bucket === "userEntity" ? "MATCH (a:User {name: $user})" : "MATCH (a:Entity {name: row.from})";
-        const toPattern = bucket === "entityUser" ? "MATCH (b:User {name: $user})" : "MATCH (b:Entity {name: row.to})";
+        const [type, fromLabel, toLabel] = key.split("|");
+        const fromPattern = fromLabel === "U" ? "MATCH (a:User {name: row.from})" : "MATCH (a:Entity {name: row.from})";
+        const toPattern = toLabel === "U" ? "MATCH (b:User {name: row.to})" : "MATCH (b:Entity {name: row.to})";
         // SET (not just ON CREATE): a later "I don't like X" flips an
         // existing edge to negative, and vice versa.
         await run(writeClient,
           `UNWIND $rows AS row ${fromPattern} ${toPattern} MERGE (a)-[r:${type}]->(b) SET r.last_seen = row.now, r.negative = row.negative`,
-          { rows: list.map((relation) => ({ ...relation, now })), user },
+          { rows: list.map((relation) => ({ ...relation, now })) },
         );
         linked += list.length;
       }
@@ -293,7 +339,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
 
 // --- Memory store (tests / GRAPH_MEMORY=1) -----------------------------------
 
-function createMemoryStore() {
+function createMemoryStore(users = []) {
   const nodes = new Map();
   const edges = [];
   let nextId = 1;
@@ -302,7 +348,7 @@ function createMemoryStore() {
     const existing = [...nodes.values()].find((node) => node.name === name && node.type === type);
     if (existing) return existing;
     const now = new Date().toISOString();
-    const node = { id: `mem-${nextId++}`, name, type, common, props, firstSeen: now, lastSeen: now, mentionCount: 0, users: [] };
+    const node = { id: `mem-${nextId++}`, name, type, common, props, firstSeen: now, lastSeen: now, mentionCount: 0 };
     nodes.set(node.id, node);
     return node;
   }
@@ -340,42 +386,95 @@ function createMemoryStore() {
     return { id: node.id, name: node.name, type: node.type, common: node.common };
   }
 
+  // The :User node carries no `type` in the panel API (both stores): the UI
+  // renders type-less nodes as user nodes, with "(you)" for the signed-in one.
+  function publicUserNode(node) {
+    return { id: node.id, name: node.name, common: false };
+  }
+
+  function userNodeOf(user) {
+    return [...nodes.values()].find((node) => node.name === user && node.type === "person" && node.props.role === "user") || null;
+  }
+
   return {
     memory: true,
 
-    async status() {
+    async status({ user } = {}) {
+      const userNode = userNodeOf(user);
+      const known = new Set(userNode ? edges.filter((edge) => edge.source === userNode.id && edge.type === "KNOWS").map((edge) => edge.target) : []);
+      const facts = edges.filter((edge) => edge.type !== "KNOWS");
+      const neighbors = new Set();
+      for (const edge of facts) {
+        if (known.has(edge.source) && !known.has(edge.target) && nodes.get(edge.target)?.props.role !== "user") neighbors.add(edge.target);
+        if (known.has(edge.target) && !known.has(edge.source) && nodes.get(edge.source)?.props.role !== "user") neighbors.add(edge.source);
+      }
+      const factEdges = userNode ? facts.filter((edge) => edge.source === userNode.id).length : 0;
+      // Entity-hop edges only: both endpoints are :Entity, so the user's own
+      // fact edges (which have a :User endpoint) are not double-counted here,
+      // matching the Neo4j store.
+      const entityEdges = facts.filter((edge) => {
+        const s = nodes.get(edge.source), t = nodes.get(edge.target);
+        return s && t && s.props.role !== "user" && t.props.role !== "user"
+          && (known.has(edge.source) || known.has(edge.target));
+      }).length;
       return {
-        nodes: nodes.size,
-        edges: edges.length,
+        nodes: userNode ? 1 + known.size + neighbors.size : 0,
+        edges: factEdges + entityEdges,
         labels: [...new Set([...nodes.values()].map((node) => (node.props.role === "user" ? "User" : "Entity")))],
-        relTypes: [...new Set(edges.map((edge) => edge.type))].sort(),
+        // KNOWS is bookkeeping, not a link the panel should advertise.
+        relTypes: [...new Set(edges.map((edge) => edge.type))].filter((type) => type !== "KNOWS").sort(),
       };
     },
 
-    async subgraph({ limit = 60, center = null } = {}) {
+    // Scoped to the signed-in user's visible world, like the Neo4j store:
+    // their node, what they know, one entity-hop of world knowledge around
+    // it (or a visible centre plus its neighbours). Never another user's
+    // node or edge.
+    async subgraph({ user, limit = 60, center = null } = {}) {
       const cap = Math.min(120, Math.max(1, Number(limit) || 60));
+      const userNode = userNodeOf(user);
+      if (!userNode) return { nodes: [], edges: [], center: null };
       // KNOWS is bookkeeping (provenance for the brain context); the panel
       // only draws real facts, so it is excluded here, not in the UI.
       const facts = edges.filter((edge) => edge.type !== "KNOWS");
+      const known = new Set(edges.filter((edge) => edge.source === userNode.id && edge.type === "KNOWS").map((edge) => edge.target));
+      const visible = (node) => Boolean(node) && (node.id === userNode.id || node.props.role !== "user");
       if (center) {
-        const byId = new Map();
-        const out = [];
         const hub = nodes.get(center);
-        if (!hub) return { nodes: [], edges: [], center };
-        byId.set(hub.id, hub);
+        const hubVisible = visible(hub) && (hub.id === userNode.id ||
+          known.has(hub.id) ||
+          facts.some((edge) =>
+            (edge.source === hub.id && known.has(edge.target)) ||
+            (edge.target === hub.id && known.has(edge.source))));
+        if (!hub || !hubVisible) return { nodes: [], edges: [], center };
+        const byId = new Map([[hub.id, hub]]);
+        const out = [];
         for (const edge of facts) {
-          if (edge.source === center) { byId.set(edge.target, nodes.get(edge.target)); out.push(edge); }
-          else if (edge.target === center) { byId.set(edge.source, nodes.get(edge.source)); out.push(edge); }
+          if (edge.source === center && visible(nodes.get(edge.target))) { byId.set(edge.target, nodes.get(edge.target)); out.push(edge); }
+          else if (edge.target === center && visible(nodes.get(edge.source))) { byId.set(edge.source, nodes.get(edge.source)); out.push(edge); }
         }
-        return { nodes: [...byId.values()].map(publicNode), edges: out.slice(0, 200), center };
+        return {
+          nodes: [...byId.values()].map((node) => (node.id === userNode.id ? publicUserNode(node) : publicNode(node))),
+          edges: out.slice(0, 200),
+          center,
+        };
       }
-      const picked = [...nodes.values()]
-        .filter((node) => node.name)
+      const knownNodes = [...known].map((id) => nodes.get(id)).filter(Boolean)
         .sort((a, b) => String(b.lastSeen).localeCompare(String(a.lastSeen)))
         .slice(0, cap);
-      const ids = new Set(picked.map((node) => node.id));
+      // Entity-hop neighbours: only :Entity nodes. The user node is added
+      // explicitly below (as the type-less user node), and another user's
+      // node is never a panel neighbour (per-user isolation).
+      const isEntity = (node) => Boolean(node) && node.props.role !== "user";
+      const neighborIds = new Set();
+      for (const edge of facts) {
+        if (knownNodes.some((node) => node.id === edge.source) && !known.has(edge.target) && isEntity(nodes.get(edge.target))) neighborIds.add(edge.target);
+        if (knownNodes.some((node) => node.id === edge.target) && !known.has(edge.source) && isEntity(nodes.get(edge.source))) neighborIds.add(edge.source);
+      }
+      const picked = [...knownNodes, ...[...neighborIds].map((id) => nodes.get(id)).filter(Boolean).slice(0, cap)];
+      const ids = new Set([userNode.id, ...picked.map((node) => node.id)]);
       return {
-        nodes: picked.map(publicNode),
+        nodes: [publicUserNode(userNode), ...picked.map(publicNode)],
         edges: facts.filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
         center: null,
       };
@@ -405,29 +504,37 @@ function createMemoryStore() {
       };
     },
 
-    async upsertTurn({ user, entities = [], relations = [] }) {
-      const userNode = [...nodes.values()].find((node) => node.name === user && node.type === "person" && node.props.role === "user") || addUser(user);
-      // The signed-in user's own person is the user node itself: skip it so
-      // there is no duplicate node and no self-KNOWS edge (same rule as the
-      // Neo4j store).
+   async upsertTurn({ user, entities = [], relations = [] }) {
+      // Same one-node-per-user rule as the Neo4j store: an entity or relation
+      // endpoint named after a registered user is that user's node, never an
+      // entity (a person entity with a user's name is a proxy for that
+      // user's personal data).
+      const userNames = new Set(users);
+      userNames.add(user);
+      const isUser = (name) => userNames.has(name);
+      const userNode = [...nodes.values()].find((node) => node.name === user && node.props.role === "user") || addUser(user);
       let upserted = 0;
       for (const entity of entities) {
-        if (entity.name === user && entity.type === "person") continue;
+        if (isUser(entity.name)) continue;
         const node = addNode({ name: entity.name, type: entity.type, common: entity.common, props: entity.props || {} });
         node.mentionCount += 1;
         node.lastSeen = new Date().toISOString();
+        // `common` is only the extractor's flag: the old "known by two or more
+        // users" auto-flag leaked other users' mentions (see the Neo4j store).
         if (entity.common) node.common = true;
-        if (!node.users.includes(user)) node.users.push(user);
-        if (node.users.length >= 2) node.common = true;
         addEdge(userNode.id, node.id, "KNOWS");
         upserted += 1;
       }
       let linked = 0;
       for (const relation of relations) {
-        // An endpoint named after the signed-in user is the user node.
-        const from = relation.from === user ? userNode : [...nodes.values()].find((node) => node.name === relation.from);
-        const to = relation.to === user ? userNode : [...nodes.values()].find((node) => node.name === relation.to);
-        if (from && to && from !== to && RELATION_TYPES.has(relation.type)) {
+        if (!RELATION_TYPES.has(relation.type)) continue;
+        const resolve = (name) => {
+          if (isUser(name)) return [...nodes.values()].find((node) => node.name === name && node.props.role === "user") || addUser(name);
+          return [...nodes.values()].find((node) => node.name === name && node.props.role !== "user");
+        };
+        const from = resolve(relation.from);
+        const to = resolve(relation.to);
+        if (from && to && from !== to) {
           addEdge(from.id, to.id, relation.type, relation.negative === true);
           linked += 1;
         }
