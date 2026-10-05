@@ -274,6 +274,10 @@ const server = http.createServer(async (req, res) => {
         ttsVoice: config.ttsVoice,
         mcpServers: mcpServers.map(({ id, label }) => ({ id, label })),
         graphConfigured: isGraphConfigured(),
+        // Lets the panel offer the Remove button on any entity in the admin's
+        // global view (a regular user may only remove their own — which is
+        // exactly the owner of every entity in their view anyway).
+        admin: isAdmin(req.user),
       });
     }
 
@@ -298,6 +302,25 @@ const server = http.createServer(async (req, res) => {
       const center = String(url.searchParams.get("center") || "").slice(0, 128) || null;
       try {
         return json(res, 200, { requestId, ...(await graphStore.subgraph({ user: req.user, limit: Number(url.searchParams.get("limit")) || 60, center, admin: isAdmin(req.user) })) });
+      } catch (error) {
+        return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
+      }
+    }
+
+    // The one explicit delete path: the signed-in user removes one of their
+    // OWN entities (the store pins the query to owner = session user, so a
+    // foreign id 404s exactly like a nonexistent one). The admin session may
+    // delete any entity. The brain's MCP server has no write or delete tool
+    // at all — this endpoint is only reachable as a deliberate UI action.
+    if (req.method === "DELETE" && pathname === "/api/graph/entity") {
+      if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
+      const id = String(url.searchParams.get("id") || "").slice(0, 128);
+      if (!id) return json(res, 400, { error: "missing_id", requestId });
+      try {
+        const result = await graphStore.removeEntity({ user: req.user, id, admin: isAdmin(req.user) });
+        if (!result.deleted) return json(res, 404, { error: "entity_not_found", requestId });
+        recordGraphActivity({ kind: "delete", user: req.user, name: result.name });
+        return json(res, 200, { requestId, ...result });
       } catch (error) {
         return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
       }

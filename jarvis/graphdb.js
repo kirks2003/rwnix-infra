@@ -405,6 +405,25 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       return { upserted, relations: linked };
     },
 
+    // The one explicit delete path in the app: a user removes one of their
+    // OWN entities (the query is pinned to owner = the session user, so a
+    // foreign id matches nothing and comes back exactly like a nonexistent
+    // one — no enumeration, no cross-user write). The admin may delete any
+    // :Entity. Only reachable from the panel's DELETE endpoint; the brain's
+    // MCP server has no write or delete tool at all. :User account nodes are
+    // not matchable here (the label is :Entity only).
+    async removeEntity({ user, id, admin = false } = {}) {
+      const cypher = (admin
+        ? "MATCH (e:Entity) WHERE elementId(e) = $id "
+        : "MATCH (e:Entity) WHERE elementId(e) = $id AND e.owner = $user ") +
+        "WITH e.name AS name, e " +
+        "DETACH DELETE e " +
+        "RETURN name, 1 AS deleted";
+      const resultRows = rows(await run(writeClient, cypher, admin ? { id } : { id, user }));
+      const row = resultRows[0];
+      return { deleted: row ? 1 : 0, name: row ? row.name : null };
+    },
+
     async close() {
       await readClient.close().catch(() => {});
       await writeClient.close().catch(() => {});
@@ -686,6 +705,21 @@ function createMemoryStore(users = []) {
         }
       }
       return { upserted, relations: linked };
+    },
+
+    // Mirrors the Neo4j store's explicit delete path: the id must be an
+    // entity owned by the signed-in user (admin: any entity). :User account
+    // nodes are never deletable; a foreign entity id is indistinguishable
+    // from a nonexistent one.
+    async removeEntity({ user, id, admin = false } = {}) {
+      const node = nodes.get(id);
+      if (!node || node.props.role === "user") return { deleted: 0, name: null };
+      if (!admin && node.owner !== user) return { deleted: 0, name: null };
+      nodes.delete(id);
+      for (let i = edges.length - 1; i >= 0; i -= 1) {
+        if (edges[i].source === id || edges[i].target === id) edges.splice(i, 1);
+      }
+      return { deleted: 1, name: node.name };
     },
 
     async close() {},

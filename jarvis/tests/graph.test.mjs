@@ -291,6 +291,33 @@ test("memory store: the admin sees the whole graph (every user's nodes, owners a
   assert.ok(centered.nodes.some((node) => node.name === "Kokoro-82M"), "admin centre reaches any neighbour");
 });
 
+test("memory store: removeEntity deletes only the caller's own entity, with its edges", async () => {
+  const store = graphdb.createMemoryStore(["Mila", "Roman"]);
+  const milaSub = await store.subgraph({ user: "Mila" });
+  const rocky = milaSub.nodes.find((node) => node.name === "Rocky");
+  const milaNode = milaSub.nodes.find((node) => node.name === "Mila");
+  const romanSub = await store.subgraph({ user: "Roman" });
+  const coffee = romanSub.nodes.find((node) => node.name === "Coffee");
+  // A foreign entity id is indistinguishable from a nonexistent one: no
+  // cross-user write, no enumeration.
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: coffee.id }), { deleted: 0, name: null });
+  assert.ok((await store.subgraph({ user: "Roman" })).nodes.some((node) => node.id === coffee.id), "Roman's Coffee survived Mila's attempt");
+  // A :User account node is never deletable, not even by its own user.
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: milaNode.id }), { deleted: 0, name: null });
+  // The caller's own entity is gone, together with its edges (Rocky -USES-> Kokoro).
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: rocky.id }), { deleted: 1, name: "Rocky" });
+  const after = await store.subgraph({ user: "Mila" });
+  assert.ok(!after.nodes.some((node) => node.id === rocky.id), "Rocky is gone from Mila's view");
+  assert.equal(after.edges.length, 0, "the USES edge is deleted with its node");
+  assert.equal(after.nodes.find((node) => node.name === "Kokoro-82M").isolated, true, "Kokoro is isolated now that Rocky is gone");
+  // The admin may delete any entity, whoever owns it.
+  assert.deepEqual(await store.removeEntity({ user: "admin", id: coffee.id, admin: true }), { deleted: 1, name: "Coffee" });
+  const adminAfter = await store.subgraph({ user: "admin", admin: true });
+  assert.ok(!adminAfter.nodes.some((node) => node.id === coffee.id), "Coffee is gone from the global view");
+  // Deleting again is a clean no-op.
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: rocky.id }), { deleted: 0, name: null });
+});
+
 // --- neo4j store (mock driver) --------------------------------------------------
 
 test("neo4j store: subgraph LIMIT is an integer parameter (the JS driver sends plain numbers as floats and Neo4j rejects them)", async () => {
@@ -327,6 +354,54 @@ test("neo4j store: subgraph LIMIT is an integer parameter (the JS driver sends p
   assert.ok(limitCall, "expected the LIMIT $limit query");
   assert.equal(limitCall.params.limit.toNumber(), 20);
   assert.ok(neo4j.isInt(limitCall.params.limit), "limit must be a neo4j.int, not a float");
+});
+
+test("neo4j store: removeEntity pins the owner-scoped DETACH DELETE (admin: no owner pin)", async () => {
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
+        async run(cypher, params) { calls.push({ cypher, params }); return { records: [{ toObject: () => ({ name: "Lego", deleted: 1 }) }] }; },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+  });
+  const userResult = await store.removeEntity({ user: "Mila", id: "4:abc" });
+  assert.deepEqual(userResult, { deleted: 1, name: "Lego" });
+  const userCall = calls[0];
+  // The delete matches :Entity ONLY (a :User id can never match) and is
+  // pinned to owner = the session user, so a foreign id matches nothing.
+  assert.ok(userCall.cypher.includes("MATCH (e:Entity) WHERE elementId(e) = $id AND e.owner = $user"), userCall.cypher);
+  assert.ok(userCall.cypher.includes("DETACH DELETE e"), "the node's edges go with the node");
+  assert.equal(userCall.params.user, "Mila");
+  assert.equal(userCall.params.id, "4:abc");
+  // The admin variant drops the owner pin — the backend sets admin: true for
+  // admin sessions only, never from client input.
+  await store.removeEntity({ user: "admin", id: "4:abc", admin: true });
+  const adminCall = calls[1];
+  assert.ok(adminCall.cypher.includes("MATCH (e:Entity) WHERE elementId(e) = $id"), adminCall.cypher);
+  assert.doesNotMatch(adminCall.cypher, /owner/, "no owner pinning in the admin delete");
+  assert.deepEqual(adminCall.params, { id: "4:abc" });
+  // A no-match result comes back as deleted: 0 (the endpoint maps that to 404).
+  const empty = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: () => ({ session: () => ({ run: async () => ({ records: [] }), close: async () => {} }) }),
+  });
+  assert.deepEqual(await empty.removeEntity({ user: "Mila", id: "4:xyz" }), { deleted: 0, name: null });
 });
 
 test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", async () => {
@@ -719,6 +794,8 @@ test("graph endpoints report not configured when the NEO4J_* variables are empty
   const status = await auth(origin, "/api/graph/status", cookie);
   assert.equal(status.status, 503);
   assert.equal((await status.json()).error, "graph_not_configured");
+  const del = await fetch(`${origin}/api/graph/entity?id=mem-1`, { method: "DELETE", headers: { cookie } });
+  assert.equal(del.status, 503, "the delete path is unconfigured too");
   const config = await (await auth(origin, "/api/config", cookie)).json();
   assert.equal(config.graphConfigured, false);
   assert.ok(config.mcpServers.some((server) => server.id === "graph" && server.label === "Knowledge graph"));
@@ -909,4 +986,68 @@ test("admin session: global panel, cross-owner brain tools, full activity feed",
   // ...while Mila's own feed does not include the admin's brain read.
   const milaActivity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
   assert.ok(!milaActivity.entries.some((entry) => entry.user === "admin"), JSON.stringify(milaActivity.entries));
+});
+
+test("the panel's explicit delete removes only the caller's own entity", async () => {
+  const origin = origins[1];
+  const deleteEntity = (id, cookie) =>
+    fetch(`${origin}/api/graph/entity?id=${encodeURIComponent(id)}`, { method: "DELETE", headers: { cookie } });
+
+  const romanCookie = await login(origin, "Roman");
+  const romanSub = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
+  const coffee = romanSub.nodes.find((node) => node.name === "Coffee");
+  const romanNode = romanSub.nodes.find((node) => node.name === "Roman");
+
+  // Missing id: 400.
+  let res = await fetch(`${origin}/api/graph/entity`, { method: "DELETE", headers: { cookie: romanCookie } });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "missing_id");
+
+  // The caller's own entity: 200, and gone from their view.
+  res = await deleteEntity(coffee.id, romanCookie);
+  assert.equal(res.status, 200);
+  let body = await res.json();
+  assert.equal(body.deleted, 1);
+  assert.equal(body.name, "Coffee");
+  const romanAfter = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
+  assert.ok(!romanAfter.nodes.some((node) => node.id === coffee.id), "Coffee is gone from Roman's view");
+
+  // A foreign entity: 404 for the caller, still there for its owner.
+  const milaCookie = await login(origin, "Mila");
+  const milaSub = await (await auth(origin, "/api/graph/subgraph?limit=60", milaCookie)).json();
+  const berlin = milaSub.nodes.find((node) => node.name === "Berlin");
+  res = await deleteEntity(berlin.id, romanCookie);
+  assert.equal(res.status, 404, "Roman cannot delete Mila's entity");
+  assert.equal((await res.json()).error, "entity_not_found");
+  const milaAfter = await (await auth(origin, "/api/graph/subgraph?limit=60", milaCookie)).json();
+  assert.ok(milaAfter.nodes.some((node) => node.id === berlin.id), "Mila's Berlin survived Roman's attempt");
+
+  // A :User account node is not deletable, not even by its own user.
+  res = await deleteEntity(romanNode.id, romanCookie);
+  assert.equal(res.status, 404);
+  assert.ok((await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json()).nodes.some((node) => node.id === romanNode.id));
+
+  // The admin may delete any entity, whoever owns it.
+  const adminCookie = await login(origin, "admin");
+  res = await deleteEntity(berlin.id, adminCookie);
+  assert.equal(res.status, 200);
+  body = await res.json();
+  assert.equal(body.name, "Berlin");
+  const adminAfter = await (await auth(origin, "/api/graph/subgraph?limit=60", adminCookie)).json();
+  assert.ok(!adminAfter.nodes.some((node) => node.id === berlin.id), "Berlin is gone from the admin's global view");
+  const milaFinal = await (await auth(origin, "/api/graph/subgraph?limit=60", milaCookie)).json();
+  assert.ok(!milaFinal.nodes.some((node) => node.id === berlin.id), "…and from Mila's view");
+
+  // The deletion is audited in the activity feed (the admin's global feed
+  // records who removed what; the user's own feed includes their own removal).
+  const adminActivity = await (await auth(origin, "/api/graph/activity", adminCookie)).json();
+  assert.ok(adminActivity.entries.some((entry) => entry.kind === "delete" && entry.user === "admin" && entry.name === "Berlin"), JSON.stringify(adminActivity.entries));
+  const romanActivity = await (await auth(origin, "/api/graph/activity", romanCookie)).json();
+  assert.ok(romanActivity.entries.some((entry) => entry.kind === "delete" && entry.user === "Roman" && entry.name === "Coffee"), JSON.stringify(romanActivity.entries));
+
+  // /api/config exposes the admin flag the panel needs for its button.
+  const adminConfig = await (await auth(origin, "/api/config", adminCookie)).json();
+  assert.equal(adminConfig.admin, true);
+  const romanConfig = await (await auth(origin, "/api/config", romanCookie)).json();
+  assert.equal(romanConfig.admin, false);
 });

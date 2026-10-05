@@ -16,7 +16,7 @@ const el = Object.fromEntries([
   "languageSwitch", "languageStatus",
   "mcpSwitches",
   "speakSwitch", "speakStatus",
-  "graphStatus", "graphRefreshButton", "graphCanvas", "graph3dStage",
+  "graphStatus", "graphRefreshButton", "graphRemoveButton", "graphCanvas", "graph3dStage",
   "graphView2dButton", "graphView3dButton", "graphSchema", "graphActivity",
   "panelsToggle", "panelsBelow",
   "loginPanel", "loginForm", "loginUsername", "loginPassword", "loginButton", "loginStatus",
@@ -350,6 +350,7 @@ async function loadGraph(center) {
     el.graph3dStage.hidden = true;
     el.graphSchema.textContent = "The backend has no NEO4J_* settings, so the panel is idle.";
     el.graphActivity.replaceChildren();
+    el.graphRemoveButton.toggleAttribute("hidden", true);
     return;
   }
   try {
@@ -361,10 +362,12 @@ async function loadGraph(center) {
     ]);
     if (status.error) {
       el.graphStatus.textContent = status.error === "graph_unavailable" ? `Unreachable: ${status.message || "database down"}` : "Not available";
+      el.graphRemoveButton.toggleAttribute("hidden", true);
       return;
     }
     el.graphStatus.textContent = `${status.nodes} nodes · ${status.edges} links${graphCenter ? " · neighbourhood" : ""}`;
     lastSubgraph = subgraph;
+    updateRemoveButton(subgraph);
     if (graphView === "3d" && graph3d) graph3d.update(subgraph);
     else renderGraph(subgraph);
     el.graphSchema.textContent = [
@@ -378,7 +381,9 @@ async function loadGraph(center) {
         const when = new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         item.textContent = entry.kind === "ingest"
           ? `${when} · stored ${entry.entities} entit${entry.entities === 1 ? "y" : "ies"}${entry.relations ? ` + ${entry.relations} link${entry.relations === 1 ? "" : "s"}` : ""}`
-          : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.detail ? `: ${entry.detail}` : entry.error ? `: ${entry.error}` : ""}`;
+          : entry.kind === "delete"
+            ? `${when} · removed ${entry.name || "entity"}`
+            : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.detail ? `: ${entry.detail}` : entry.error ? `: ${entry.error}` : ""}`;
         return item;
       }));
     } else {
@@ -390,6 +395,49 @@ async function loadGraph(center) {
     el.graphStatus.textContent = `Unreachable: ${error.message}`;
   }
 }
+
+// The Remove button acts on the centred node. A typed node is an entity
+// (type-less nodes are :User accounts, never deletable); a regular user may
+// only remove entities they own — which is every entity in their view — while
+// the admin (global view) may remove any entity, owner included.
+function updateRemoveButton(subgraph) {
+  const node = (subgraph.nodes || []).find((candidate) => candidate.id === graphCenter);
+  const deletable = Boolean(node && node.type) && (config?.admin === true || node.owner === config?.user);
+  el.graphRemoveButton.toggleAttribute("hidden", !deletable);
+  if (deletable) {
+    const owner = config?.admin === true && node.owner !== config?.user ? ` owned by ${node.owner}` : "";
+    el.graphRemoveButton.textContent = `Remove ${node.name}`;
+    el.graphRemoveButton.title = `Delete "${node.name}"${owner} and its links from the knowledge graph. Cannot be undone.`;
+  }
+}
+
+el.graphRemoveButton.addEventListener("click", async () => {
+  const node = (lastSubgraph?.nodes || []).find((candidate) => candidate.id === graphCenter);
+  if (!node) return;
+  const owner = config?.admin === true && node.owner !== config?.user ? ` owned by ${node.owner}` : "";
+  const sure = window.confirm(`Remove "${node.name}"${owner} from the knowledge graph?\nThis deletes the entity and its links and cannot be undone.`);
+  if (!sure) return;
+  let response;
+  try {
+    response = await fetch(`/api/graph/entity?id=${encodeURIComponent(node.id)}`, { method: "DELETE", cache: "no-store" });
+  } catch (error) {
+    log("graph", `Could not remove ${node.name}`, { message: error.message });
+    return;
+  }
+  const data = await response.json().catch(() => ({}));
+  if (response.ok) {
+    log("graph", `Removed ${node.name} from the knowledge graph.`);
+    graphCenter = null;
+    await loadGraph();
+  } else if (response.status === 404) {
+    // Gone already (or not ours): just show the current world again.
+    log("graph", `"${node.name}" is no longer in the knowledge graph.`);
+    graphCenter = null;
+    await loadGraph();
+  } else {
+    log("graph", `Could not remove ${node.name}`, { message: data.message || data.error || `HTTP ${response.status}` });
+  }
+});
 
 // Small force-directed layout in plain JS (no dependencies): repulsion, link
 // springs and centering, then static SVG. Bounded to keep it cheap.
