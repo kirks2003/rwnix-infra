@@ -341,6 +341,19 @@ function setGraphView(view) {
   }
 }
 
+// The activity entry counts what the write actually stored, not what the
+// extractor emitted: a mention of a registered user is their account node,
+// not an entity, so the feed must say so instead of "stored N entities".
+function ingestLine(entry) {
+  const entities = entry.entities || 0;
+  const links = entry.relations || 0;
+  const skipped = entry.skippedUsers || 0;
+  if (entities > 0) return `stored ${entities} entit${entities === 1 ? "y" : "ies"}${links ? ` + ${links} link${links === 1 ? "" : "s"}` : ""}`;
+  if (skipped > 0) return `${skipped} user-account mention${skipped === 1 ? "" : "s"} — nothing stored as an entity`;
+  if (links > 0) return `updated ${links} link${links === 1 ? "" : "s"}`;
+  return "no new graph data";
+}
+
 async function loadGraph(center) {
   if (center !== undefined) graphCenter = center;
   if (!config) return;
@@ -380,7 +393,7 @@ async function loadGraph(center) {
         const item = document.createElement("li");
         const when = new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         item.textContent = entry.kind === "ingest"
-          ? `${when} · stored ${entry.entities} entit${entry.entities === 1 ? "y" : "ies"}${entry.relations ? ` + ${entry.relations} link${entry.relations === 1 ? "" : "s"}` : ""}`
+          ? `${when} · ${ingestLine(entry)}`
           : entry.kind === "delete"
             ? `${when} · removed ${entry.name || "entity"}`
             : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.detail ? `: ${entry.detail}` : entry.error ? `: ${entry.error}` : ""}`;

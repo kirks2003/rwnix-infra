@@ -1094,9 +1094,13 @@ async function ingestTurn({ user, prompt, searchResults, answer, requestId }) {
       console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_empty", ms: Date.now() - started, raw: text.slice(0, 300) }));
       return;
     }
-    await graphStore.upsertTurn({ user, ...extraction });
-    recordGraphActivity({ kind: "ingest", user, entities: extraction.entities.length, relations: extraction.relations.length });
-    console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_success", ms: Date.now() - started, entities: extraction.entities.length, relations: extraction.relations.length }));
+    const { upserted, relations: linked } = await graphStore.upsertTurn({ user, ...extraction });
+    // Report what was actually written, not what the extractor emitted: an
+    // entity named after a registered user is stored as that user's account
+    // node, never as an :Entity, so "extracted" can exceed "stored".
+    const skippedUsers = extraction.entities.length - upserted;
+    recordGraphActivity({ kind: "ingest", user, entities: upserted, relations: linked, skippedUsers });
+    console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_success", ms: Date.now() - started, extracted: extraction.entities.length, stored: upserted, extractedRelations: extraction.relations.length, linked, skippedUsers }));
   } catch (error) {
     console.log(JSON.stringify({ level: "warn", requestId, msg: "graph_ingest_failure", ms: Date.now() - started, error: error.message }));
   }
