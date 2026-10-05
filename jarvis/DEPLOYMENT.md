@@ -1279,3 +1279,45 @@ like Lego anymore." flipped the live edge (`negative: true` via
 `/api/graph/subgraph`, panel label "doesn't like" in the 2D view), and
 "Actually I do like Lego, I was joking." flipped it back — the graph is in its
 previous state.
+
+## Brain graph-query fix: user facts live on the :User node (2026-10-05, PR #32)
+
+User report (signed in as Roman, graph panel showing "Mila likes Lego"):
+"what does Mila like?" → the brain answered it had no information about Mila's
+preferences. The panel's recent-activity log showed the brain's three tool
+calls: `get-schema`, `MATCH (u:User) WHERE u.name CONTAINS 'Mila' RETURN u`,
+`MATCH (e:Entity) WHERE e.name CONTAINS 'Mila' RETURN e` — it confirmed the
+`:User` node exists but **never queried its outgoing relations** (where the
+`LIKES` edge lives), and the third round was the last one allowed.
+
+Root causes (both backend, no data problem):
+1. The brain's system prompt said it "can call get-schema and read-cypher for
+   anything deeper" but never described the data model, so the brain had no
+   reason to look past `RETURN <node>` — and after the single-user-node fix,
+   "Mila" is a `:User`, so the `:Entity` lookup came back empty.
+2. `GRAPH_TOOL_ROUNDS = 3` was spent on the exploratory queries, leaving no
+   round for the actual relation query.
+
+Fix:
+1. The graph-on state line in the brain's system prompt now carries a short
+   data-model cheat-sheet: `:User` nodes are the signed-in accounts (one per
+   user), `:Entity` is everything else, and a user's stored facts are the
+   *outgoing relations* of their `:User` node — with the example query
+   `MATCH (u:User {name: 'X'})-[r]->(t) RETURN type(r), t.name` for exactly
+   the "what does X like?" question.
+2. `GRAPH_TOOL_ROUNDS` raised 3 → 5 (schema call plus a few follow-up queries
+   is the common pattern; the 50 s request deadline still bounds the total).
+
+Tests: the mock brain gained a "Loop the tools" mode that requests a tool on
+every round; a new test asserts the server executes exactly five tool rounds,
+delivers five tool results to the brain, and forces the final answer with the
+"Tool budget reached" message. The configured-tool-loop test now also pins the
+cheat-sheet in the system prompt. Unit 82/82, browser 37 pass + 2 opt-in
+skips.
+
+Deployed (backup `jarvis-code.bak-20261005_110205.tgz`; `server.js` +
+`tests/graph.test.mjs` synced, md5-verified) and verified live: the same
+question as Roman now gets `get-schema` followed by
+`MATCH (u:User {name: 'Mila'})-[r:LIKES]->(e:Entity) RETURN e.name,
+r.negative, r.last_seen`, and the answer is "Mila likes Lego. That's the only
+thing stored in the knowledge graph about her preferences."
