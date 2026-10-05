@@ -341,9 +341,13 @@ before(async () => {
     }
     const lastUser = [...(body.messages || [])].reverse().find((message) => message.role === "user");
     const wantsDelete = String(lastUser?.content || "").includes("Delete everything");
+    // "Loop the tools" makes the mock brain request tools on every round, so
+    // the server-side round budget is exercised; like a real brain, it stops
+    // looping once told the budget is reached.
+    const loopTools = String(lastUser?.content || "").includes("Loop the tools") && !systemText.includes("Tool budget reached");
     const cypher = wantsDelete ? "MATCH (e:Entity) DETACH DELETE e" : "MATCH (e:Entity) RETURN e.name AS name LIMIT 5";
     const hasToolResult = (body.messages || []).some((message) => message.role === "tool");
-    if (body.tools && !hasToolResult) {
+    if (body.tools && (!hasToolResult || loopTools)) {
       toolRequests.push(body);
       return res.end(JSON.stringify({
         choices: [{
@@ -497,6 +501,10 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   const systemText = toolRequests[0].messages.map((message) => String(message.content || "")).join("\n");
   assert.match(systemText, /Knowledge graph context/);
   assert.match(systemText, /Known to this user so far:.*Rocky/);
+  // The brain is told where user facts live (relations on the :User node) so
+  // "what does X like?" queries the relations instead of just the node.
+  assert.match(systemText, /outgoing relations of their :User node/);
+  assert.match(systemText, /MATCH \(u:User \{name: 'X'\}\)-\[r\]->\(t\) RETURN type\(r\), t\.name/);
   // The tool result came back through the MCP server and was fed to the brain.
   assert.ok(finalRequests.length >= 1);
   const toolMessage = finalRequests[0].messages.find((message) => message.role === "tool");
@@ -520,6 +528,30 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   assert.ok(amelie, "the extracted entity should be in the graph");
   assert.equal(amelie.type, "person");
   assert.ok(subgraph.edges.some((edge) => edge.type === "FRIEND_OF"));
+});
+
+test("the graph tool budget leaves room for schema plus follow-up queries (five rounds)", async () => {
+  const origin = origins[1];
+  const cookie = await login(origin);
+  finalRequests = [];
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ prompt: "Loop the tools", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.answer, "I checked the graph.", "the budget forces a final answer");
+  // The mock brain requested a tool on every round; the server must execute
+  // exactly five tool rounds and then force the final answer. Three rounds
+  // was not enough for the live "what does Mila like?" case (schema + user
+  // lookup + relation query).
+  const lastRequest = finalRequests[finalRequests.length - 1];
+  const toolResults = lastRequest.messages.filter((message) => message.role === "tool");
+  assert.equal(toolResults.length, 5, `tool results delivered to the brain: ${toolResults.length}`);
+  assert.match(
+    lastRequest.messages.map((message) => String(message.content || "")).join("\n"),
+    /Tool budget reached/,
+  );
 });
 
 test("a write Cypher through the read-only tool surface is rejected and reported", async () => {

@@ -796,7 +796,7 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
         const graphText = graphdb.formatGraphContext(context);
         if (graphText) graphMessage = { role: "system", content: graphText };
         mcpStates.push(graphText
-          ? "The knowledge graph (MCP graph server) is ON: what this user and the shared knowledge know is in a separate message, and you can call the get-schema and read-cypher tools to inspect or query the graph read-only for anything deeper. If the user asks what you remember or know about them, answer from the graph context and the conversation history."
+          ? "The knowledge graph (MCP graph server) is ON: what this user and the shared knowledge know is in a separate message, and you can call the get-schema and read-cypher tools to inspect or query the graph read-only for anything deeper. If the user asks what you remember or know about them, answer from the graph context and the conversation history. Graph model: :User nodes are the signed-in accounts (one per user, e.g. Mila, Roman) and :Entity nodes are everything else (people, places, things). A user's stored facts are the outgoing relations of their :User node — LIKES, OWNS, LIVES_IN, WORKS_AT, FRIEND_OF, FAMILY_OF and friends (the full list is in get-schema) — so to answer \"what does X like?\" or \"what do you know about X?\", query those relations, e.g. MATCH (u:User {name: 'X'})-[r]->(t) RETURN type(r), t.name, instead of just RETURNing the node."
           : "The knowledge graph (MCP graph server) is ON but holds nothing relevant yet; you can still inspect it with the get-schema and read-cypher tools. New facts are stored automatically after every answer.");
       } catch (error) {
         if (signal.aborted) throw error;
@@ -851,7 +851,10 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
 // Names match the neo4j-mcp server's tools 1:1; the server runs read-only
 // (NEO4J_MCP_READ_ONLY forced in mcpGraph) and read-cypher enforces read-only
 // via Neo4j's query classification.
-const GRAPH_TOOL_ROUNDS = 3;
+// Five rounds: a schema call plus a few follow-up queries is the common
+// pattern (live case: "what does Mila like?" needed schema + user lookup +
+// relation query, and three rounds left no room for the last one).
+const GRAPH_TOOL_ROUNDS = 5;
 const GRAPH_TOOL_TIMEOUT_MS = 15000;
 const graphTools = [
   {
