@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { QUERIES, formatEntity, formatEntityAll, formatKnowledge, formatKnowledgeAll, formatFacts, formatFactsAll } from "../mcp/graph.mjs";
+import { QUERIES, TOOLS, formatEntity, formatEntityAll, formatKnowledge, formatKnowledgeAll, formatFacts, formatFactsAll } from "../mcp/graph.mjs";
 
 // The MCP graph server is the brain's only window into the database. These
 // pins keep every query bounded by the signed-in user (owner = them): a
@@ -29,6 +29,17 @@ test("get-entity is owner-scoped: a foreign entity name is indistinguishable fro
 test("no query uses the nonexistent direction() Cypher function", () => {
   for (const [name, cypher] of Object.entries(QUERIES)) {
     assert.doesNotMatch(cypher, /direction\(/, `${name} must not call direction()`);
+  }
+});
+
+test("the MCP tool surface is read-only: no write or delete tool exists", () => {
+  const names = TOOLS.map((tool) => tool.name);
+  assert.deepEqual(
+    [...names].sort(),
+    ["get-entity", "get-schema", "list-my-facts", "list-my-knowledge"],
+  );
+  for (const name of names) {
+    assert.doesNotMatch(name, /write|delete|remove|create|update|cypher/i, `read-only surface: ${name}`);
   }
 });
 

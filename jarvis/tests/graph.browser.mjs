@@ -149,6 +149,83 @@ test("clicking a node re-centres the panel on its neighbourhood", async (t) => {
   assert.ok(centerSeen, "the centred request should carry the node id");
 });
 
+test("the Remove button deletes the centred entity and refreshes the panel", async (t) => {
+  const page = await openPanel(t);
+  // A live copy of the fixture the mocked DELETE endpoint mutates, so the
+  // panel reload after the removal shows the node actually gone.
+  let fixture = structuredClone(GRAPH_FIXTURE);
+  let centerSeen = null;
+  const deleted = [];
+  await page.route("**/api/graph/subgraph*", (route) => {
+    centerSeen = new URL(route.request().url()).searchParams.get("center");
+    return route.fulfill({ json: fixture });
+  });
+  // The mock returns the FULL fixture for every subgraph request, so the
+  // rendered DOM is identical for any centre (and the status string too) —
+  // the only render signal is renderGraph's svg.replaceChildren(). Count
+  // exactly those mutations (the SVG element itself persists). Installed
+  // after the first 2D render, before any centring click.
+  await page.evaluate(() => {
+    const svg = document.getElementById("graphCanvas");
+    new MutationObserver(() => { window.__graphRenders = (window.__graphRenders || 0) + 1; }).observe(svg, { childList: true });
+  });
+  // Wait until the panel has requested the given centre AND re-rendered after
+  // the click: the route records the centre at interception time (before the
+  // page processes the response), so a fresh DOM render after that is what
+  // guarantees the status and the Remove button are current.
+  const waitCenter = async (id) => {
+    const started = Date.now();
+    const baseline = await page.evaluate(() => window.__graphRenders || 0);
+    for (;;) {
+      const renders = await page.evaluate(() => window.__graphRenders || 0);
+      const statusText = await page.locator("#graphStatus").textContent();
+      const settled = id === null
+        ? !statusText.includes("neighbourhood") && renders > baseline
+        : centerSeen === id && statusText.includes("neighbourhood") && renders > baseline;
+      if (settled) return;
+      if (Date.now() - started > 5000) throw new Error(`timed out waiting for centre ${id}, saw ${centerSeen} / ${statusText} / renders ${renders}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  await page.route("**/api/graph/entity*", (route) => {
+    if (route.request().method() !== "DELETE") return route.fulfill({ status: 405, json: { error: "method_not_allowed" } });
+    const id = new URL(route.request().url()).searchParams.get("id");
+    const node = fixture.nodes.find((candidate) => candidate.id === id);
+    if (!node || !node.type) return route.fulfill({ status: 404, json: { error: "entity_not_found" } });
+    fixture = {
+      nodes: fixture.nodes.filter((candidate) => candidate.id !== id),
+      edges: fixture.edges.filter((edge) => edge.source !== id && edge.target !== id),
+    };
+    deleted.push(node.name);
+    return route.fulfill({ json: { requestId: "r", deleted: 1, name: node.name } });
+  });
+  await page.click("#graphView2dButton"); // the 3D view is the default
+  await page.waitForSelector("#graphCanvas circle");
+  const button = page.locator("#graphRemoveButton");
+  assert.equal(await button.isVisible(), false, "no centred node, no Remove button");
+  // Fixture order: Mila, Rocky, Berlin, Amelie, Lego, Vienna.
+  const circles = page.locator("#graphCanvas circle");
+  assert.equal(await circles.count(), 6);
+  // A :User account node is never deletable.
+  await circles.first().click();
+  await waitCenter("n0");
+  assert.equal(await button.isVisible(), false, "no Remove button for the :User node");
+  // Centre on the isolated mention: the button names it.
+  await circles.nth(5).click();
+  await waitCenter("n6"); // the fixture's ids skip n5; Vienna is n6
+  assert.equal(await button.isVisible(), true, "the Remove button appears for a centred entity");
+  assert.match(await button.textContent(), /Remove Vienna/);
+  await page.once("dialog", (dialog) => dialog.accept());
+  await button.click();
+  assert.deepEqual(deleted, ["Vienna"], "the DELETE request removes exactly the centred entity");
+  // The panel reloads on the full world: Vienna is gone, the button hides.
+  await waitCenter(null);
+  assert.equal(await circles.count(), 5, "the removed node is no longer drawn");
+  const labels = await page.locator("#graphCanvas text").allTextContents();
+  assert.ok(!labels.includes("Vienna"), `Vienna removed: ${JSON.stringify(labels)}`);
+  assert.equal(await button.isVisible(), false);
+});
+
 test("the graph panel degrades to a status line when unconfigured", async (t) => {
   const page = await openPanel(t, { configured: false });
   await page.waitForFunction(() => document.getElementById("graphStatus").textContent.includes("Not configured"));

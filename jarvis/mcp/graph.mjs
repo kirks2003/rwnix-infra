@@ -81,7 +81,9 @@ export const QUERIES = {
 // but themselves.
 const USER_PARAM = { user: { type: "string", description: "The signed-in user (injected by the backend; not set by the brain)." } };
 
-const TOOLS = [
+// Exported so tests can pin the read-only surface: the brain may look things
+// up, never write or delete (deletion is the panel's explicit endpoint only).
+export const TOOLS = [
   {
     name: "get-schema",
     description: "Inspect the knowledge graph schema: node labels, relationship types and property keys.",

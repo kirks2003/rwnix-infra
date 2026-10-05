@@ -1660,3 +1660,84 @@ privacy for users, full visibility for the admin.
  exact question, asked as admin, answered with the per-user breakdown (Mila:
  likes Lego; Roman: owns the entity, no facts) and the activity feed recorded
  the admin's tool reads globally.
+
+## PR #38 — explicit owner-scoped entity deletion (2026-10-05)
+
+**Request (as Roman, admin):** "i see in graphdb 3d panel: Roman(you) and
+greyed out Lego, lets remove Entity Lego" — the dimmed isolated mention
+(PR #37) needs an explicit removal path. The brain's MCP tools stay strictly
+read-only (pinned by test); deletion is an explicit panel action only.
+
+**Design**
+
+- `DELETE /api/graph/entity?id=<elementId>` (max 128 chars) — deletes by
+  elementId, not by name, so exactly the clicked node is targeted. Cypher:
+  user = `MATCH (e:Entity) WHERE elementId(e) = $id AND e.owner = $user
+  WITH e.name AS name, e DETACH DELETE e RETURN name, 1 AS deleted`;
+  admin = same without the owner pin. The `:Entity` label filter means
+  `:User` nodes can never match; a foreign or absent id yields 0 rows →
+  404 (no enumeration). `DETACH DELETE` also removes the entity's edges.
+- Every removal is audited: `recordGraphActivity({ kind: "delete", user,
+  name })`; the panel's activity feed renders it as "… · removed \<name\>".
+- `/api/config` now returns `admin: isAdmin(req.user)` so the admin's
+  global view can offer removal on any entity.
+- `graphdb.removeEntity({ user, id, admin })` in both stores (Neo4j
+  writeClient; memory store removes the node and its attached edges,
+  never a `:User` node).
+- Panel: a Remove button in the graph header, visible only when the centred
+  node is a typed entity (entities have `type`; `:User` nodes have
+  `type: null`) and the viewer is its owner or an admin. Click → confirm
+  dialog → DELETE → re-centre to latest and reload.
+- `mcp/graph.mjs` exports `TOOLS`; the test pins the surface to the four
+  read tools and rejects any write/delete/create/update tool name.
+
+**Tests**
+
+- Unit 103/103 (99 + 4): memory-store `removeEntity` (own entity + edges
+  gone, freed neighbour becomes isolated, foreign id no-op, `:User` never
+  deletable, admin deletes any, re-delete no-op); neo4j-mock pin (owner-
+  pinned `DETACH DELETE`, admin variant unpinned, empty result →
+  `{deleted: 0, name: null}`); integration "the panel's explicit delete
+  removes only the caller's own entity" (200 own, 404 foreign + survives,
+  404 `:User`, admin deletes any, 400 missing id, audit entries,
+  `/api/config` admin flag); MCP read-only surface pin.
+- Browser 38 pass + 2 opt-in skips (37 + 1): "the Remove button deletes
+  the centred entity and refreshes the panel" — clicks the real button,
+  accepts the confirm, waits for the re-render (MutationObserver on the
+  SVG; status text alone is ambiguous between centres), and asserts the
+  entity is gone, the neighbour list shrank, and the mock DELETE ran once.
+
+**Also fixed in the docs:** the stale "What it does" bullet that still
+described the official `neo4j-mcp` with `read-cypher` and a shared
+knowledge base (pre-#33 wording).
+
+**Deploy**
+
+- Backup `jarvis-code.bak-20261005_190048.tgz`; `.env` untouched
+  (`USERS=Mila,Roman,admin` already in place since #37).
+- Synced: `graphdb.js server.js README.md public/app.js
+  public/index.html mcp/graph.mjs tests/graph.test.mjs
+  tests/graph.browser.mjs tests/mcp-graph.test.mjs`.
+- Rebuilt: `docker compose -f docker-compose.yml up -d --build jarvis`;
+  container md5 == worktree for all five runtime files;
+  `/api/health` `{"status":"ok"}`.
+
+**Live verification (in-container, live Neo4j)**
+
+- The delete Cypher was validated against scratch entities first (owner-
+  pin rejects the wrong owner with 0 rows, deletes for the right owner,
+  idempotent, admin variant deletes any, `:User` ids never match).
+- **Roman deleted his isolated `Lego` through the real endpoint (200,
+  `deleted: 1`)** — the user's exact request; his panel then showed only
+  `Roman(you)` with zero links, the status counts followed, and the
+  activity feed carried the audit entry.
+- Roman deleting Mila's `Lego` → 404 and it survives; deleting a `:User`
+  node → 404; missing id → 400; Mila's world unchanged; the admin's
+  global view shows the three remaining nodes.
+- Note: at verification time the entity had since picked up a fact edge
+  from user chat activity in between (so it was correctly no longer
+  flagged isolated — the API reflected the live state); the delete removed
+  the entity with its edge. The isolated-flag behaviour is proven
+  separately by recreating the original state exactly (flag: true).
+- Final DB state: `Mila:User`, `Roman:User`, `Lego(thing, owner: Mila,
+  mention_count 11)`, one edge `Mila:User -[:LIKES]-> Lego(owner: Mila)`.

@@ -65,6 +65,7 @@
             <button id="graphView3dButton" type="button" disabled>3D</button>
             <button id="graphView2dButton" type="button" disabled>2D</button>
           </div>
+          <button id="graphRemoveButton" type="button" hidden title="Remove the selected entity (and its links) from the knowledge graph"></button>
           <button id="graphRefreshButton" type="button" disabled>Refresh</button>
         </div>
         <div class="graph-body">
@@ -80,7 +81,7 @@
             </div>
           </div>
         </div>
-        <p class="graph-help">Read-only view. The brain queries this graph through the read-only MCP graph server (toggle in the controls below); nothing in the app can delete graph data. Facts are stored automatically after every answered conversation turn.</p>
+        <p class="graph-help">Read-only for the brain: it queries this graph through the read-only MCP graph server (toggle in the controls below) and can never write or delete. To remove one of your own entities, select it (click its node) and use the Remove button — the admin may remove any entity. Facts are stored automatically after every answered conversation turn.</p>
       </section>
 
       <div class="panels-toggle-row app-ui">
