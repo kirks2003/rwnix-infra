@@ -1053,13 +1053,15 @@ Rules:
 - type must be exactly one of: person, place, organization, event, topic, thing.
 - The graph is the signed-in user's private world: every extracted entity is stored under their name, so no shared/public flag exists and nothing you extract is visible to any other user.
 - Always include the signed-in user (the name on the "user:" line) as a person entity with their exact name.
-- First-person statements in the prompt are facts to store, never skip them: "I like X" -> LIKES, "I own X" or "I have X" -> OWNS, "I live in X" -> LIVES_IN, "I work at X" -> WORKS_AT, "my friend/mother/family is Y" -> FRIEND_OF/FAMILY_OF, always with "from" set to the user's entity name.
+- First-person statements in the prompt are facts to store, never skip them: "I like X" -> LIKES, "I'm interested in X" -> INTERESTED_IN, "I own X" or "I have X" -> OWNS, "I live in X" -> LIVES_IN, "I work at X" -> WORKS_AT, "my friend/mother/family is Y" -> FRIEND_OF/FAMILY_OF, always with "from" set to the user's entity name.
 - Negation is the "negative" flag, never a new relation type: "I don't like X" / "I no longer own X" -> the same type with "negative": true (e.g. LIKES + negative). A negative statement overwrites an earlier positive one about the same pair; do not emit both.
 - Example: user "Mila", prompt "I like Lego." ->
   {"entities":[{"name":"Mila","type":"person"},{"name":"Lego","type":"thing"}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":false}]}
 - Example: user "Mila", prompt "I don't like Lego anymore." ->
   {"entities":[{"name":"Mila","type":"person"},{"name":"Lego","type":"thing"}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":true}]}
-- relations use UPPERCASE_SNAKE types, one of: WORKS_AT, LIVES_IN, STUDIES_AT, BORN_IN, FRIEND_OF, FAMILY_OF, PART_OF, LOCATED_IN, RELATED_TO, MENTIONED_IN, LIKES, WENT_TO, OWNS, USES. "from" and "to" must be entity names from your entities list.
+- Example: user "Roman", prompt "I'm interested in Home Assistant." ->
+  {"entities":[{"name":"Roman","type":"person"},{"name":"Home Assistant","type":"thing"}],"relations":[{"from":"Roman","to":"Home Assistant","type":"INTERESTED_IN","negative":false}]}
+- relations use UPPERCASE_SNAKE_CASE types. Prefer the existing types: WORKS_AT, LIVES_IN, STUDIES_AT, BORN_IN, FRIEND_OF, FAMILY_OF, PART_OF, LOCATED_IN, RELATED_TO, MENTIONED_IN, LIKES, WENT_TO, OWNS, USES. If a fact is a genuine relation none of these expresses (interest, plans, goals, ...), introduce a precise new type of at most 3 words (e.g. "I'm interested in X" -> INTERESTED_IN): the graph creates it automatically. Never introduce a type that only paraphrases an existing one (liking, preference and taste stay LIKES; "interested in" is NOT liking) — and never for negation, which is the "negative" flag. "from" and "to" must be entity names from your entities list.
 - At most 12 entities and 15 relations. Prefer a few high-confidence facts over many guesses; return {"entities":[],"relations":[]} only for turns that carry no facts at all (e.g. "thanks").`;
 
 // Runs after a finished turn: one cheap structured LLM call over the prompt,

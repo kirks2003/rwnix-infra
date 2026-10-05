@@ -22,7 +22,7 @@ test("parseExtraction handles plain, fenced and prose-wrapped JSON", () => {
 test("parseExtraction sanitises names, types, props and clamps counts", () => {
   const many = {
     entities: Array.from({ length: 30 }, (_, index) => ({ name: `  E${index}  `, type: index % 2 ? "place" : "bogus-type", props: { okkey: `v${index}`, "Bad Key": "x", name: "injected" } })),
-    relations: Array.from({ length: 40 }, (_, index) => ({ from: "A", to: `B${index}`, type: "WEIRD-TYPE" })),
+    relations: Array.from({ length: 40 }, (_, index) => ({ from: "A", to: `B${index}`, type: "I REALLY DO NOT KNOW" })),
   };
   const parsed = graphdb.parseExtraction(JSON.stringify(many));
   assert.equal(parsed.entities.length, graphdb.MAX_ENTITIES);
@@ -32,6 +32,24 @@ test("parseExtraction sanitises names, types, props and clamps counts", () => {
   assert.deepEqual(parsed.entities[0].props, { okkey: "v0" });
   assert.equal(parsed.relations.length, graphdb.MAX_RELATIONS);
   assert.ok(parsed.relations.every((relation) => relation.type === "RELATED_TO"));
+});
+
+test("parseExtraction introduces well-formed new relation types, rejects prose and the reserved KNOWS", () => {
+  const parsed = graphdb.parseExtraction(JSON.stringify({
+    entities: [{ name: "Roman", type: "person" }, { name: "Home Assistant", type: "thing" }],
+    relations: [
+      { from: "Roman", to: "Home Assistant", type: "interested_in" },
+      { from: "Roman", to: "Home Assistant", type: "PLANNING TO VISIT" },
+      { from: "Roman", to: "Berlin", type: "I AM NOT SURE ABOUT THIS ONE" },
+      { from: "Mila", to: "Berlin", type: "KNOWS" },
+    ],
+  }));
+  assert.deepEqual(parsed.relations, [
+    { from: "Roman", to: "Home Assistant", type: "INTERESTED_IN", negative: false },
+    { from: "Roman", to: "Home Assistant", type: "PLANNING_TO_VISIT", negative: false },
+    { from: "Roman", to: "Berlin", type: "RELATED_TO", negative: false },
+    { from: "Mila", to: "Berlin", type: "RELATED_TO", negative: false },
+  ]);
 });
 
 test("parseExtraction drops duplicates, self-relations and garbage", () => {
@@ -176,6 +194,27 @@ test("memory store: a mention of a registered user stores nothing and counts it 
   const after = await store.subgraph({ user: "Roman" });
   assert.equal(after.nodes.length, before, "no new node for the user mention");
   assert.ok(!after.nodes.some((node) => node.name === "Mila"), "no Mila node appears in Roman's world");
+});
+
+test("memory store: introduced relation types are stored, malformed ones are dropped", async () => {
+  const store = graphdb.createMemoryStore(["Mila", "Roman"]);
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [{ name: "Home Assistant", type: "thing", props: {} }],
+    relations: [
+      { from: "Mila", to: "Home Assistant", type: "INTERESTED_IN" },
+      { from: "Mila", to: "Home Assistant", type: "I AM NOT SURE ABOUT THIS ONE" },
+    ],
+  });
+  const sub = await store.subgraph({ user: "Mila" });
+  const types = sub.edges.map((edge) => edge.type);
+  // The starter fact (Rocky USES Kokoro) plus the introduced type; the
+  // malformed type was dropped before the write.
+  assert.deepEqual(types, ["USES", "INTERESTED_IN"], `edges: ${JSON.stringify(types)}`);
+  assert.ok(!types.includes("RELATED_TO"), `no fallback type: ${JSON.stringify(types)}`);
+  // The schema picks the new type up from the store itself.
+  const schema = await store.schema();
+  assert.ok(schema.relTypes.includes("INTERESTED_IN"), JSON.stringify(schema.relTypes));
 });
 
 test("memory store: negation is a flag on the same edge and flips on re-statement", async () => {
@@ -419,6 +458,47 @@ test("neo4j store: removeEntity pins the owner-scoped DETACH DELETE (admin: no o
     driverFactory: () => ({ session: () => ({ run: async () => ({ records: [] }), close: async () => {} }) }),
   });
   assert.deepEqual(await empty.removeEntity({ user: "Mila", id: "4:xyz" }), { deleted: 0, name: null });
+});
+
+test("neo4j store: an introduced relation type is merged under its own name (owner-scoped endpoints)", async () => {
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
+        async run(cypher, params) { calls.push({ cypher, params }); return { records: [] }; },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+  });
+  await store.upsertTurn({
+    user: "Roman",
+    entities: [{ name: "Home Assistant", type: "thing", props: {} }],
+    relations: [{ from: "Roman", to: "Home Assistant", type: "INTERESTED_IN" }],
+  });
+  // Neo4j creates the type on first use: the MERGE carries the new name
+  // verbatim, and the entity endpoint stays owner-scoped to the turn user.
+  const merge = calls.find((call) => call.cypher.includes("INTERESTED_IN"));
+  assert.ok(merge, "expected the MERGE for the introduced type");
+  assert.ok(merge.cypher.includes("MERGE (a)-[r:INTERESTED_IN]->(b)"), merge.cypher);
+  assert.ok(merge.cypher.includes("MATCH (a:User {name: row.from})"), merge.cypher);
+  assert.ok(merge.cypher.includes("MATCH (b:Entity {name: row.to, owner: $user})"), merge.cypher);
+  // A malformed type never reaches the database.
+  calls.length = 0;
+  await store.upsertTurn({
+    user: "Roman",
+    entities: [],
+    relations: [{ from: "Roman", to: "Home Assistant", type: "I AM NOT SURE ABOUT THIS ONE" }],
+  });
+  assert.ok(!calls.some((call) => call.cypher.includes("I AM NOT SURE")), "malformed types are dropped before any query");
 });
 
 test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", async () => {
@@ -684,6 +764,12 @@ const USER_MENTION_JSON = JSON.stringify({
   entities: [{ name: "Mila", type: "person", props: {} }],
   relations: [],
 });
+// A fact whose relation type does not exist yet: the store must create it
+// under its own name, not force it into an existing type.
+const INTEREST_JSON = JSON.stringify({
+  entities: [{ name: "Home Assistant", type: "thing", props: {} }],
+  relations: [{ from: "Roman", to: "Home Assistant", type: "INTERESTED_IN" }],
+});
 
 before(async () => {
   upstream = createServer(async (req, res) => {
@@ -696,7 +782,8 @@ before(async () => {
     res.setHeader("content-type", "application/json");
     if (systemText.includes("extract knowledge-graph entities")) {
       const userMention = systemText.includes("user-account-mention");
-      return res.end(JSON.stringify({ choices: [{ message: { content: userMention ? USER_MENTION_JSON : EXTRACT_JSON } }] }));
+      const interest = systemText.includes("interest-test");
+      return res.end(JSON.stringify({ choices: [{ message: { content: userMention ? USER_MENTION_JSON : interest ? INTEREST_JSON : EXTRACT_JSON } }] }));
     }
     const lastUser = [...(body.messages || [])].reverse().find((message) => message.role === "user");
     const wantsDelete = String(lastUser?.content || "").includes("Delete everything");
@@ -941,6 +1028,29 @@ test("mentioning a registered user stores no entity and the feed says so", async
   const after = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
   assert.equal(after.nodes.length, before.nodes.length, JSON.stringify({ before, after }));
   assert.ok(!after.nodes.some((node) => node.name === "Mila"), JSON.stringify(after.nodes));
+});
+
+test("an introduced relation type is created on the fly and shows up in the schema", async () => {
+  const origin = origins[1];
+  const romanCookie = await login(origin, "Roman");
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: romanCookie },
+    body: JSON.stringify({ prompt: "interest-test: I'm interested in Home Assistant.", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  // Ingestion is fire-and-forget: poll until the edge with the new type is
+  // visible in the panel's scoped subgraph.
+  const edge = await waitFor(async () => {
+    const sub = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
+    return sub.edges.find((candidate) => candidate.type === "INTERESTED_IN");
+  });
+  assert.equal(edge.negative, false, JSON.stringify(edge));
+  // The entity the fact points at landed in the user's world.
+  const sub = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
+  assert.ok(sub.nodes.some((node) => node.name === "Home Assistant" && node.owner === "Roman"), JSON.stringify(sub.nodes));
+  // The schema picks the new type up from the store itself — no static list.
+  const schema = await (await auth(origin, "/api/graph/schema", romanCookie)).json();
+  assert.ok(schema.relTypes.includes("INTERESTED_IN"), JSON.stringify(schema.relTypes));
 });
 
 test("the graph tool budget leaves room for schema plus follow-up queries (five rounds)", async () => {

@@ -15,6 +15,9 @@ const RELATION_TYPES = new Set([
   "PART_OF", "LOCATED_IN", "RELATED_TO", "MENTIONED_IN", "LIKES", "WENT_TO",
   "OWNS", "USES",
 ]);
+// The one type the ingestion itself books: it must never be emittable by an
+// extraction (KNOWS is internal bookkeeping, never a stored fact).
+const RESERVED_RELATION_TYPES = new Set(["KNOWS"]);
 const MAX_ENTITIES = 12;
 const MAX_RELATIONS = 15;
 const PROP_KEYS = new Set(["name", "type", "common", "owner", "id", "elementId"]);
@@ -37,6 +40,28 @@ function sanitizeEntity(raw) {
     if (text) props[key] = text;
   }
   return { name, type, props };
+}
+
+// A relation type is either one of the known types or a well-formed
+// UPPER_SNAKE_CASE name the extraction introduced for a relation none of the
+// known types covers ("I'm interested in X" -> INTERESTED_IN). Neo4j creates
+// the type on first use, so no migration and no static registry update: the
+// schema, the panel labels and the brain's fact formatting are all
+// type-agnostic and pick it up as soon as the edge exists.
+function normalizeRelationType(raw) {
+  return String(raw == null ? "" : raw)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 24);
+}
+
+function isRelationType(type) {
+  if (typeof type !== "string" || !type || RESERVED_RELATION_TYPES.has(type)) return false;
+  if (RELATION_TYPES.has(type)) return true;
+  // An introduced type is a short (at most 3 words) UPPER_SNAKE_CASE name —
+  // anything longer is prose, not a type.
+  return /^[A-Z][A-Z0-9_]{0,23}$/.test(type) && type.split("_").length <= 3;
 }
 
 // The brain replies with a JSON object, possibly wrapped in a code fence or
@@ -70,8 +95,11 @@ function parseExtraction(text) {
     const from = sanitizeName(raw && raw.from);
     const to = sanitizeName(raw && raw.to);
     if (!from || !to || from === to) continue;
-    const upper = String(raw && raw.type || "").toUpperCase().replace(/[^A-Z0-9_]/g, "_").slice(0, 24);
-    const type = RELATION_TYPES.has(upper) ? upper : "RELATED_TO";
+    // Known types pass through; a well-formed new type is introduced as-is
+    // (the store creates it on first use); malformed prose falls back to the
+    // generic RELATED_TO so the fact itself is never lost.
+    const normalised = normalizeRelationType(raw && raw.type);
+    const type = isRelationType(normalised) ? normalised : "RELATED_TO";
     const key = `${from}|${to}|${type}`;
     if (relationKeys.has(key)) continue;
     relationKeys.add(key);
@@ -383,7 +411,9 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       // (the parser already drops from === to).
       const buckets = new Map();
       for (const relation of relations) {
-        if (!RELATION_TYPES.has(relation.type)) continue;
+        // Known types and well-formed introduced types (Neo4j creates the
+        // type on first use); anything else is dropped.
+        if (!isRelationType(relation.type)) continue;
         const key = `${relation.type}|${isUser(relation.from) ? "U" : "E"}|${isUser(relation.to) ? "U" : "E"}`;
         const list = buckets.get(key) || [];
         list.push({ from: relation.from, to: relation.to, negative: relation.negative === true });
@@ -689,7 +719,9 @@ function createMemoryStore(users = []) {
       }
       let linked = 0;
       for (const relation of relations) {
-        if (!RELATION_TYPES.has(relation.type)) continue;
+        // Same gate as the Neo4j store: known or well-formed introduced
+        // types only.
+        if (!isRelationType(relation.type)) continue;
         const resolve = (name) => {
           if (isUser(name)) return [...nodes.values()].find((node) => node.name === name && node.props.role === "user") || addUser(name);
           // Entity endpoints are the turn user's own copies (owner-keyed): a
@@ -732,6 +764,7 @@ module.exports = {
   MAX_ENTITIES,
   MAX_RELATIONS,
   parseExtraction,
+  isRelationType,
   formatGraphContext,
   createGraphStore,
   createMemoryStore,

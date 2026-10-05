@@ -1789,3 +1789,61 @@ stored as an entity" line).
 The user's live DB is untouched by this change (no data migration needed —
 nothing was ever lost; the "stored 1 entity" turn simply stored nothing by
 design).
+
+## Auto-created relation types (2026-10-05, PR #40)
+
+**Report (as Roman):** "warum ist interessiere mich als like gespeichert" —
+"I'm interested in Home Assistant" was stored as `LIKES`, because the brain
+answered that LIKES was the only relation type the graph had (interest was
+forced into the closest existing type).
+
+**Design (user request):** connectors should create the relation type
+automatically when it does not exist yet — "I'm interested in X" gets
+`INTERESTED_IN`, not `LIKES`.
+
+**Changes**
+
+- `graphdb.js`:
+  - `normalizeRelationType()` + `isRelationType()` replace the allowlist
+    check in `parseExtraction`: known types pass through; a well-formed new
+    type (UPPER_SNAKE_CASE, ≤ 3 words, ≤ 24 chars, never the reserved
+    `KNOWS`) is accepted as-is; malformed prose still falls back to
+    `RELATED_TO` so the fact itself is never lost.
+  - Both ingestion gates (Neo4j + memory store) use `isRelationType`
+    instead of `RELATION_TYPES.has`. Neo4j creates the type on first use —
+    the MERGE carries the new name verbatim (`MERGE (a)-[r:INTERESTED_IN]->(b)`,
+    type validated to `[A-Z][A-Z0-9_]*`, so no injection), no migration and
+    no registry update. The schema (distinct types from the store), the
+    panel labels (`relLabel.js` plain-word fallback: "interested in" /
+    "not interested in") and the brain's fact formatting are all
+    type-agnostic and pick new types up automatically.
+- `server.js` `EXTRACT_SYSTEM_PROMPT`: prefers the 14 known types, but a
+  genuine relation none of them expresses gets a precise new type of at
+  most 3 words (with the "I'm interested in X" → `INTERESTED_IN` example);
+  explicit rules: never paraphrase an existing type (liking/preference/taste
+  stay `LIKES`; "interested in" is NOT liking), never invent a type for
+  negation (that is the `negative` flag).
+
+**Tests:** unit **109/109** (105 + 4: parseExtraction introduced types —
+`interested_in` → `INTERESTED_IN`, `PLANNING TO VISIT` → `PLANNING_TO_VISIT`,
+5-word prose + `KNOWS` → `RELATED_TO`; memory store — introduced type stored
+under its own name, schema picks it up, malformed type dropped; neo4j mock —
+introduced-type MERGE pin (name verbatim, owner-scoped endpoints) and
+malformed types dropped before any query; integration — an introduced type
+created on the fly end-to-end: the edge appears under the new type, the
+entity lands in the user's world, the schema lists the type). Browser
+**38 pass + 2 opt-in skips** (fixture gained an `INTERESTED_IN` edge; both
+views assert the plain-word fallback label "interested in").
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261005_205746.tgz`; synced
+`graphdb.js`, `server.js`, `tests/graph.test.mjs`, `tests/graph.browser.mjs`
+(+ docs), md5-verified, image rebuilt, container healthy, `/api/health` ok. Live data fix (one-off, admin Cypher): the
+reported edge `Roman:User -[:LIKES]-> Home Assistant(owner: Roman)` re-typed
+to `INTERESTED_IN` (props `last_seen`/`negative` copied, original edge
+deleted). Then a live chat turn as Roman with the interest statement — the
+real extraction LLM emitted `INTERESTED_IN` (log: `extractedRelations: 1,
+linked: 1`), the DB holds exactly one `Roman -[:INTERESTED_IN]-> Home
+Assistant(owner: Roman)` edge (the MERGE matched the re-typed edge, no
+duplicate), the panel subgraph carries it (label "interested in" via the
+fallback), the schema lists `INTERESTED_IN`, and the brain's own answer read
+"you're already linked as **interested in** Home Assistant".
