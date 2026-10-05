@@ -649,10 +649,13 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   const systemText = toolRequests[0].messages.map((message) => String(message.content || "")).join("\n");
   assert.match(systemText, /Knowledge graph context/);
   assert.match(systemText, /Known to this user so far:.*Rocky/);
-  // The privacy rule: other users' personal data is not accessible to the
-  // brain, so it cannot answer "what does Mila like?" for Roman.
+  // The privacy rule: the brain's view is this user's private view; other
+  // users' data is never accessible (so it cannot answer "what does Mila
+  // like?" for Roman), and it must phrase graph claims from that user's view,
+  // never as a global "no one does X" statement.
   assert.match(systemText, /list-my-facts\(about\?, relation\?\)/);
-  assert.match(systemText, /other users' personal data is not accessible/);
+  assert.match(systemText, /never another user's data/);
+  assert.match(systemText, /never as a global claim/);
 
   // The tool result came back through the MCP server and was fed to the brain.
   assert.ok(finalRequests.length >= 1);

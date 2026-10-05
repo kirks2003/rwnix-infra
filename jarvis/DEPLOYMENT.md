@@ -1460,6 +1460,48 @@ synced, md5-verified, image rebuilt) and verified live:
 - As **Mila**: `2 nodes · 1 link` — `Mila (you)` + `Lego:thing` with the
   `LIKES` edge, her real fact intact.
 - DB check: `KNOWS` edges `Mila->Lego` and `Roman->Lego` untouched, so the
-  brain context and `list-my-knowledge` still see the mention.
-- Browsers need a hard refresh (Ctrl+Shift+R) to pick up the (unchanged)
-  static assets; the panel polls, so the new data shows without a refresh.
+   brain context and `list-my-knowledge` still see the mention.
+ - Browsers need a hard refresh (Ctrl+Shift+R) to pick up the (unchanged)
+   static assets; the panel polls, so the new data shows without a refresh.
+
+## Scoped, honest brain answers about the graph (2026-10-05, PR #35)
+
+User question: asked as Roman "Does any graph db user like Lego?", the brain
+answered "…no LIKES relations to any person are recorded" — a *scoped*
+answer (Roman's view, where he has no LIKES facts) phrased as a *global*
+claim about the whole graph. No data leaked (the tools are pinned to Roman and
+`get-entity` only returns `:Entity`↔`:Entity` links, so `Mila -[:LIKES]-> Lego`
+is invisible to him), but the wording was misleading: it read as "no one in
+the graph likes Lego" when it really meant "I have no record of *you* liking
+Lego and I cannot see other users' data."
+
+Confirmed the isolation model is airtight (each user = a private brain, only a
+backend admin with direct DB access sees all users' data):
+- `list-my-facts` matches only the signed-in user's own outgoing fact edges.
+- `get-entity(name)` returns the entity's data plus links to other `:Entity`
+  nodes only — a `:User` endpoint is never returned, so another user's fact
+  edge to that entity is invisible, not even anonymously.
+- `list-my-knowledge` returns only the signed-in user's `KNOWS` edges.
+- `get-schema` returns structure (labels / relation types / property keys),
+  not personal data.
+So if Roman later also likes Lego, his brain says "you like Lego" and cannot
+say "Mila also likes Lego." The brain remembering Roman's own `KNOWS` of Lego
+(he mentioned it) is his own provenance, not a leak; the panel hides that
+isolated mention from the drawing while the brain keeps the user's memory.
+
+Change: the graph prompt in `server.js` now tells the brain its view is the
+signed-in user's private view and requires it to phrase anything it says about
+the graph from that user's view ("I have no record of you liking X", "I have no
+access to other users' facts"), never as a global claim ("no one likes X").
+No store or tool change; the isolation was already correct.
+
+Tests: unit 84/84 (the prompt-content assertion updated to the new wording),
+browser 37 pass + 2 opt-in skips.
+
+Deployed (backup `jarvis-code.bak-20261005_135035.tgz`; only `server.js`
+synced, md5-verified, image rebuilt) and verified live: as **Roman**, "Does
+any graph db user like Lego?" now answers "…no LIKES relation recorded for
+you … I can only see data belonging to you (Roman) plus shared/public
+knowledge. I have no access to other users' preferences or facts, so I can't
+say whether any other user likes Lego." — scoped, honest, no global claim, no
+leak.
