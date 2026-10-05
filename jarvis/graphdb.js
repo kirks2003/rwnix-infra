@@ -75,7 +75,9 @@ function parseExtraction(text) {
     const key = `${from}|${to}|${type}`;
     if (relationKeys.has(key)) continue;
     relationKeys.add(key);
-    relations.push({ from, to, type });
+    // Negation is a flag on the relation, never a separate type: "I don't
+    // like X" is LIKES + negative, and it overwrites an earlier positive one.
+    relations.push({ from, to, type, negative: raw && raw.negative === true });
     if (relations.length >= MAX_RELATIONS) break;
   }
   return { entities, relations };
@@ -143,10 +145,13 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       let nodeRows;
       let edgeRows = [];
       if (center) {
+        // KNOWS is bookkeeping (provenance for the brain context); the panel
+        // only draws real facts, so it is excluded here, not in the UI.
         nodeRows = rows(await run(readClient,
-          "MATCH (a) WHERE elementId(a) = $center OPTIONAL MATCH (a)-[r]-(b) " +
+          "MATCH (a) WHERE elementId(a) = $center OPTIONAL MATCH (a)-[r]-(b) WHERE type(r) <> 'KNOWS' " +
           "RETURN elementId(a) AS id, a.name AS name, a.type AS type, a.common AS common, " +
-          "elementId(b) AS other, other.name AS otherName, other.type AS otherType, other.common AS otherCommon, type(r) AS rel " +
+          "elementId(b) AS other, other.name AS otherName, other.type AS otherType, other.common AS otherCommon, type(r) AS rel, " +
+          "coalesce(r.negative, false) AS negative " +
           "LIMIT 200",
           { center },
         ));
@@ -155,7 +160,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         for (const row of nodeRows) {
           if (!byId.has(row.id)) byId.set(row.id, { id: row.id, name: row.name, type: row.type, common: row.common });
           if (row.other && !byId.has(row.other)) byId.set(row.other, { id: row.other, name: row.otherName, type: row.otherType, common: row.otherCommon });
-          if (row.other && row.rel) edges.push({ source: row.id, target: row.other, type: row.rel });
+          if (row.other && row.rel) edges.push({ source: row.id, target: row.other, type: row.rel, negative: row.negative === true });
         }
         return { nodes: [...byId.values()], edges: edges.slice(0, 200), center };
       }
@@ -171,8 +176,9 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       const ids = nodeRows.map((row) => row.id);
       if (ids.length) {
         edgeRows = rows(await run(readClient,
-          "MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) IN $ids " +
-          "RETURN elementId(a) AS source, elementId(b) AS target, type(r) AS type LIMIT 300",
+          "MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) IN $ids AND type(r) <> 'KNOWS' " +
+          "RETURN elementId(a) AS source, elementId(b) AS target, type(r) AS type, coalesce(r.negative, false) AS negative " +
+          "LIMIT 300",
           { ids },
         ));
       }
@@ -189,9 +195,10 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         rows(await run(readClient, "MATCH ()-[r]->() UNWIND [type(r)] AS t RETURN DISTINCT t ORDER BY t LIMIT 50")),
         rows(await run(readClient, "MATCH (n) UNWIND keys(n) AS key RETURN DISTINCT key ORDER BY key LIMIT 50")),
       ]);
+      // KNOWS is bookkeeping, not a fact the panel should advertise.
       return {
         labels: labels.map((row) => row.label),
-        relTypes: relTypes.map((row) => row.t),
+        relTypes: relTypes.map((row) => row.t).filter((type) => type !== "KNOWS"),
         propertyKeys: propKeys.map((row) => row.key),
       };
     },
@@ -258,7 +265,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         const bucket = relation.from === user ? "userEntity" : relation.to === user ? "entityUser" : "entityEntity";
         const key = `${relation.type}|${bucket}`;
         const list = buckets.get(key) || [];
-        list.push({ from: relation.from, to: relation.to });
+        list.push({ from: relation.from, to: relation.to, negative: relation.negative === true });
         buckets.set(key, list);
       }
       let linked = 0;
@@ -266,8 +273,10 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         const [type, bucket] = key.split("|");
         const fromPattern = bucket === "userEntity" ? "MATCH (a:User {name: $user})" : "MATCH (a:Entity {name: row.from})";
         const toPattern = bucket === "entityUser" ? "MATCH (b:User {name: $user})" : "MATCH (b:Entity {name: row.to})";
+        // SET (not just ON CREATE): a later "I don't like X" flips an
+        // existing edge to negative, and vice versa.
         await run(writeClient,
-          `UNWIND $rows AS row ${fromPattern} ${toPattern} MERGE (a)-[r:${type}]->(b) SET r.last_seen = row.now`,
+          `UNWIND $rows AS row ${fromPattern} ${toPattern} MERGE (a)-[r:${type}]->(b) SET r.last_seen = row.now, r.negative = row.negative`,
           { rows: list.map((relation) => ({ ...relation, now })), user },
         );
         linked += list.length;
@@ -302,9 +311,14 @@ function createMemoryStore() {
     return addNode({ name, type: "person", common: false, props: { role: "user" } });
   }
 
-  function addEdge(from, to, type) {
+  function addEdge(from, to, type, negative = false) {
     const existing = edges.find((edge) => edge.source === from && edge.target === to && edge.type === type);
-    if (!existing) edges.push({ source: from, target: to, type });
+    if (!existing) {
+      edges.push({ source: from, target: to, type, negative: negative === true });
+      return edges[edges.length - 1];
+    }
+    // Re-stating a relation overwrites its polarity, like the Neo4j store.
+    existing.negative = negative === true;
     return existing;
   }
 
@@ -340,13 +354,16 @@ function createMemoryStore() {
 
     async subgraph({ limit = 60, center = null } = {}) {
       const cap = Math.min(120, Math.max(1, Number(limit) || 60));
+      // KNOWS is bookkeeping (provenance for the brain context); the panel
+      // only draws real facts, so it is excluded here, not in the UI.
+      const facts = edges.filter((edge) => edge.type !== "KNOWS");
       if (center) {
         const byId = new Map();
         const out = [];
         const hub = nodes.get(center);
         if (!hub) return { nodes: [], edges: [], center };
         byId.set(hub.id, hub);
-        for (const edge of edges) {
+        for (const edge of facts) {
           if (edge.source === center) { byId.set(edge.target, nodes.get(edge.target)); out.push(edge); }
           else if (edge.target === center) { byId.set(edge.source, nodes.get(edge.source)); out.push(edge); }
         }
@@ -359,16 +376,17 @@ function createMemoryStore() {
       const ids = new Set(picked.map((node) => node.id));
       return {
         nodes: picked.map(publicNode),
-        edges: edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
+        edges: facts.filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
         center: null,
       };
     },
 
     async schema() {
       const labels = [...new Set([...nodes.values()].map((node) => (node.props.role === "user" ? "User" : "Entity")))];
+      // KNOWS is bookkeeping, not a fact the panel should advertise.
       return {
         labels,
-        relTypes: [...new Set(edges.map((edge) => edge.type))].sort(),
+        relTypes: [...new Set(edges.map((edge) => edge.type))].filter((type) => type !== "KNOWS").sort(),
         propertyKeys: [...new Set([...nodes.values()].flatMap((node) => Object.keys(node.props)))].sort(),
       };
     },
@@ -410,7 +428,7 @@ function createMemoryStore() {
         const from = relation.from === user ? userNode : [...nodes.values()].find((node) => node.name === relation.from);
         const to = relation.to === user ? userNode : [...nodes.values()].find((node) => node.name === relation.to);
         if (from && to && from !== to && RELATION_TYPES.has(relation.type)) {
-          addEdge(from.id, to.id, relation.type);
+          addEdge(from.id, to.id, relation.type, relation.negative === true);
           linked += 1;
         }
       }
