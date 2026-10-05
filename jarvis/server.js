@@ -949,7 +949,7 @@ async function runBrain({ messages, user, useTools, requestId, signal, headers, 
 
 const EXTRACT_SYSTEM_PROMPT = `You extract knowledge-graph entities from a voice-assistant conversation turn.
 Return ONLY a JSON object, no prose, with this exact shape:
-{"entities":[{"name":"...","type":"person|place|organization|event|topic|thing","common":true,"props":{"key":"value"}}],"relations":[{"from":"EntityName","to":"EntityName","type":"RELATION_TYPE"}]}
+{"entities":[{"name":"...","type":"person|place|organization|event|topic|thing","common":true,"props":{"key":"value"}}],"relations":[{"from":"EntityName","to":"EntityName","type":"RELATION_TYPE","negative":false}]}
 Rules:
 - Extract from the prompt, the web search results and the answer together.
 - "name" is a short canonical name (e.g. "Mila", "Berlin", "Kokoro-82M"), at most a few words.
@@ -957,8 +957,11 @@ Rules:
 - "common" is true only for general knowledge shared by everyone (public people, cities, products, concepts); false for personal data (family, friends, routines, preferences, private plans).
 - Always include the signed-in user (the name on the "user:" line) as a person entity with common false and their exact name.
 - First-person statements in the prompt are facts to store, never skip them: "I like X" -> LIKES, "I own X" or "I have X" -> OWNS, "I live in X" -> LIVES_IN, "I work at X" -> WORKS_AT, "my friend/mother/family is Y" -> FRIEND_OF/FAMILY_OF, always with "from" set to the user's entity name.
+- Negation is the "negative" flag, never a new relation type: "I don't like X" / "I no longer own X" -> the same type with "negative": true (e.g. LIKES + negative). A negative statement overwrites an earlier positive one about the same pair; do not emit both.
 - Example: user "Mila", prompt "I like Lego." ->
-  {"entities":[{"name":"Mila","type":"person","common":false},{"name":"Lego","type":"thing","common":true}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES"}]}
+  {"entities":[{"name":"Mila","type":"person","common":false},{"name":"Lego","type":"thing","common":true}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":false}]}
+- Example: user "Mila", prompt "I don't like Lego anymore." ->
+  {"entities":[{"name":"Mila","type":"person","common":false},{"name":"Lego","type":"thing","common":true}],"relations":[{"from":"Mila","to":"Lego","type":"LIKES","negative":true}]}
 - relations use UPPERCASE_SNAKE types, one of: WORKS_AT, LIVES_IN, STUDIES_AT, BORN_IN, FRIEND_OF, FAMILY_OF, PART_OF, LOCATED_IN, RELATED_TO, MENTIONED_IN, LIKES, WENT_TO, OWNS, USES. "from" and "to" must be entity names from your entities list.
 - At most 12 entities and 15 relations. Prefer a few high-confidence facts over many guesses; return {"entities":[],"relations":[]} only for turns that carry no facts at all (e.g. "thanks").`;
 

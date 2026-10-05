@@ -12,7 +12,7 @@ test("parseExtraction handles plain, fenced and prose-wrapped JSON", () => {
   const plain = graphdb.parseExtraction('{"entities":[{"name":"Mila","type":"person","common":false}],"relations":[{"from":"Mila","to":"Berlin","type":"LIVES_IN"}]}');
   assert.deepEqual(plain, {
     entities: [{ name: "Mila", type: "person", common: false, props: {} }],
-    relations: [{ from: "Mila", to: "Berlin", type: "LIVES_IN" }],
+    relations: [{ from: "Mila", to: "Berlin", type: "LIVES_IN", negative: false }],
   });
   const fenced = graphdb.parseExtraction('Here you go:\n```json\n{"entities":[{"name":"Berlin","type":"place"}],"relations":[]}\n```\nDone.');
   assert.equal(fenced.entities.length, 1);
@@ -51,7 +51,23 @@ test("parseExtraction drops duplicates, self-relations and garbage", () => {
     ],
   }));
   assert.deepEqual(parsed.entities.map((entity) => `${entity.name}:${entity.type}`), ["Mila:person", "Mila:place"]);
-  assert.deepEqual(parsed.relations, [{ from: "Mila", to: "Roman", type: "FRIEND_OF" }]);
+  assert.deepEqual(parsed.relations, [{ from: "Mila", to: "Roman", type: "FRIEND_OF", negative: false }]);
+});
+
+test("parseExtraction carries the negation flag (only boolean true counts)", () => {
+  const parsed = graphdb.parseExtraction(JSON.stringify({
+    entities: [],
+    relations: [
+      { from: "Mila", to: "Lego", type: "LIKES", negative: true },
+      { from: "Mila", to: "Lego", type: "USES", negative: "yes" },
+      { from: "Mila", to: "Berlin", type: "LIVES_IN" },
+    ],
+  }));
+  assert.deepEqual(parsed.relations, [
+    { from: "Mila", to: "Lego", type: "LIKES", negative: true },
+    { from: "Mila", to: "Lego", type: "USES", negative: false },
+    { from: "Mila", to: "Berlin", type: "LIVES_IN", negative: false },
+  ]);
 });
 
 test("formatGraphContext renders user and shared lines, empty stays empty", () => {
@@ -85,8 +101,10 @@ test("memory store: status, context, upsert, shared flag and neighbourhood", asy
   const amelieId = sub.nodes.find((node) => node.name === "Amelie").id;
   const centered = await store.subgraph({ center: amelieId });
   assert.ok(centered.nodes.some((node) => node.name === "Mila"));
-  // Amelie->Mila FRIEND_OF plus Mila->Amelie KNOWS from the upsert.
-  assert.equal(centered.edges.length, 2);
+  // Only the real fact (Amelie->Mila FRIEND_OF) is drawn; the bookkeeping
+  // Mila->Amelie KNOWS edge from the upsert stays out of the panel data.
+  assert.equal(centered.edges.length, 1);
+  assert.equal(centered.edges[0].type, "FRIEND_OF");
   // Roman learns about Amelie too -> the entity becomes shared knowledge.
   await store.upsertTurn({ user: "Roman", entities: [{ name: "Amelie", type: "person", common: false, props: {} }], relations: [] });
   sub = await store.subgraph({ limit: 60 });
@@ -111,8 +129,42 @@ test("memory store: the signed-in user is one node (no duplicate person, no self
   const legoId = sub.nodes.find((node) => node.name === "Lego").id;
   // The LIKES edge goes straight from the single (user) Mila to Lego.
   assert.ok(sub.edges.some((edge) => edge.source === milaId && edge.target === legoId && edge.type === "LIKES"));
-  assert.ok(sub.edges.some((edge) => edge.source === milaId && edge.target === legoId && edge.type === "KNOWS"));
   assert.ok(!sub.edges.some((edge) => edge.source === edge.target), "no self-edge");
+  // The bookkeeping KNOWS edge is internal (brain context / shared flag) and
+  // never part of the panel's subgraph.
+  assert.ok(!sub.edges.some((edge) => edge.type === "KNOWS"), "KNOWS stays out of the panel data");
+  const schema = await store.schema();
+  assert.ok(schema.relTypes.includes("LIKES"));
+  assert.ok(!schema.relTypes.includes("KNOWS"), "the schema line must not advertise KNOWS");
+});
+
+test("memory store: negation is a flag on the same edge and flips on re-statement", async () => {
+  const store = graphdb.createMemoryStore();
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+  });
+  let sub = await store.subgraph({ limit: 60 });
+  assert.equal(sub.edges.filter((edge) => edge.type === "LIKES")[0].negative, false);
+  // "I don't like Lego anymore": the same edge flips, no second edge appears.
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES", negative: true }],
+  });
+  sub = await store.subgraph({ limit: 60 });
+  const likes = sub.edges.filter((edge) => edge.type === "LIKES");
+  assert.equal(likes.length, 1, "one LIKES edge, not a new one");
+  assert.equal(likes[0].negative, true, "the flag flipped to negative");
+  // And a positive re-statement flips it back.
+  await store.upsertTurn({
+    user: "Mila",
+    entities: [{ name: "Lego", type: "thing", common: true, props: {} }],
+    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+  });
+  sub = await store.subgraph({ limit: 60 });
+  assert.equal(sub.edges.filter((edge) => edge.type === "LIKES")[0].negative, false);
 });
 
 // --- neo4j store (mock driver) --------------------------------------------------
@@ -179,6 +231,47 @@ test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", asy
   assert.ok(calls.length >= 3, "entity MERGE, shared-knowledge and relation MERGE must all run");
   assert.ok(calls.every((cypher) => !/-\[:[A-Z_]+<-\]/.test(cypher)), JSON.stringify(calls));
   assert.ok(calls.some((cypher) => cypher.includes("(:User)-[:KNOWS]->(e:Entity)")), JSON.stringify(calls));
+  // The relation MERGE stores the negation flag; SET (not ON CREATE) is what
+  // lets a later "I don't like X" flip an existing edge.
+  const relationMerge = calls.find((cypher) => cypher.includes("r:LIKES"));
+  assert.ok(relationMerge, "expected the LIKES MERGE");
+  assert.ok(relationMerge.includes("SET r.last_seen = row.now, r.negative = row.negative"), relationMerge);
+});
+
+test("neo4j store: the panel subgraph hides KNOWS and returns the negation flag", async () => {
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
+        // One node so the default path also runs its edge query.
+        async run(cypher, params) {
+          calls.push({ cypher, params });
+          const records = cypher.includes("elementId(n)")
+            ? [{ toObject: () => ({ id: "n1", name: "Mila", type: "person", common: false, lastSeen: "now" }) }]
+            : [];
+          return { records };
+        },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+  });
+  await store.subgraph({ limit: 20 });
+  await store.subgraph({ center: "someId" });
+  const subgraphCalls = calls.filter((call) => call.cypher.includes("elementId(a)"));
+  assert.equal(subgraphCalls.length, 2, "default and centred subgraph queries");
+  for (const call of subgraphCalls) {
+    assert.ok(call.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered in: ${call.cypher}`);
+    assert.ok(call.cypher.includes("coalesce(r.negative, false)"), `negation must be returned: ${call.cypher}`);
+  }
 });
 
 test("neo4j store: the user's own person is not MERGEd as an :Entity and user relations target the :User node", async () => {

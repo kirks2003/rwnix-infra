@@ -7,6 +7,7 @@
 // eases back into a slow auto-rotate after a few idle seconds; every data
 // update re-heats the layout so new nodes and links settle into place live.
 import * as THREE from "./vendor/three.module.min.js";
+import { relationLabel } from "./relLabel.js";
 
 // Same palette as the 2D view (style.css custom properties, as hex).
 const TYPE_COLORS = {
@@ -154,7 +155,9 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
       const index = pairCount.get(key) || 0;
       pairCount.set(key, index + 1);
       incomingEdgeIds.add(id);
-      const text = String(edge.type || "link").toLowerCase().replace(/_/g, " ");
+      // The negative flag changes the wording ("likes" -> "doesn't like");
+      // the text refresh below picks polarity changes up between polls.
+      const text = relationLabel(edge.type, edge.negative === true);
       const existing = edgeLabels.get(id);
       if (existing) {
         existing.offset = index;

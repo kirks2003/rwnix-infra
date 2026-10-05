@@ -1249,3 +1249,33 @@ the same nodes) so the scenario is pinned in both views.
 Deployed (backup `jarvis-code.bak-20261005_091708.tgz`) and verified live in
 both views: the 3D scene shows both `knows` and `likes` between Mila (you) and
 Lego, as does the 2D view.
+
+## Negation and the hidden bookkeeping edge (2026-10-05, PR #31)
+
+Two connector-semantics fixes after reviewing the live panel:
+
+1. **The bookkeeping `KNOWS` edge is no longer drawn.**
+   `(:User)-[:KNOWS]->(:Entity)` is provenance — it feeds the brain's context
+   ("what does Mila know") and the shared-knowledge flag — not a fact. The
+   panel showed it as a "knows" link next to the real facts, which read like a
+   relation of its own. The filter is in the API layer: both Neo4j subgraph
+   queries (`type(r) <> 'KNOWS'`) and the schema's relation list skip `KNOWS`
+   in both stores (Neo4j and the in-memory fallback), so the edge stays in the
+   database and in `readContext`; only the panel data changes.
+2. **Negation is a flag on the relation, never a new type.** "I don't like X"
+   is `LIKES` + `negative: true`, displayed as "doesn't like" — the label map
+   (positive/negative forms for all 14 relation types) lives in
+   `public/relLabel.js`, shared by both views. The extraction prompt learned
+   the flag with positive/negative examples and the rule that a negative
+   statement overwrites an earlier positive one. Ingestion is a `SET` upsert
+   (`SET r.last_seen = row.now, r.negative = row.negative`), so a later
+   statement flips the same edge; the in-memory store flips the flag in place
+   the same way.
+
+Deployed (backup `jarvis-code.bak-20261005_103805.tgz`) and verified live
+end-to-end: the schema line lists only `LIKES` (no `KNOWS`), and both views
+show a single `likes` between Mila (you) and Lego. A real chat turn "I don't
+like Lego anymore." flipped the live edge (`negative: true` via
+`/api/graph/subgraph`, panel label "doesn't like" in the 2D view), and
+"Actually I do like Lego, I was joking." flipped it back — the graph is in its
+previous state.

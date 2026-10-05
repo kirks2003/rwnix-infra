@@ -36,14 +36,15 @@ const GRAPH_FIXTURE = {
     { id: "n3", name: "Berlin", type: "place", common: true },
     { id: "n4", name: "Kokoro-82M", type: "thing", common: true },
   ],
-  // n0 and n1 carry two edges at once (KNOWS + LIKES), like the live graph
-  // ("Mila knows Lego" + "Mila likes Lego"): parallel-edge label stacking.
+  // The API filters the bookkeeping KNOWS edges out of the panel data, so the
+  // fixture mirrors that: only real facts, one of them negative. n1 and n2
+  // carry two edges at once (USES + LIKES): parallel-edge label stacking.
   edges: [
-    { source: "n0", target: "n1", type: "KNOWS" },
     { source: "n0", target: "n1", type: "LIKES" },
     { source: "n1", target: "n2", type: "USES" },
+    { source: "n1", target: "n2", type: "LIKES" },
     { source: "n1", target: "n3", type: "LIVES_IN" },
-    { source: "n2", target: "n4", type: "USES" },
+    { source: "n2", target: "n4", type: "USES", negative: true },
   ],
 };
 
@@ -103,10 +104,12 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   assert.ok(labels.includes("Mila (you)"), "the :User node should be labelled as the signed-in user");
   const edgeLabels = await page.locator("#graphCanvas text.edge-label").allTextContents();
   assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
-  assert.ok(edgeLabels.includes("knows"), "relation types are shown in plain words");
+  assert.ok(edgeLabels.includes("likes"), "relation types are shown in plain words");
   assert.ok(edgeLabels.includes("lives in"), "underscored relation types render as words");
-  // Parallel edges on the same pair (KNOWS + LIKES) both get a label.
-  assert.ok(edgeLabels.includes("likes"), "parallel edges are both labelled");
+  // The negative flag renders as the negative form.
+  assert.ok(edgeLabels.includes("doesn't use"), `negation: ${JSON.stringify(edgeLabels)}`);
+  // The bookkeeping KNOWS edge never reaches the panel.
+  assert.ok(!edgeLabels.includes("knows"), "KNOWS is not rendered");
   assert.match(await page.textContent("#graphSchema"), /Labels: User, Entity/);
   const activity = await page.locator("#graphActivity li").allTextContents();
   assert.equal(activity.length, 2);
@@ -156,10 +159,12 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
   assert.ok(labels.includes("Rocky"), "entity labels are drawn");
   const edgeLabels = await page.locator(".graph-3d-labels span.edge").allTextContents();
   assert.equal(edgeLabels.length, GRAPH_FIXTURE.edges.length, `edge labels: ${JSON.stringify(edgeLabels)}`);
-  assert.ok(edgeLabels.includes("knows"), "relation types are shown in plain words");
+  assert.ok(edgeLabels.includes("likes"), "relation types are shown in plain words");
   assert.ok(edgeLabels.includes("lives in"), "underscored relation types render as words");
-  // Parallel edges on the same pair (KNOWS + LIKES) both get a label.
-  assert.ok(edgeLabels.includes("likes"), "parallel edges are both labelled");
+  // The negative flag renders as the negative form.
+  assert.ok(edgeLabels.includes("doesn't use"), `negation: ${JSON.stringify(edgeLabels)}`);
+  // The bookkeeping KNOWS edge never reaches the panel.
+  assert.ok(!edgeLabels.includes("knows"), "KNOWS is not rendered");
   // The wrap must reserve the canvas height in 3D mode (the hidden 2D SVG
   // contributes no flow height), or the stage paints over the panels below.
   const boxes = await page.evaluate(() => {

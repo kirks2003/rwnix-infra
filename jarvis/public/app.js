@@ -4,6 +4,7 @@ import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, split
   textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
 import { createGraph3D } from "./graph3d.js";
+import { relationLabel } from "./relLabel.js";
 
 const el = Object.fromEntries([
   "core", "waveform", "levelReadout", "stageTitle", "stageDetail", "armButton", "stopButton",
@@ -467,13 +468,13 @@ function renderGraph(subgraph) {
     line.style.stroke = "rgba(66, 217, 255, 0.25)";
     line.setAttribute("stroke-width", "1");
     svg.appendChild(line);
-    // The relation type in plain words, so a link reads like a sentence with
-    // its two node labels ("Mila" —likes→ "Lego").
+    // The relation in plain words (with the negative form), so a link reads
+    // like a sentence with its two node labels ("Mila" —likes→ "Lego").
     const label = document.createElementNS(NS, "text");
     label.setAttribute("x", String((a.x + b.x) / 2));
     label.setAttribute("y", String((a.y + b.y) / 2 - 3 - pairIndex.get(edge) * 10));
     label.setAttribute("class", "edge-label");
-    label.textContent = String(edge.type || "link").toLowerCase().replace(/_/g, " ");
+    label.textContent = relationLabel(edge.type, edge.negative === true);
     svg.appendChild(label);
   }
   for (const node of nodes) {
