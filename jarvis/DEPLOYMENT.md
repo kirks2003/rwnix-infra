@@ -2144,3 +2144,59 @@ Silver, Nvidia) and answered with fresh per-topic German trading news
 (Trump midterms/EU diesel reserves, BTCUSD at the 87k resistance, Gold
 China buying/JPMorgan $4.500, Silver equities, Nvidia SpaceX/Microsoft).
 The pre-PR failure mode (brain denying a write, graph unchanged) is gone.
+
+## Named lists are graph entities (assign-to-list) (2026-10-05, PR #45)
+
+**Report (as Roman):** "Assign Trumpn to my TradingMonitor List" → the
+brain answered it had "assigned" Trump to the list, but the 3D graph view
+showed no "TradingMonitor List" entity — only the keywords and their
+WATCHES edges. Verified in Neo4j: the turn was `graph_ingest_empty`, the
+list entity did not exist at all. The brain's "zugeordnet" was unbacked —
+it confirmed an assignment the storage pass never made.
+
+**Root cause:** the PR #44 extraction rule only covered "add/remember/track
+topics" (→ WATCHES facts). "Assign X to my **named list** L" is a different
+instruction: it needs the list itself as an entity and a membership edge.
+No rule covered it, and the brain's "already stored / assigned" answer
+again reinforced the "no facts in this turn" reading.
+
+**Changes (all `server.js` prompts + tests):**
+- `EXTRACT_SYSTEM_PROMPT`: new rule — named lists the user maintains
+  ("my TradingMonitor List", "my news list") are stored as **thing
+  entities with the exact name the user gave the list**;
+  "assign/add/move X (and Y) to my L" → the list entity L, a **`PART_OF`**
+  relation from each listed topic to L (PART_OF is an existing core type;
+  the panel labels it "part of"), and the user's WATCHES relation to each
+  topic (idempotent upsert). The list entity must appear in "entities"
+  even when only mentioned in this turn. Full JSON example (Roman + Trump
+  + TradingMonitor List).
+- Brain lines: the auto-save/confirm sentence (non-admin with context,
+  non-admin empty, admin) now names the list path ("…or assign them to a
+  named list (e.g. 'assign X to my TradingMonitor list') … stored as
+  WATCHES and PART_OF facts, a named list as its own entity"); the
+  web-search ON line maps "news about my <list>" to the list's members via
+  its PART_OF edges.
+- `tests/server.test.mjs`: the graph-ingest mock gains a named-list
+  extraction variant; new end-to-end test: "Assign Trump to my TradingMonitor
+  List" stores the list entity (type thing) + the topic's PART_OF edge
+  (source Trump → target TradingMonitor List) + the WATCHES fact; the
+  extraction prompt pins the named-list rule; the next turn's brain prompt
+  names the assign-to-list example and PART_OF.
+
+**Tests:** unit **117/117** (116 + 1: the named-list end-to-end test);
+browser **39 pass + 2 opt-in skips** (unchanged, no UI change).
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261005_233348.tgz`; synced
+`server.js`, `tests/server.test.mjs` (+ docs), md5-verified (container ==
+worktree), image rebuilt, container healthy, `/api/health` ok. Live as
+Roman: the report prompt "Assign Trumpn to my TradingMonitor List" — the
+brain first clarified the "Trumpn" typo (sensible), and on confirmation
+("Ja, Trump. Bitte eintragen in meine TradingMonitor List") answered
+"Erledigt … Ich habe Trump zu deiner TradingMonitor List hinzugefügt" and
+ingestion stored it (`graph_ingest_success extracted=3 stored=2
+extractedRelations=2 linked=2`: `TradingMonitor List (thing, owner: Roman)`
++ `Trump -[:PART_OF]-> TradingMonitor List`, the re-emitted WATCHES upserted
+idempotently). The `/api/graph/subgraph` the 3D panel renders now includes
+the `TradingMonitor List` node (not isolated — it carries an edge) with the
+`Trump -[part of]-> TradingMonitor List` label — the node the user could
+not see before the fix now exists and is drawn.
