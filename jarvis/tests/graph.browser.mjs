@@ -339,3 +339,48 @@ test("the 3D view falls back to 2D when WebGL is unavailable", async (t) => {
   assert.equal(await page.locator("#graphView3dButton").isDisabled(), true, "the 3D toggle is disabled");
   assert.equal(await page.locator("#graphCanvas circle").count(), 6, "the 2D view renders instead");
 });
+
+test("the size sliders scale the entities and link text live in both views", async (t) => {
+  const page = await openPanel(t);
+  const setSlider = (selector, value) => page.$eval(selector, (input, v) => {
+    input.value = v;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, value);
+  // 2D: the entity slider doubles the node radius (the :User node scales too)
+  // and the node names follow it; the link-text slider scales the edge labels.
+  await page.click("#graphView2dButton"); // the 3D view is the default
+  await page.waitForSelector("#graphCanvas circle");
+  const circleR = (index) => page.locator("#graphCanvas circle").nth(index).getAttribute("r");
+  assert.equal(await circleR(1), "7", "the entity node radius at 100%");
+  assert.equal(await circleR(0), "9", "the :User node renders larger at 100%");
+  const nodeFonts = () => page.$$eval("#graphCanvas text", (texts) => texts
+    .filter((text) => !text.classList.contains("edge-label"))
+    .map((text) => text.getAttribute("font-size")));
+  const edgeFont = () => page.locator("#graphCanvas text.edge-label").first()
+    .evaluate((text) => getComputedStyle(text).fontSize);
+  assert.deepEqual(await nodeFonts(), ["10", "10", "10", "10", "10", "10"], "node names at 100%");
+  assert.equal(await edgeFont(), "9px", "link text at 100%");
+  await setSlider("#graphNodeSize", "200");
+  assert.equal(await circleR(1), "14", "the entity node doubles at 200%");
+  assert.equal(await circleR(0), "18", "the :User node doubles with the same slider");
+  assert.deepEqual(await nodeFonts(), ["20", "20", "20", "20", "20", "20"], "node names follow the entity slider");
+  assert.equal(await edgeFont(), "9px", "link text is untouched by the entity slider");
+  assert.equal(await page.locator("#graphNodeSizeValue").textContent(), "200%");
+  await setSlider("#graphTextSize", "200");
+  assert.equal(await edgeFont(), "18px", "the link text doubles at 200%");
+  // 3D: the scales land on CSS custom properties the label layer reads, so
+  // the projected labels re-scale live without rebuilding the scene.
+  await page.click("#graphView3dButton");
+  await page.waitForSelector(".graph-3d-labels span:not(.edge)");
+  const spanFont = (selector) => page.locator(selector).first()
+    .evaluate((span) => getComputedStyle(span).fontSize);
+  assert.equal(await spanFont(".graph-3d-labels span:not(.edge)"), "20px", "3D node names follow the entity slider");
+  assert.equal(await spanFont(".graph-3d-labels span.edge"), "16px", "3D link text follows the text slider");
+  await setSlider("#graphNodeSize", "100");
+  assert.equal(await spanFont(".graph-3d-labels span:not(.edge)"), "10px", "3D node names track the slider back down");
+  // The values persist per browser across reloads.
+  await setSlider("#graphTextSize", "150");
+  await page.reload();
+  assert.equal(await page.locator("#graphNodeSize").inputValue(), "100");
+  assert.equal(await page.locator("#graphTextSize").inputValue(), "150");
+});

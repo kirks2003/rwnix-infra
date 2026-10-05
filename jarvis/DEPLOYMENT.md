@@ -1847,3 +1847,69 @@ Assistant(owner: Roman)` edge (the MERGE matched the re-typed edge, no
 duplicate), the panel subgraph carries it (label "interested in" via the
 fallback), the schema lists `INTERESTED_IN`, and the brain's own answer read
 "you're already linked as **interested in** Home Assistant".
+
+## Graph size sliders: entity size + link text, live in 2D and 3D (2026-10-05, PR #41)
+
+**Request (user):** "lets make 2 slider for the size of Entities and link
+Text size to adjust live for 2d and 3d graph panel" — two sliders under the
+Knowledge graph panel head, **Entities** (node size and node names) and
+**Link text** (edge labels), 50%–200% in 10% steps, adjusting the open view
+live and persisting per browser.
+
+**Changes**
+
+- `public/index.html`: the panel section carries `id="graphPanel"` (the
+  scope for the scale custom properties); new `.graph-controls` row between
+  the head and the body with the two `<input type="range">` sliders
+  (`#graphNodeSize`, `#graphTextSize`, min 50 / max 200 / step 10 / value
+  100), each with a `<label>` + `<output>` percentage readout, plus a help
+  line (`#graphControlsHelp`).
+- `public/style.css`:
+  - `.graph-canvas .edge-label` font-size is
+    `calc(9px * var(--graph-text-scale, 1))` (2D link text).
+  - `.graph-3d-labels span` is `calc(10px * var(--graph-node-scale, 1))`
+    (3D node names follow the **Entities** slider) and `span.edge` is
+    `calc(8px * var(--graph-text-scale, 1))` (3D link text).
+  - The scales are set as inline custom properties on `#graphPanel`, so
+    both the SVG and the projected DOM label layer inherit them — a slider
+    drag re-scales the open 3D label layer with no scene work.
+  - `.graph-controls` / `.graph-controls-help` styling (compact row, 120 px
+    sliders, muted text).
+- `public/app.js`:
+  - `graphScales = { node, text }` (1 = 100%) + `applyGraphScales()`: sets
+    the two CSS custom properties on `#graphPanel`, updates the `<output>`
+    readouts, calls `graph3d.setNodeScale(node)`, and re-renders the 2D
+    view when it is the visible one (the 2D layout is deterministic — fixed
+    90-step simulation, no randomness — so re-rendering on input does not
+    move nodes).
+  - `onGraphScaleInput()` reads both sliders, persists
+    `localStorage["jarvis.graphSizes"] = {node, text}` and applies; plain
+    `input` listeners, no debounce (the work is one style pass + one SVG
+    re-render at most).
+  - `renderGraph()`: circle `r` is `9 * node` for the `:User` node and
+    `7 * node` for entities; the node-name font (`10 * node`) and its
+    offset above the node (`11 * node`) track the slider.
+  - `setGraphView()` passes `nodeScale: graphScales.node` into
+    `createGraph3D(...)` so a lazily created 3D scene starts at the right
+    scale.
+  - Init: the persisted values are restored (50–200 clamped) **before**
+    `setGraphView("3d")`, so the first render already uses them.
+- `public/graph3d.js`:
+  - `createGraph3D(..., { nodeScale = 1 })`; every node entry keeps its
+    `baseScale` (1.7 typed / 2.7 `:User`) and its sphere scale is
+    `baseScale * nodeScaleFactor`.
+  - `setNodeScale(scale)` rescales all spheres in place — the settled
+    layout keeps its positions, so the view does not jump.
+
+**Tests:** unit **109/109** (unchanged — the feature is client-side).
+Browser **39 pass + 2 opt-in skips** (+1: "the size sliders scale the
+entities and link text live in both views" — 2D: entity radius 7→14 and
+`:User` 9→18 at 200%, node-name font 10→20, edge labels 9px→18px only via
+the text slider; 3D: projected node labels 20px→10px tracking the entity
+slider live, edge labels 16px at 200%; persistence across reload).
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261005_212603.tgz`;
+synced `public/app.js`, `public/graph3d.js`, `public/index.html`,
+`public/style.css`, `tests/graph.browser.mjs` (+ docs), md5-verified against
+the worktree, image rebuilt, container healthy, `/api/health` ok, served
+`app.js`/`style.css`/`index.html` md5 match the source.

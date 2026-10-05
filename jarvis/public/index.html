@@ -57,7 +57,7 @@
         </div>
       </section>
 
-      <section class="graph-panel app-ui">
+      <section class="graph-panel app-ui" id="graphPanel">
         <div class="graph-head">
           <h2>Knowledge graph</h2>
           <span id="graphStatus" class="pipeline-status" role="status">Loading…</span>
@@ -68,6 +68,13 @@
           <button id="graphRemoveButton" type="button" hidden title="Remove the selected entity (and its links) from the knowledge graph"></button>
           <button id="graphRefreshButton" type="button" disabled>Refresh</button>
         </div>
+        <div class="graph-controls" role="group" aria-label="Graph display size">
+          <label for="graphNodeSize">Entities <output id="graphNodeSizeValue">100%</output></label>
+          <input id="graphNodeSize" type="range" min="50" max="200" step="10" value="100" aria-describedby="graphControlsHelp">
+          <label for="graphTextSize">Link text <output id="graphTextSizeValue">100%</output></label>
+          <input id="graphTextSize" type="range" min="50" max="200" step="10" value="100" aria-describedby="graphControlsHelp">
+        </div>
+        <p id="graphControlsHelp" class="graph-controls-help">Size of the entities (nodes and their names) and of the link text, for the 2D and 3D views. Adjusts live; saved in this browser only.</p>
         <div class="graph-body">
           <div class="graph-canvas-wrap">
             <svg id="graphCanvas" class="graph-canvas" viewBox="0 0 640 320" role="img" aria-label="Knowledge graph visualization (2D)" hidden></svg>

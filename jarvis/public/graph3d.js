@@ -34,7 +34,7 @@ const ALPHA_DECAY_PER_FRAME = 0.008;
 const ALPHA_FLOOR = 0.02;
 const AUTO_ROTATE_AFTER_MS = 5000;
 
-export function createGraph3D(stage, { userName = null, onNodeClick, onFallback } = {}) {
+export function createGraph3D(stage, { userName = null, onNodeClick, onFallback, nodeScale = 1 } = {}) {
   const canvas = document.createElement("canvas");
   canvas.setAttribute("aria-label", "Knowledge graph visualization (3D)");
   const labelLayer = document.createElement("div");
@@ -78,6 +78,9 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
   let edges = [];
   let alpha = 0;
   let disposed = false;
+  // The panel's "Entities" slider: multiplies the base sphere scale of every
+  // node (set live via setNodeScale while the view is open).
+  let nodeScaleFactor = nodeScale;
 
   const orbit = {
     // Spherical camera position; target* is where the drag/zoom is aiming,
@@ -132,14 +135,14 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
         // 2D view; transparent from the start so the opacity can flip later
         // when a fact edge appears.
         const mesh = new THREE.Mesh(sphereGeometry, new THREE.MeshLambertMaterial({ color: nodeColor(node), transparent: true, opacity: node.isolated ? 0.35 : 1 }));
-        // The :User account node renders distinctly, like the 2D view.
-        mesh.scale.setScalar(node.type ? 1.7 : 2.7);
         const pos = new THREE.Vector3(
           (Math.random() - 0.5) * 2,
           (Math.random() - 0.5) * 2,
           (Math.random() - 0.5) * 2,
         ).multiplyScalar(40 + Math.random() * 50);
-        entry = { mesh, label: makeLabel(node), pos };
+        // The :User account node renders distinctly, like the 2D view.
+        entry = { mesh, label: makeLabel(node), pos, baseScale: node.type ? 1.7 : 2.7 };
+        mesh.scale.setScalar(entry.baseScale * nodeScaleFactor);
         mesh.userData.nodeId = node.id;
         scene.add(mesh);
         nodeState.set(node.id, entry);
@@ -200,6 +203,13 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
     }
     // New structure: let the layout re-settle, but gently.
     alpha = Math.max(alpha, 1);
+  }
+
+  // The panel's "Entities" slider: rescale every sphere in place (the
+  // layout keeps its positions, so the view does not jump).
+  function setNodeScale(scale) {
+    nodeScaleFactor = scale;
+    for (const entry of nodeState.values()) entry.mesh.scale.setScalar(entry.baseScale * nodeScaleFactor);
   }
 
   // One force pass (repulsion + link springs + centering), applied scaled by
@@ -415,5 +425,5 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback 
     cleanupDom();
   }
 
-  return { update, dispose };
+  return { update, dispose, setNodeScale };
 }
