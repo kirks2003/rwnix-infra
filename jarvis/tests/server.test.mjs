@@ -67,16 +67,21 @@ before(async () => {
       if (mode === "graph-ingest") {
         // The brain answer and the post-turn extraction call both hit this
         // endpoint; the extraction one carries the EXTRACT_SYSTEM_PROMPT.
-        // A "trading news list" prompt gets a WATCHES extraction instead of
-        // the canned LIKES one, so the save-instruction path is testable.
+        // A "trading news list" prompt gets a WATCHES extraction, a
+        // "TradingMonitor List" prompt gets a named-list extraction (list
+        // entity + PART_OF membership), instead of the canned LIKES one.
         const body = JSON.parse(received.toString("utf8") || "{}");
         const isExtraction = String(body.messages?.[0]?.content || "").includes("knowledge-graph entities");
-        const isWatchTurn = isExtraction && String(body.messages?.[1]?.content || "").includes("trading news list");
-        res.end(isWatchTurn
-          ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Gold\\",\\"type\\":\\"topic\\"},{\\"name\\":\\"Nvidia\\",\\"type\\":\\"organization\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Gold\\",\\"type\\":\\"WATCHES\\"},{\\"from\\":\\"Mila\\",\\"to\\":\\"Nvidia\\",\\"type\\":\\"WATCHES\\"}]}"}}]}'
-          : isExtraction
-            ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Lego\\",\\"type\\":\\"thing\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Lego\\",\\"type\\":\\"LIKES\\"}]}"}}]}'
-            : '{"choices":[{"message":{"content":"Noted."}}]}');
+        const turnText = isExtraction ? String(body.messages?.[1]?.content || "") : "";
+        const isWatchTurn = turnText.includes("trading news list");
+        const isListTurn = turnText.includes("TradingMonitor List");
+        res.end(isListTurn
+          ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Trump\\",\\"type\\":\\"person\\"},{\\"name\\":\\"TradingMonitor List\\",\\"type\\":\\"thing\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Trump\\",\\"type\\":\\"WATCHES\\"},{\\"from\\":\\"Trump\\",\\"to\\":\\"TradingMonitor List\\",\\"type\\":\\"PART_OF\\"}]}"}}]}'
+          : isWatchTurn
+            ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Gold\\",\\"type\\":\\"topic\\"},{\\"name\\":\\"Nvidia\\",\\"type\\":\\"organization\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Gold\\",\\"type\\":\\"WATCHES\\"},{\\"from\\":\\"Mila\\",\\"to\\":\\"Nvidia\\",\\"type\\":\\"WATCHES\\"}]}"}}]}'
+            : isExtraction
+              ? '{"choices":[{"message":{"content":"{\\"entities\\":[{\\"name\\":\\"Mila\\",\\"type\\":\\"person\\"},{\\"name\\":\\"Lego\\",\\"type\\":\\"thing\\"}],\\"relations\\":[{\\"from\\":\\"Mila\\",\\"to\\":\\"Lego\\",\\"type\\":\\"LIKES\\"}]}"}}]}'
+              : '{"choices":[{"message":{"content":"Noted."}}]}');
         return;
       }
       if (mode === "web-tools") {
@@ -313,6 +318,51 @@ test("save/track instructions land as WATCHES facts and the brain is told the gr
   const brainPrompt = lastBrain.messages[0].content;
   assert.match(brainPrompt, /updated automatically after every answer/);
   assert.match(brainPrompt, /confirm that it is done/);
+});
+
+test("assigning a topic to a named list stores the list entity and its PART_OF membership", async (t) => {
+  mode = "graph-ingest";
+  t.after(() => { mode = "success"; });
+  const graphBackend = await startBackend({ GRAPH_MEMORY: "1" });
+  t.after(async () => { graphBackend.process.kill(); await once(graphBackend.process, "exit"); });
+  const chat = await auth(graphBackend.origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Assign Trump to my TradingMonitor List.", sessionId: "watch-list-assign", mcp: { graph: true } }),
+  });
+  assert.equal(chat.status, 200);
+  // Ingestion is fire-and-forget: poll until the upsert has landed.
+  let sub = { nodes: [], edges: [] };
+  for (let i = 0; i < 40; i += 1) {
+    sub = await (await auth(graphBackend.origin, "/api/graph/subgraph")).json();
+    if ((sub.edges || []).some((edge) => edge.type === "PART_OF")) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  // The list is its own entity (so it shows up in the graph view), the
+  // topic is a member of it, and the user watches the topic.
+  const listNode = sub.nodes.find((node) => node.name === "TradingMonitor List");
+  assert.ok(listNode, JSON.stringify(sub.nodes));
+  assert.equal(listNode.type, "thing");
+  assert.ok(sub.nodes.some((node) => node.name === "Trump"), JSON.stringify(sub.nodes));
+  const partOf = sub.edges.find((edge) => edge.type === "PART_OF");
+  assert.ok(partOf, JSON.stringify(sub.edges));
+  const names = (id) => sub.nodes.find((node) => node.id === id)?.name;
+  assert.equal(names(partOf.source), "Trump");
+  assert.equal(names(partOf.target), "TradingMonitor List");
+  assert.ok(sub.edges.some((edge) => edge.type === "WATCHES"), JSON.stringify(sub.edges));
+  // The extraction prompt the production LLM reads pins the named-list rule.
+  const extraction = JSON.parse(received.toString("utf8"));
+  assert.match(extraction.messages[0].content, /Named lists the user maintains/);
+  assert.match(extraction.messages[0].content, /PART_OF/);
+  // The next turn's brain prompt names the list path (assign-to-list
+  // confirmations are stored, not denied).
+  mode = "success";
+  await auth(graphBackend.origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "What is in my TradingMonitor List?", sessionId: "watch-list-read", mcp: { graph: true } }),
+  });
+  const brainPrompt = lastBrain.messages[0].content;
+  assert.match(brainPrompt, /assign X to my TradingMonitor list/);
+  assert.match(brainPrompt, /PART_OF/);
 });
 
 test("the brain answers as the wake word's name, per request", async () => {
