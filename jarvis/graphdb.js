@@ -119,43 +119,90 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
 
   const rows = (result) => result.records.map((record) => record.toObject());
 
+  // The signed-in user's visible world: their :User node, the entities they
+  // know, one entity-hop of world knowledge around those, and the real fact
+  // edges between them. Never another user's node or edge. `drawn` marks the
+  // nodes the panel shows: the user node plus every entity a visible fact
+  // edge actually touches. Isolated mentions — entities the user knows but no
+  // visible fact edge touches — are kept in the database (KNOWS stays, so the
+  // brain context and list-my-knowledge still see them) but are not drawn or
+  // counted, so a mere mention does not float in the other users' 3D view.
+  async function visibleWorld(user, cap, userRows = null) {
+    if (!userRows) {
+      userRows = rows(await run(readClient, "MATCH (u:User {name: $user}) RETURN elementId(u) AS id, u.name AS name", { user }));
+    }
+    if (!userRows.length) return null;
+    const knownRows = rows(await run(readClient,
+      "MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity) " +
+      "ORDER BY e.last_seen DESC LIMIT $limit " +
+      "RETURN elementId(e) AS id, e.name AS name, e.type AS type, e.common AS common",
+      // The JS driver encodes plain numbers as floats and Neo4j LIMIT
+      // rejects them ("'60.0' is not a valid value"), so wrap in neo4j.int.
+      { user, limit: neo4j.int(cap) },
+    ));
+    const byId = new Map([[userRows[0].id, { id: userRows[0].id, name: userRows[0].name, type: null, common: false, drawn: true }]]);
+    for (const row of knownRows) byId.set(row.id, { id: row.id, name: row.name, type: row.type, common: row.common, drawn: false });
+    if (knownRows.length) {
+      const neighborRows = rows(await run(readClient,
+        "MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity) MATCH (e)-[r]-(n:Entity) " +
+        "WHERE type(r) <> 'KNOWS' AND NOT elementId(n) IN $knownIds " +
+        "RETURN DISTINCT elementId(n) AS id, n.name AS name, n.type AS type, n.common AS common " +
+        "LIMIT $limit",
+        { user, knownIds: knownRows.map((row) => row.id), limit: neo4j.int(cap) },
+      ));
+      for (const row of neighborRows) if (!byId.has(row.id)) byId.set(row.id, { id: row.id, name: row.name, type: row.type, common: row.common, drawn: false });
+    }
+    const ids = [...byId.keys()];
+    let edgeRows = [];
+    if (ids.length) {
+      edgeRows = rows(await run(readClient,
+        "MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) IN $ids AND type(r) <> 'KNOWS' " +
+        "RETURN elementId(a) AS source, elementId(b) AS target, type(r) AS type, coalesce(r.negative, false) AS negative " +
+        "LIMIT 300",
+        { ids },
+      ));
+    }
+    for (const row of edgeRows) {
+      const source = byId.get(row.source);
+      const target = byId.get(row.target);
+      if (source) source.drawn = true;
+      if (target) target.drawn = true;
+    }
+    return { byId, edges: edgeRows };
+  }
+
   return {
     memory: false,
 
-    // Counts of the signed-in user's visible world: their :User node, the
-    // entities they know, one entity-hop of world knowledge around those, and
-    // the edges between them. Never another user's node or edge.
+    // Counts of the signed-in user's drawn world (must match the panel's
+    // subgraph exactly): their :User node, the entities a visible fact edge
+    // touches, and those edges. Never another user's node or edge.
     async status({ user } = {}) {
-      const [known, neighbors, factEdges, entityEdges, labels, relTypes] = await Promise.all([
-        rows(await run(readClient, "MATCH (u:User {name: $user})-[:KNOWS]->(e) RETURN count(DISTINCT e) AS value", { user })),
-        rows(await run(readClient,
-          "MATCH (u:User {name: $user})-[:KNOWS]->(a:Entity) MATCH (a)-[r]-(b:Entity) " +
-          "WHERE type(r) <> 'KNOWS' AND NOT EXISTS { (u)-[:KNOWS]->(b) } RETURN count(DISTINCT b) AS value",
-          { user },
-        )),
-        rows(await run(readClient, "MATCH (u:User {name: $user})-[r]->() WHERE type(r) <> 'KNOWS' RETURN count(r) AS value", { user })),
-        rows(await run(readClient,
-          "MATCH (u:User {name: $user})-[:KNOWS]->(a:Entity) MATCH (a)-[r]-(b:Entity) " +
-          "WHERE type(r) <> 'KNOWS' RETURN count(DISTINCT elementId(r)) AS value",
-          { user },
-        )),
+      // 60 = the panel's default /api/graph/subgraph?limit=60.
+      const [world, labelRows, relRows] = await Promise.all([
+        visibleWorld(user, 60),
         rows(await run(readClient, "MATCH (n) UNWIND labels(n) AS label RETURN DISTINCT label ORDER BY label LIMIT 50")),
         rows(await run(readClient, "MATCH ()-[r]->() UNWIND [type(r)] AS t RETURN DISTINCT t ORDER BY t LIMIT 50")),
       ]);
+      // KNOWS is bookkeeping, not a link the panel should advertise.
+      const relTypes = relRows.map((row) => row.t).filter((type) => type !== "KNOWS");
+      if (!world) return { nodes: 0, edges: 0, labels: labelRows.map((row) => row.label), relTypes };
+      const drawnNodes = [...world.byId.values()].filter((node) => node.drawn);
       return {
-        nodes: 1 + Number(known[0]?.value || 0) + Number(neighbors[0]?.value || 0),
-        edges: Number(factEdges[0]?.value || 0) + Number(entityEdges[0]?.value || 0),
-        labels: labels.map((row) => row.label),
-        // KNOWS is bookkeeping, not a link the panel should advertise.
-        relTypes: relTypes.map((row) => row.t).filter((type) => type !== "KNOWS"),
+        nodes: drawnNodes.length,
+        edges: world.edges.length,
+        labels: labelRows.map((row) => row.label),
+        relTypes,
       };
     },
 
     // Bounded neighbourhood for the panel, scoped to the signed-in user's
-    // visible world: their :User node, the entities they know, one entity-hop
-    // of world knowledge around those (or, with `center`, one visible node
-    // plus its direct neighbours). Never another user's node or edge — the
-    // panel is per-user by construction.
+    // visible world: their :User node plus the entities a visible fact edge
+    // touches in that world (their own facts and one entity-hop of world
+    // knowledge around what they know). Isolated mentions — known entities
+    // with no visible fact edge — are not drawn. With `center`: one visible
+    // node plus its direct neighbours. Never another user's node or edge —
+    // the panel is per-user by construction.
     async subgraph({ user, limit = 60, center = null } = {}) {
       const cap = Math.min(120, Math.max(1, Number(limit) || 60));
       const userRows = rows(await run(readClient, "MATCH (u:User {name: $user}) RETURN elementId(u) AS id, u.name AS name", { user }));
@@ -189,42 +236,14 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         }
         return { nodes: [...byId.values()], edges: edges.slice(0, 200), center };
       }
-      const knownRows = rows(await run(readClient,
-        "MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity) " +
-        "ORDER BY e.last_seen DESC LIMIT $limit " +
-        "RETURN elementId(e) AS id, e.name AS name, e.type AS type, e.common AS common",
-        // The JS driver encodes plain numbers as floats and Neo4j LIMIT
-        // rejects them ("'60.0' is not a valid value"), so wrap in neo4j.int.
-        { user, limit: neo4j.int(cap) },
-      ));
-      const nodes = [
-        { id: userRows[0].id, name: userRows[0].name, type: null, common: false },
-        ...knownRows.map((row) => ({ id: row.id, name: row.name, type: row.type, common: row.common })),
-      ];
-      const ids = nodes.map((node) => node.id);
-      let neighborRows = [];
-      if (knownRows.length) {
-        neighborRows = rows(await run(readClient,
-          "MATCH (u:User {name: $user})-[:KNOWS]->(e:Entity) MATCH (e)-[r]-(n:Entity) " +
-          "WHERE type(r) <> 'KNOWS' AND NOT elementId(n) IN $knownIds " +
-          "RETURN DISTINCT elementId(n) AS id, n.name AS name, n.type AS type, n.common AS common " +
-          "LIMIT $limit",
-          { user, knownIds: knownRows.map((row) => row.id), limit: neo4j.int(cap) },
-        ));
-      }
-      const allIds = [...ids, ...neighborRows.map((row) => row.id)];
-      let edgeRows = [];
-      if (allIds.length) {
-        edgeRows = rows(await run(readClient,
-          "MATCH (a)-[r]->(b) WHERE elementId(a) IN $ids AND elementId(b) IN $ids AND type(r) <> 'KNOWS' " +
-          "RETURN elementId(a) AS source, elementId(b) AS target, type(r) AS type, coalesce(r.negative, false) AS negative " +
-          "LIMIT 300",
-          { ids: allIds },
-        ));
-      }
+      const world = await visibleWorld(user, cap, userRows);
+      const drawnNodes = [...world.byId.values()].filter((node) => node.drawn);
       return {
-        nodes: [...nodes, ...neighborRows.map((row) => ({ id: row.id, name: row.name, type: row.type, common: row.common }))],
-        edges: edgeRows,
+        // Only the drawn nodes: the user node plus entities a visible fact
+        // edge touches. Isolated mentions (no fact edge in the user's world)
+        // stay in the database and out of the panel.
+        nodes: drawnNodes.map(({ drawn, ...node }) => node),
+        edges: world.edges,
         center: null,
       };
     },
@@ -396,40 +415,71 @@ function createMemoryStore(users = []) {
     return [...nodes.values()].find((node) => node.name === user && node.type === "person" && node.props.role === "user") || null;
   }
 
+  // Same visible-world rules as the Neo4j store: the user node, the entities
+  // a visible fact edge touches (candidate world = user + known entities +
+  // one entity-hop, exactly like the Neo4j queries), and those edges.
+  // `drawn` marks the user node plus every entity a visible fact edge
+  // actually touches; isolated mentions are kept in the store (KNOWS stays)
+  // but not drawn or counted.
+  function visibleWorld(user, cap) {
+    const userNode = userNodeOf(user);
+    if (!userNode) return null;
+    const facts = edges.filter((edge) => edge.type !== "KNOWS");
+    const isEntity = (node) => Boolean(node) && node.props.role !== "user";
+    const known = new Set(edges.filter((edge) => edge.source === userNode.id && edge.type === "KNOWS").map((edge) => edge.target));
+    const knownNodes = [...known].map((id) => nodes.get(id)).filter(Boolean)
+      .sort((a, b) => String(b.lastSeen).localeCompare(String(a.lastSeen)))
+      .slice(0, cap);
+    const neighborIds = new Set();
+    for (const edge of facts) {
+      if (knownNodes.some((node) => node.id === edge.source) && !known.has(edge.target) && isEntity(nodes.get(edge.target))) neighborIds.add(edge.target);
+      if (knownNodes.some((node) => node.id === edge.target) && !known.has(edge.source) && isEntity(nodes.get(edge.source))) neighborIds.add(edge.source);
+    }
+    const byId = new Map([[userNode.id, { node: userNode, drawn: true }]]);
+    for (const node of knownNodes) byId.set(node.id, { node, drawn: false });
+    for (const id of neighborIds) {
+      const node = nodes.get(id);
+      if (node && !byId.has(id)) byId.set(id, { node, drawn: false });
+    }
+    const candidateIds = new Set(byId.keys());
+    const drawnEdges = facts
+      .filter((edge) => candidateIds.has(edge.source) && candidateIds.has(edge.target))
+      .slice(0, 200);
+    for (const edge of drawnEdges) {
+      const source = byId.get(edge.source);
+      const target = byId.get(edge.target);
+      if (source) source.drawn = true;
+      if (target) target.drawn = true;
+    }
+    return { userNode, byId, drawnEdges };
+  }
+
   return {
     memory: true,
 
+    // Counts of the signed-in user's drawn world (must match the panel's
+    // subgraph exactly): their :User node, the entities a visible fact edge
+    // touches, and those edges.
     async status({ user } = {}) {
-      const userNode = userNodeOf(user);
-      const known = new Set(userNode ? edges.filter((edge) => edge.source === userNode.id && edge.type === "KNOWS").map((edge) => edge.target) : []);
-      const facts = edges.filter((edge) => edge.type !== "KNOWS");
-      const neighbors = new Set();
-      for (const edge of facts) {
-        if (known.has(edge.source) && !known.has(edge.target) && nodes.get(edge.target)?.props.role !== "user") neighbors.add(edge.target);
-        if (known.has(edge.target) && !known.has(edge.source) && nodes.get(edge.source)?.props.role !== "user") neighbors.add(edge.source);
-      }
-      const factEdges = userNode ? facts.filter((edge) => edge.source === userNode.id).length : 0;
-      // Entity-hop edges only: both endpoints are :Entity, so the user's own
-      // fact edges (which have a :User endpoint) are not double-counted here,
-      // matching the Neo4j store.
-      const entityEdges = facts.filter((edge) => {
-        const s = nodes.get(edge.source), t = nodes.get(edge.target);
-        return s && t && s.props.role !== "user" && t.props.role !== "user"
-          && (known.has(edge.source) || known.has(edge.target));
-      }).length;
+      // 60 = the panel's default /api/graph/subgraph?limit=60.
+      const world = visibleWorld(user, 60);
+      const labels = [...new Set([...nodes.values()].map((node) => (node.props.role === "user" ? "User" : "Entity")))];
+      // KNOWS is bookkeeping, not a link the panel should advertise.
+      const relTypes = [...new Set(edges.map((edge) => edge.type))].filter((type) => type !== "KNOWS").sort();
+      if (!world) return { nodes: 0, edges: 0, labels, relTypes };
+      const drawnNodes = [...world.byId.values()].filter((entry) => entry.drawn);
       return {
-        nodes: userNode ? 1 + known.size + neighbors.size : 0,
-        edges: factEdges + entityEdges,
-        labels: [...new Set([...nodes.values()].map((node) => (node.props.role === "user" ? "User" : "Entity")))],
-        // KNOWS is bookkeeping, not a link the panel should advertise.
-        relTypes: [...new Set(edges.map((edge) => edge.type))].filter((type) => type !== "KNOWS").sort(),
+        nodes: drawnNodes.length,
+        edges: world.drawnEdges.length,
+        labels,
+        relTypes,
       };
     },
 
-    // Scoped to the signed-in user's visible world, like the Neo4j store:
-    // their node, what they know, one entity-hop of world knowledge around
-    // it (or a visible centre plus its neighbours). Never another user's
-    // node or edge.
+    // Scoped to the signed-in user's drawn world, like the Neo4j store:
+    // their node plus the entities a visible fact edge touches in that world
+    // (isolated mentions are not drawn), or a visible centre plus its
+    // neighbours. Never another user's node or edge.
     async subgraph({ user, limit = 60, center = null } = {}) {
       const cap = Math.min(120, Math.max(1, Number(limit) || 60));
       const userNode = userNodeOf(user);
@@ -459,23 +509,14 @@ function createMemoryStore(users = []) {
           center,
         };
       }
-      const knownNodes = [...known].map((id) => nodes.get(id)).filter(Boolean)
-        .sort((a, b) => String(b.lastSeen).localeCompare(String(a.lastSeen)))
-        .slice(0, cap);
-      // Entity-hop neighbours: only :Entity nodes. The user node is added
-      // explicitly below (as the type-less user node), and another user's
-      // node is never a panel neighbour (per-user isolation).
-      const isEntity = (node) => Boolean(node) && node.props.role !== "user";
-      const neighborIds = new Set();
-      for (const edge of facts) {
-        if (knownNodes.some((node) => node.id === edge.source) && !known.has(edge.target) && isEntity(nodes.get(edge.target))) neighborIds.add(edge.target);
-        if (knownNodes.some((node) => node.id === edge.target) && !known.has(edge.source) && isEntity(nodes.get(edge.source))) neighborIds.add(edge.source);
-      }
-      const picked = [...knownNodes, ...[...neighborIds].map((id) => nodes.get(id)).filter(Boolean).slice(0, cap)];
-      const ids = new Set([userNode.id, ...picked.map((node) => node.id)]);
+      const world = visibleWorld(user, cap);
+      const drawn = [...world.byId.values()].filter((entry) => entry.drawn);
       return {
-        nodes: [publicUserNode(userNode), ...picked.map(publicNode)],
-        edges: facts.filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
+        // Only the drawn nodes: the user node plus entities a visible fact
+        // edge touches. Isolated mentions stay in the store and out of the
+        // panel.
+        nodes: drawn.map((entry) => (entry.node.id === userNode.id ? publicUserNode(entry.node) : publicNode(entry.node))),
+        edges: world.drawnEdges,
         center: null,
       };
     },
