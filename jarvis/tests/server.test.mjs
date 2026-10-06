@@ -277,6 +277,14 @@ test("finished chat turns are ingested into the knowledge graph", async (t) => {
   }
   assert.ok(sub.nodes.some((node) => node.name === "Lego" && node.type === "thing"), JSON.stringify(sub.nodes));
   assert.ok(sub.edges.some((edge) => edge.type === "LIKES"), JSON.stringify(sub.edges));
+  // The extraction request is the last upstream call of the turn. It goes to
+  // the same reasoning model as the brain, so it needs the same
+  // reasoning-safe budget: with 1200 tokens the model spent the budget on
+  // thinking and the JSON never came back (content: null), so live turns
+  // stored nothing even though the panel query was ready to show it.
+  const extraction = JSON.parse(received.toString("utf8"));
+  assert.match(extraction.messages[0].content, /knowledge-graph entities/);
+  assert.ok(extraction.max_tokens >= 4096);
 });
 
 test("save/track instructions land as WATCHES facts and the brain is told the graph auto-saves", async (t) => {
