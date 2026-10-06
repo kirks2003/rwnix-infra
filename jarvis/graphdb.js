@@ -783,12 +783,48 @@ function createMemoryStore(users = []) {
   };
 }
 
+// Recover OpenAI-shaped tool calls when the brain returned them as native
+// XML inside the message content (DeepSeek behind an OpenAI-compatible proxy
+// does this intermittently):
+//   <|tool_calls|><|invoke| name="list-my-facts"><|parameter|
+//   name="relation" string="true">PART_OF<|/parameter|><|/invoke|>
+//   <|/tool_calls|>
+// Unparsed, that XML would be spoken and rendered as the answer. The anchors
+// (invoke/parameter tags with name="...") are matched leniently: the wrapper
+// tokens vary between model builds. Returns [] for ordinary answers — the
+// gate requires the tool_calls wrapper, or both an invoke and a parameter
+// tag, so prose that merely mentions these words is never reinterpreted.
+function parseToolCallsFromContent(content) {
+  const text = typeof content === "string" ? content : "";
+  const looksLikeToolCallXml = /<\|?tool_calls\|?/.test(text)
+    || (/<\|?invoke\|?\s+name="/.test(text) && /<\|?parameter\|?\s+name="/.test(text));
+  if (!looksLikeToolCallXml) return [];
+  const calls = [];
+  const invokeRe = /<\|?invoke\|?\s+name="([^"]+)"[^>]*>([\s\S]*?)<\|?\/invoke\|?/g;
+  const paramRe = /<\|?parameter\|?\s+name="([^"]+)"[^>]*>([\s\S]*?)<\|?\/parameter\|?/g;
+  let block;
+  while ((block = invokeRe.exec(text)) !== null && calls.length < 8) {
+    const args = {};
+    let param;
+    paramRe.lastIndex = 0;
+    while ((param = paramRe.exec(block[2])) !== null) {
+      const raw = param[2].trim();
+      let value = raw;
+      try { value = JSON.parse(raw); } catch { /* plain string value */ }
+      args[param[1]] = value;
+    }
+    calls.push({ id: `xml_${calls.length}_${block[1]}`, type: "function", function: { name: block[1], arguments: JSON.stringify(args) } });
+  }
+  return calls;
+}
+
 module.exports = {
   ENTITY_TYPES,
   RELATION_TYPES,
   MAX_ENTITIES,
   MAX_RELATIONS,
   parseExtraction,
+  parseToolCallsFromContent,
   isRelationType,
   normalizeRelationType,
   sanitizeName,

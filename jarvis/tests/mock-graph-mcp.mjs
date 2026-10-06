@@ -15,6 +15,7 @@ const TOOLS = [
   { name: "list-my-facts", description: "fake facts list", inputSchema: { type: "object", properties: { about: { type: "string" }, relation: { type: "string" } } } },
   { name: "store-entity", description: "fake store entity (admin)", inputSchema: { type: "object", properties: { owner: { type: "string" }, name: { type: "string" }, type: { type: "string" } } } },
   { name: "store-fact", description: "fake store fact (admin)", inputSchema: { type: "object", properties: { owner: { type: "string" }, from: { type: "string" }, to: { type: "string" }, type: { type: "string" }, negative: { type: "boolean" } } } },
+  { name: "rename-entity", description: "fake rename entity (admin)", inputSchema: { type: "object", properties: { owner: { type: "string" }, name: { type: "string" }, newName: { type: "string" } } } },
   { name: "delete-entity", description: "fake delete entity (admin)", inputSchema: { type: "object", properties: { owner: { type: "string" }, name: { type: "string" } } } },
 ];
 
@@ -74,6 +75,9 @@ async function handleMessage(message) {
       }
       if (name === "store-fact") {
         return respond(id, { content: [{ type: "text", text: `Stored ${args.type || "?"} from ${args.from || "?"} to ${args.to || "?"} under ${args.owner || "?"}. (mock data)` }] });
+      }
+      if (name === "rename-entity") {
+        return respond(id, { content: [{ type: "text", text: `Renamed ${args.name || "?"} to ${args.newName || "?"} (owner ${args.owner || "?"}); all links kept. (mock data)` }] });
       }
       if (name === "delete-entity") {
         return respond(id, { content: [{ type: "text", text: `Deleted ${args.name || "?"} (owner ${args.owner || "?"}). (mock data)` }] });

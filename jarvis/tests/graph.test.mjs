@@ -52,6 +52,35 @@ test("parseExtraction introduces well-formed new relation types, rejects prose a
   ]);
 });
 
+test("parseToolCallsFromContent recovers the native XML tool calls as OpenAI-shaped calls", () => {
+  // The DeepSeek-native shape the brain endpoint leaks into `content`:
+  const xml = '<|tool_calls|><|invoke| name="list-my-facts"><|parameter| name="relation" string="true">PART_OF<|/parameter|><|/invoke|><|/tool_calls|>';
+  const calls = graphdb.parseToolCallsFromContent(xml);
+  assert.equal(calls.length, 1, JSON.stringify(calls));
+  assert.equal(calls[0].function.name, "list-my-facts");
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), { relation: "PART_OF" });
+  assert.ok(calls[0].id, "the synthesized call carries an id for the tool result");
+  // Multiple calls in one message, typed values, and missing wrapper tokens.
+  const multi = '<invoke name="store-fact" >'
+    + '<parameter name="owner" string="true">Mila</parameter>'
+    + '<parameter name="negative">true</parameter>'
+    + '<parameter name="count">3</parameter>'
+    + "</invoke>"
+    + '<invoke name="delete-entity"><parameter name="name">Berlin</parameter><parameter name="owner">Mila</parameter></invoke>';
+  const multiCalls = graphdb.parseToolCallsFromContent(multi);
+  assert.equal(multiCalls.length, 2, JSON.stringify(multiCalls));
+  assert.deepEqual(JSON.parse(multiCalls[0].function.arguments), { owner: "Mila", negative: true, count: 3 });
+  assert.deepEqual(JSON.parse(multiCalls[1].function.arguments), { name: "Berlin", owner: "Mila" });
+});
+
+test("parseToolCallsFromContent leaves ordinary answers untouched", () => {
+  assert.deepEqual(graphdb.parseToolCallsFromContent("The graph shows 14 nodes."), []);
+  assert.deepEqual(graphdb.parseToolCallsFromContent(null), []);
+  // Prose that merely mentions the format is not reinterpreted: without the
+  // tool_calls wrapper, BOTH an invoke and a parameter tag are required.
+  assert.deepEqual(graphdb.parseToolCallsFromContent('The model replies with <invoke name="foo"> blocks.'), []);
+});
+
 test("parseExtraction drops duplicates, self-relations and garbage", () => {
   assert.deepEqual(graphdb.parseExtraction("no json here"), { entities: [], relations: [] });
   assert.deepEqual(graphdb.parseExtraction("{{{"), { entities: [], relations: [] });
@@ -833,11 +862,28 @@ before(async () => {
     const wantsStoreEntity = String(lastUser?.content || "").includes("Store the entity");
     const wantsStoreFact = String(lastUser?.content || "").includes("Store the fact");
     const wantsDeleteViaTool = String(lastUser?.content || "").includes("Delete the entity via the graph");
+    const wantsRename = String(lastUser?.content || "").includes("Rename the entity");
+    // "Call the tool in xml" mimics the brain endpoint that answers with the
+    // model's NATIVE tool-call XML in the message content instead of the
+    // OpenAI tool_calls field — the backend must parse and execute it, never
+    // hand the markup to the user as the answer.
+    const wantsXmlToolCall = String(lastUser?.content || "").includes("Call the tool in xml");
     // "Loop the tools" makes the mock brain request tools on every round, so
     // the server-side round budget is exercised; like a real brain, it stops
     // looping once told the budget is reached.
     const loopTools = String(lastUser?.content || "").includes("Loop the tools") && !systemText.includes("Tool budget reached");
     const hasToolResult = (body.messages || []).some((message) => message.role === "tool");
+    if (wantsXmlToolCall && body.tools && !hasToolResult) {
+      toolRequests.push(body);
+      return res.end(JSON.stringify({
+        choices: [{
+          message: {
+            role: "assistant",
+            content: '<|tool_calls|><|invoke| name="list-my-facts"><|parameter| name="about" string="true">Pizza<|/parameter|><|/invoke|><|/tool_calls|>',
+          },
+        }],
+      }));
+    }
     if (body.tools && (!hasToolResult || loopTools)) {
       toolRequests.push(body);
       // The "Delete everything" turn tries the OLD raw-Cypher tool, which is
@@ -848,8 +894,10 @@ before(async () => {
         : wantsStoreEntity
           ? { name: "store-entity", arguments: JSON.stringify({ owner: "Mila", name: "Test Entity", type: "thing" }) }
           : wantsStoreFact
-            ? { name: "store-fact", arguments: JSON.stringify({ owner: "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: false }) }
-            : wantsDeleteViaTool
+             ? { name: "store-fact", arguments: JSON.stringify({ owner: "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: false }) }
+             : wantsRename
+               ? { name: "rename-entity", arguments: JSON.stringify({ owner: "Mila", name: "Berlin", newName: "Berlintown" }) }
+               : wantsDeleteViaTool
               ? { name: "delete-entity", arguments: JSON.stringify({ owner: "Mila", name: "Berlin" }) }
               : loopTools
                 ? { name: "list-my-knowledge", arguments: "{}" }
@@ -1219,7 +1267,7 @@ test("admin write tools: offered only to the admin, routed to the MCP server wit
   assert.equal(toolRequests.length, 1);
   assert.deepEqual(
     toolRequests[0].tools.map((tool) => tool.function.name),
-    ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "delete-entity"],
+    ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"],
   );
   // ...and the write call reached the MCP server with the backend-injected
   // session user, admin flag and registered user list (the mock logs the
@@ -1254,7 +1302,7 @@ test("admin write tools: offered only to the admin, routed to the MCP server wit
   );
   // ...and a forged write-tool call from one is rejected as unknown before
   // it can reach the MCP server (there is no write surface for non-admins).
-  assert.doesNotMatch(backend.logs.slice(milaLogStart), /MOCK_GRAPH_CALL (store-entity|store-fact|delete-entity)/);
+  assert.doesNotMatch(backend.logs.slice(milaLogStart), /MOCK_GRAPH_CALL (store-entity|store-fact|rename-entity|delete-entity)/);
   const milaFinal = finalRequests[finalRequests.length - 1];
   const milaToolMessage = [...milaFinal.messages].reverse().find((message) => message.role === "tool");
   assert.match(String(milaToolMessage?.content), /Unknown tool/);
@@ -1264,6 +1312,95 @@ test("admin write tools: offered only to the admin, routed to the MCP server wit
     milaActivity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "store-fact" && entry.ok === false),
     JSON.stringify(milaActivity.entries),
   );
+});
+
+test("admin rename-entity: on the write surface, routed with the injected args, audited as a write", async () => {
+  const origin = origins[1];
+  const backend = backends[1];
+  const adminCookie = await login(origin, "admin");
+
+  toolRequests = [];
+  finalRequests = [];
+  const logStart = backend.logs.length;
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: adminCookie },
+    body: JSON.stringify({ prompt: "Rename the entity", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    toolRequests[0].tools.map((tool) => tool.function.name),
+    ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"],
+  );
+  // The rename call reached the MCP server with the backend-injected session
+  // user, admin flag and registered user list.
+  const logDelta = backend.logs.slice(logStart);
+  assert.match(logDelta, /MOCK_GRAPH_CALL rename-entity/);
+  assert.match(logDelta, /\\"name\\":\\"Berlin\\",\\"newName\\":\\"Berlintown\\"/);
+  assert.match(logDelta, /\\"user\\":\\"admin\\",\\"admin\\":true,\\"users\\":\[\\"Mila\\",\\"Roman\\",\\"admin\\"\]/);
+  // The (mock) rename result came back through the tool loop to the brain.
+  const lastFinal = finalRequests[finalRequests.length - 1];
+  const toolMessage = [...lastFinal.messages].reverse().find((message) => message.role === "tool");
+  assert.match(String(toolMessage?.content), /Renamed Berlin to Berlintown/);
+  // Audited in the admin's global activity feed as a write.
+  const activity = await (await auth(origin, "/api/graph/activity", adminCookie)).json();
+  assert.ok(
+    activity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "admin" && entry.tool === "rename-entity" && entry.ok),
+    JSON.stringify(activity.entries),
+  );
+});
+
+test("a brain answering with native tool-call XML in the content still executes the tool, never shows the XML", async () => {
+  const origin = origins[1];
+  const backend = backends[1];
+  const adminCookie = await login(origin, "admin");
+
+  toolRequests = [];
+  finalRequests = [];
+  const logStart = backend.logs.length;
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: adminCookie },
+    body: JSON.stringify({ prompt: "Call the tool in xml", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  // The XML was parsed and executed: the tool result reached the brain and
+  // the final answer is prose, not the tool-call markup.
+  assert.doesNotMatch(result.answer, /tool_calls|invoke|parameter/i, `XML leaked into the answer: ${result.answer}`);
+  assert.match(result.answer, /I checked the graph/);
+  const logDelta = backend.logs.slice(logStart);
+  assert.match(logDelta, /MOCK_GRAPH_CALL list-my-facts/);
+  assert.match(logDelta, /\\"about\\":\\"Pizza\\"/);
+  assert.match(logDelta, /\\"user\\":\\"admin\\",\\"admin\\":true/);
+  // The parsed call rides on the assistant turn, so the tool result's id
+  // has its counterpart (protocol-valid history for the next round).
+  const lastFinal = finalRequests[finalRequests.length - 1];
+  const toolMessage = [...lastFinal.messages].reverse().find((message) => message.role === "tool");
+  const assistantTurn = [...lastFinal.messages].reverse().find((message) => message.role === "assistant" && Array.isArray(message.tool_calls));
+  assert.ok(assistantTurn, "the parsed tool calls ride on the assistant turn");
+  assert.equal(assistantTurn.tool_calls[0].function.name, "list-my-facts");
+  assert.equal(assistantTurn.tool_calls[0].id, toolMessage.tool_call_id, "tool result references the parsed call id");
+});
+
+test("admin turns are not auto-ingested: the service account mints no owner=admin entities", async () => {
+  const origin = origins[1];
+  const adminCookie = await login(origin, "admin");
+
+  const subBefore = await (await auth(origin, "/api/graph/subgraph?limit=60", adminCookie)).json();
+  assert.ok(!subBefore.nodes.some((node) => node.owner === "admin"), JSON.stringify(subBefore.nodes));
+  // Any admin chat turn would normally be extracted and stored (the mock
+  // extractor returns Amelie FRIEND_OF Mila for a plain turn).
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: adminCookie },
+    body: JSON.stringify({ prompt: "Tell me about all graph db entries of all users", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  // Ingestion is fire-and-forget — give the (skipped) path time to have run,
+  // then assert nothing landed under the admin's name.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const subAfter = await (await auth(origin, "/api/graph/subgraph?limit=60", adminCookie)).json();
+  assert.ok(!subAfter.nodes.some((node) => node.owner === "admin"), `admin turn minted owner=admin entities: ${JSON.stringify(subAfter.nodes)}`);
+  const activity = await (await auth(origin, "/api/graph/activity", adminCookie)).json();
+  assert.ok(!activity.entries.some((entry) => entry.kind === "ingest" && entry.user === "admin"), JSON.stringify(activity.entries));
 });
 
 test("the panel's explicit delete removes only the caller's own entity", async () => {

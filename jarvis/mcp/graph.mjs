@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Knowledge-graph MCP server (stdio transport, newline-delimited JSON-RPC 2.0)
 // exposing four parameterized read-only tools to the Jarvis backend — plus
-// three admin-gated write/delete tools (store-entity, store-fact,
+// four admin-gated write/delete tools (store-entity, store-fact, rename-entity,
 // delete-entity) that ONLY the admin session can use.
 //
 // This server deliberately does NOT expose free-form Cypher. Neo4j Community
@@ -115,6 +115,11 @@ export const QUERIES = {
   touchEntity: "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) SET e.last_seen = $now RETURN e.name AS name",
   findEntity: "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) RETURN e.name AS name, e.type AS type LIMIT 10",
   deleteEntity: "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) DETACH DELETE e",
+  // Rename = change the name property in place: the node keeps its elementId,
+  // its type and every link (a delete+recreate would detach them). The
+  // collision check (no other copy of $newName for $owner) runs in the
+  // handler first — the (name, owner) key stays unique.
+  renameEntity: "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) SET e.name = $newName, e.last_seen = $now RETURN e.name AS name, e.type AS type",
 };
 
 // "user" is injected by the backend on every call; the brain's tool schema
@@ -180,6 +185,20 @@ export const TOOLS = [
         negative: { type: "boolean", description: "True when the fact is negated ('doesn't like' = LIKES + negative)." },
       },
       required: ["owner", "from", "to", "type"],
+    },
+  },
+  {
+    name: "rename-entity",
+    description: "ADMIN ONLY: rename an entity of a user in place (owner, name, newName). All of the entity's links survive the rename — use it for renames instead of delete+store. The new name must be free for that user (case-insensitively) and must not be a registered user's name.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...USER_PARAM,
+        owner: { type: "string", description: "The registered user who owns the entity, e.g. 'Roman'." },
+        name: { type: "string", description: "The current entity name, e.g. 'TradingMonitor List'." },
+        newName: { type: "string", description: "The new entity name, e.g. 'Trading'." },
+      },
+      required: ["owner", "name", "newName"],
     },
   },
   {
@@ -291,7 +310,7 @@ export function factQuery(type, fromIsUser, toIsUser) {
 }
 
 // The write/delete tools, gated on the backend-injected admin flag.
-export const ADMIN_WRITE_TOOLS = new Set(["store-entity", "store-fact", "delete-entity"]);
+export const ADMIN_WRITE_TOOLS = new Set(["store-entity", "store-fact", "rename-entity", "delete-entity"]);
 
 // The registered-user list the backend injects (like user/admin): owner must
 // be one of them, so a brain — or a prompt injection riding on it — cannot
@@ -354,6 +373,16 @@ export function validateWriteTool(name, args, users) {
         type, negative: args.negative === true,
       },
     };
+  }
+  if (name === "rename-entity") {
+    const entityName = graphdb.sanitizeName(args.name);
+    const newName = graphdb.sanitizeName(args.newName);
+    if (!entityName || !newName) return { ok: false, error: "name and newName are required." };
+    // Case-insensitive identity: "Berlin" -> "berlin" is no rename at all.
+    if (entityName.toLowerCase() === newName.toLowerCase()) return { ok: false, error: "newName must differ from the current name." };
+    // A registered user's name is their :User account node, never an entity.
+    if (canonicalUserOf(newName, userNames)) return { ok: false, error: `newName must not be a registered user's name (one of: ${userNames.join(", ")}).` };
+    return { ok: true, params: { owner, name: entityName, newName } };
   }
   if (name === "delete-entity") {
     const entityName = graphdb.sanitizeName(args.name);
@@ -499,6 +528,20 @@ function startServer() {
     return `Stored ${params.type} from "${params.from}" to "${params.to}" under ${params.owner}${params.negative ? " (negative)" : ""}.`;
   }
 
+  async function handleRenameEntity(params) {
+    const now = new Date().toISOString();
+    const existing = await runWrite(QUERIES.findEntity, { name: params.name, owner: params.owner });
+    if (!existing.length) return `No entity named "${params.name}" owned by ${params.owner} in the graph.`;
+    // Collision against the upsert key: renaming onto an existing copy (any
+    // case) would leave two nodes with the same (name, owner) key.
+    const taken = await runWrite(QUERIES.findEntity, { name: params.newName, owner: params.owner });
+    if (taken.length) {
+      return `Cannot rename to "${params.newName}": ${params.owner} already has an entity by that name ("${taken[0].name}"). Delete or rename it first.`;
+    }
+    await runWrite(QUERIES.renameEntity, { name: params.name, newName: params.newName, owner: params.owner, now });
+    return `Renamed "${existing[0].name}" to "${params.newName}" (owner ${params.owner}); all links kept.`;
+  }
+
   async function handleDeleteEntity(params) {
     const existing = await runWrite(QUERIES.findEntity, { name: params.name, owner: params.owner });
     if (!existing.length) return `No entity named "${params.name}" owned by ${params.owner} in the graph.`;
@@ -560,6 +603,7 @@ function startServer() {
           }
           if (name === "store-entity") text = await handleStoreEntity(check.params, users);
           else if (name === "store-fact") text = await handleStoreFact(check.params);
+          else if (name === "rename-entity") text = await handleRenameEntity(check.params);
           else text = await handleDeleteEntity(check.params);
         }
         else if (name === "get-schema") text = await handleGetSchema();
