@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" class="graph-full">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Jarvis · Knowledge graph</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body class="graph-full-body">
+    <header class="graph-full-head">
+      <h2>Knowledge graph</h2>
+      <span id="graphStatus" class="pipeline-status" role="status">Loading…</span>
+      <span id="graphUser" class="graph-user" title="Signed in — this tab shows this account's graph world"></span>
+      <div class="graph-views" role="group" aria-label="Graph view">
+        <button id="graphView3dButton" type="button" disabled>3D</button>
+        <button id="graphView2dButton" type="button" disabled>2D</button>
+      </div>
+      <div class="graph-controls" role="group" aria-label="Graph display size">
+        <label for="graphNodeSize">Entities <output id="graphNodeSizeValue">150%</output></label>
+        <input id="graphNodeSize" type="range" min="50" max="300" step="10" value="150">
+        <label for="graphTextSize">Link text <output id="graphTextSizeValue">150%</output></label>
+        <input id="graphTextSize" type="range" min="50" max="300" step="10" value="150">
+      </div>
+      <button id="graphRefreshButton" type="button" disabled title="Reload the whole graph (clears the selected neighbourhood)">Refresh</button>
+      <a class="graph-full-back" href="/">Back to Jarvis</a>
+    </header>
+    <div class="graph-search-row">
+      <label class="graph-search" for="graphSearch">
+        <input id="graphSearch" type="search" placeholder="Search entities and links (typos and casing are forgiven)…"
+               autocomplete="off" spellcheck="false" maxlength="120" aria-describedby="graphSearchStatus">
+      </label>
+      <span id="graphSearchStatus" class="graph-search-status" role="status"></span>
+      <button id="graphSearchClear" type="button" hidden>Clear</button>
+    </div>
+    <main class="graph-full-stage-wrap">
+      <svg id="graphCanvas" class="graph-full-canvas" viewBox="0 0 640 360" role="img" aria-label="Knowledge graph visualization (2D)" hidden></svg>
+      <div id="graph3dStage" class="graph-full-stage" role="img" aria-label="Knowledge graph visualization (3D)"></div>
+      <div id="graphSearchResults" class="graph-search-results" role="listbox" aria-label="Search results" hidden></div>
+    </main>
+    <p id="graphHint" class="graph-full-hint">Drag to orbit, scroll to zoom, click an entity to centre on its neighbourhood. Sizes are saved for this view in this browser only.</p>
+
+    <script type="module" src="/graph-page.js"></script>
+  </body>
+</html>

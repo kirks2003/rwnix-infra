@@ -291,7 +291,7 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
       nextTop: next.getBoundingClientRect().top,
     };
   });
-  assert.ok(boxes.wrap.height >= 319, `wrap reserves the 320px canvas height (got ${boxes.wrap.height})`);
+  assert.ok(boxes.wrap.height >= boxes.stage.height, `wrap reserves the stage height (wrap ${boxes.wrap.height}, stage ${boxes.stage.height})`);
   assert.ok(boxes.stage.bottom <= boxes.wrap.bottom + 1, "the 3D stage stays inside its wrap");
   assert.ok(boxes.nextTop >= boxes.sectionBottom, "the panels toggle row starts below the graph panel");
 });
@@ -385,30 +385,178 @@ test("the size sliders scale the entities and link text live in both views", asy
     .filter((text) => !text.classList.contains("edge-label"))
     .map((text) => text.getAttribute("font-size")));
   const edgeFont = () => page.locator("#graphCanvas text.edge-label").first()
-    .evaluate((text) => getComputedStyle(text).fontSize);
+    .evaluate((text) => Number.parseFloat(getComputedStyle(text).fontSize));
+  // The base label sizes are a styling choice that gets retuned; what must
+  // hold is that each slider scales its own labels and leaves the other's
+  // alone, so the assertions are relative to the measured 100% baseline.
   assert.deepEqual(await nodeFonts(), ["10", "10", "10", "10", "10", "10"], "node names at 100%");
-  assert.equal(await edgeFont(), "9px", "link text at 100%");
+  const edgeBase = await edgeFont();
   await setSlider("#graphNodeSize", "200");
   assert.equal(await circleR(1), "14", "the entity node doubles at 200%");
   assert.equal(await circleR(0), "18", "the :User node doubles with the same slider");
   assert.deepEqual(await nodeFonts(), ["20", "20", "20", "20", "20", "20"], "node names follow the entity slider");
-  assert.equal(await edgeFont(), "9px", "link text is untouched by the entity slider");
+  assert.equal(await edgeFont(), edgeBase, "link text is untouched by the entity slider");
   assert.equal(await page.locator("#graphNodeSizeValue").textContent(), "200%");
   await setSlider("#graphTextSize", "200");
-  assert.equal(await edgeFont(), "18px", "the link text doubles at 200%");
+  assert.equal(await edgeFont(), edgeBase * 2, "the link text doubles at 200%");
   // 3D: the scales land on CSS custom properties the label layer reads, so
   // the projected labels re-scale live without rebuilding the scene.
   await page.click("#graphView3dButton");
   await page.waitForSelector(".graph-3d-labels span:not(.edge)");
   const spanFont = (selector) => page.locator(selector).first()
-    .evaluate((span) => getComputedStyle(span).fontSize);
-  assert.equal(await spanFont(".graph-3d-labels span:not(.edge)"), "20px", "3D node names follow the entity slider");
-  assert.equal(await spanFont(".graph-3d-labels span.edge"), "16px", "3D link text follows the text slider");
+    .evaluate((span) => Number.parseFloat(getComputedStyle(span).fontSize));
+  const nodeSpanAt200 = await spanFont(".graph-3d-labels span:not(.edge)");
+  const edgeSpanAt200 = await spanFont(".graph-3d-labels span.edge");
   await setSlider("#graphNodeSize", "100");
-  assert.equal(await spanFont(".graph-3d-labels span:not(.edge)"), "10px", "3D node names track the slider back down");
+  assert.equal(await spanFont(".graph-3d-labels span:not(.edge)"), nodeSpanAt200 / 2, "3D node names track the entity slider");
+  assert.equal(await spanFont(".graph-3d-labels span.edge"), edgeSpanAt200, "3D link text is untouched by the entity slider");
+  await setSlider("#graphTextSize", "100");
+  assert.equal(await spanFont(".graph-3d-labels span.edge"), edgeSpanAt200 / 2, "3D link text tracks the text slider");
   // The values persist per browser across reloads.
   await setSlider("#graphTextSize", "150");
   await page.reload();
   assert.equal(await page.locator("#graphNodeSize").inputValue(), "100");
   assert.equal(await page.locator("#graphTextSize").inputValue(), "150");
+});
+
+// --- The full-size graph page (/graph.html) -----------------------------------
+
+// The full page adds the fuzzy search route on top of the panel's mocks: the
+// server answers it from the full-text index, scoped like every other read.
+async function routeFullPageApi(page) {
+  await routeGraphApi(page);
+  await page.route("**/api/graph/search*", (route) => {
+    const query = new URL(route.request().url()).searchParams.get("q") || "";
+    const needle = query.trim().toLowerCase();
+    route.fulfill({ json: {
+      nodes: needle ? GRAPH_FIXTURE.nodes.filter((node) => node.name.toLowerCase().includes(needle)) : [],
+      relTypes: [],
+      truncated: false,
+    } });
+  });
+}
+
+// `routes` may register extra API mocks after the page's (later-registered
+// routes win), so a test can shape the subgraph the page loads.
+async function openFullPage(t, { width = 1280, height = 800, routes = null } = {}) {
+  const page = await browser.newPage({ viewport: { width, height } });
+  t.after(() => page.close());
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  t.after(() => assert.deepEqual(errors, []));
+  await routeFullPageApi(page);
+  if (routes) await routes(page);
+  await page.goto(`${origin}/graph.html`);
+  await page.waitForSelector("#graph3dStage .graph-3d-labels span:not(.edge)");
+  return page;
+}
+
+test("the full-size graph page stacks head, search, stage and hint without overlap", async (t) => {
+  // The short landscape window the overlap was reported in: with the old
+  // three-row template the search row sat in the 1fr track, collapsed to
+  // zero, and its input painted over the head controls and the stage.
+  const page = await openFullPage(t, { width: 844, height: 390 });
+  const boxes = await page.evaluate(() => {
+    const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
+    return {
+      head: rect(".graph-full-head"),
+      search: rect(".graph-search-row"),
+      stage: rect(".graph-full-stage-wrap"),
+      hint: rect(".graph-full-hint"),
+    };
+  });
+  const regions = Object.entries(boxes);
+  for (let i = 0; i < regions.length; i += 1) {
+    for (let j = i + 1; j < regions.length; j += 1) {
+      const [nameA, a] = regions[i];
+      const [nameB, b] = regions[j];
+      const overlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      assert.ok(overlap <= 1, `${nameA} (${a.top}-${a.bottom}) and ${nameB} (${b.top}-${b.bottom}) overlap by ${overlap}px`);
+    }
+  }
+  assert.ok(boxes.search.height > 30, `the search field is not collapsed (height ${boxes.search.height})`);
+  assert.ok(boxes.stage.height > 100, `the stage keeps its share of the viewport (height ${boxes.stage.height})`);
+  // The head shows which account this tab is signed in as.
+  assert.equal((await page.textContent("#graphUser")).trim(), "Mila");
+});
+
+test("a lone search hit stays highlighted and is centred in the live 3D view", async (t) => {
+  const page = await openFullPage(t);
+  await page.fill("#graphSearch", "Amelie");
+  // Debounce (250 ms) + the fetch, then give the camera time to ease onto the
+  // node; the follow is per-frame, so the check is a snapshot of it.
+  await page.waitForTimeout(3000);
+  const result = await page.evaluate(() => {
+    const stage = document.getElementById("graph3dStage").getBoundingClientRect();
+    const labels = [...document.querySelectorAll("#graph3dStage .graph-3d-labels span:not(.edge)")];
+    const target = labels.find((label) => label.textContent.startsWith("Amelie"));
+    const rect = target.getBoundingClientRect();
+    return {
+      found: Boolean(target),
+      targetDimmed: target.classList.contains("dimmed"),
+      othersDimmed: labels.filter((label) => !label.textContent.startsWith("Amelie") && label.classList.contains("dimmed")).length,
+      others: labels.length - 1,
+      // Off-centre in half-stage units: the label floats above its node, so
+      // a small vertical offset is expected; what must hold is "the middle
+      // of the view", not pixel-perfect.
+      dx: (rect.x + rect.width / 2 - (stage.left + stage.width / 2)) / (stage.width / 2),
+      dy: (rect.y + rect.height / 2 - (stage.top + stage.height / 2)) / (stage.height / 2),
+    };
+  });
+  assert.ok(result.found, "the hit's label is drawn");
+  assert.equal(result.targetDimmed, false, "the lone hit stays highlighted");
+  assert.equal(result.othersDimmed, result.others, "everything else is dimmed");
+  assert.ok(Math.abs(result.dx) < 0.25, `the hit is centred horizontally (dx ${result.dx})`);
+  assert.ok(Math.abs(result.dy) < 0.25, `the hit is centred vertically (dy ${result.dy})`);
+  // Clearing (the X / Clear button, deleting the text, or Escape all take this
+  // path) lifts the highlight: every label is bright again.
+  await page.click("#graphSearchClear");
+  await page.waitForFunction(() => ![...document.querySelectorAll("#graph3dStage .graph-3d-labels span:not(.edge)")].some((label) => label.classList.contains("dimmed")));
+  assert.equal((await page.inputValue("#graphSearch")).trim(), "");
+});
+
+test("clearing the search brings back the initial objects after a lone hit swapped the window", async (t) => {
+  // The initial drawn window is a subset of the graph: Amelie exists in the
+  // search index but not in this window, so her lone hit forces the
+  // neighbourhood fetch. Clearing must restore THESE initial objects — not
+  // just lift the highlight — and stop the 15 s poll chasing the
+  // neighbourhood.
+  const initialIds = ["n0", "n1", "n2", "n4"];
+  const page = await openFullPage(t, {
+    routes: async (p) => {
+      await p.route("**/api/graph/subgraph*", (route) => {
+        const center = new URL(route.request().url()).searchParams.get("center");
+        if (!center) {
+          return route.fulfill({ json: {
+            nodes: GRAPH_FIXTURE.nodes.filter((node) => initialIds.includes(node.id)),
+            edges: GRAPH_FIXTURE.edges.filter((edge) => initialIds.includes(edge.source) && initialIds.includes(edge.target)),
+          } });
+        }
+        const keep = new Set([center]);
+        for (const edge of GRAPH_FIXTURE.edges) {
+          if (edge.source === center) keep.add(edge.target);
+          if (edge.target === center) keep.add(edge.source);
+        }
+        route.fulfill({ json: {
+          nodes: GRAPH_FIXTURE.nodes.filter((node) => keep.has(node.id)),
+          edges: GRAPH_FIXTURE.edges.filter((edge) => keep.has(edge.source) && keep.has(edge.target)),
+        } });
+      });
+    },
+  });
+  const names = () => page.$$eval("#graph3dStage .graph-3d-labels span:not(.edge)", (labels) => labels.map((label) => label.textContent).sort());
+  const dimmedCount = () => page.$$eval("#graph3dStage .graph-3d-labels span:not(.edge)", (labels) => labels.filter((label) => label.classList.contains("dimmed")).length);
+  assert.deepEqual(await names(), ["Berlin", "Lego", "Mila (you)", "Rocky"], "the initial window is drawn");
+  await page.fill("#graphSearch", "Amelie");
+  // Debounce + the neighbourhood fetch + the scene diff.
+  await page.waitForTimeout(3000);
+  assert.deepEqual(await names(), ["Amelie", "Berlin", "Mila (you)"], "the lone hit's neighbourhood is drawn");
+  assert.equal(await dimmedCount(), 2, "the non-matches are dimmed");
+  await page.click("#graphSearchClear");
+  await page.waitForFunction(() => {
+    const labels = [...document.querySelectorAll("#graph3dStage .graph-3d-labels span:not(.edge)")];
+    return labels.length === 4 && labels.every((label) => !label.classList.contains("dimmed"));
+  }, { timeout: 5000 });
+  assert.deepEqual(await names(), ["Berlin", "Lego", "Mila (you)", "Rocky"], "the initial objects are back");
+  assert.equal(await dimmedCount(), 0, "no label stays dimmed");
 });

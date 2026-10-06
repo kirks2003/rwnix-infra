@@ -330,6 +330,22 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Fuzzy entity/link search for the full-size graph page. Index-backed and
+    // bounded, so it stays cheap however large the graph is; scoped to the
+    // session user's world (the admin session searches the whole graph).
+    if (req.method === "GET" && pathname === "/api/graph/search") {
+      if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
+      // The query is clamped, not rejected: a long paste is a usable prefix,
+      // and the store escapes it before it reaches Lucene.
+      const query = String(url.searchParams.get("q") || "").slice(0, 120);
+      if (!query.trim()) return json(res, 200, { requestId, nodes: [], relTypes: [], truncated: false });
+      try {
+        return json(res, 200, { requestId, ...(await graphStore.search({ user: req.user, query, admin: isAdmin(req.user), limit: Number(url.searchParams.get("limit")) || 25 })) });
+      } catch (error) {
+        return json(res, 502, { error: "graph_unavailable", message: error.message, requestId });
+      }
+    }
+
     if (req.method === "GET" && pathname === "/api/graph/schema") {
       if (!graphStore) return json(res, 503, { error: "graph_not_configured", requestId });
       try {
@@ -400,6 +416,12 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Jarvis listening on 0.0.0.0:${server.address().port}`);
+  // The graph's indexes (full-text search + the owner/name lookups) are
+  // created on startup, idempotently. A failure is logged and left alone: the
+  // app still serves, search degrades, and the next start retries.
+  graphStore?.ensureIndexes()
+    .then((result) => console.log(JSON.stringify({ level: "info", msg: "graph_indexes_ready", ...result })))
+    .catch((error) => console.log(JSON.stringify({ level: "warn", msg: "graph_indexes_failed", error: error.message })));
 });
 
 function splitCsv(value) {
@@ -1290,13 +1312,14 @@ async function ingestTurn({ user, prompt, searchResults, answer, requestId }) {
       console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_empty", ms: Date.now() - started, raw: text.slice(0, 300) }));
       return;
     }
-    const { upserted, relations: linked } = await graphStore.upsertTurn({ user, ...extraction });
-    // Report what was actually written, not what the extractor emitted: an
-    // entity named after a registered user is stored as that user's account
-    // node, never as an :Entity, so "extracted" can exceed "stored".
-    const skippedUsers = extraction.entities.length - upserted;
-    recordGraphActivity({ kind: "ingest", user, entities: upserted, relations: linked, skippedUsers });
-    console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_success", ms: Date.now() - started, extracted: extraction.entities.length, stored: upserted, extractedRelations: extraction.relations.length, linked, skippedUsers }));
+    const { upserted, relations: linked, skippedUsers, skippedUnconnected, orphansRemoved } = await graphStore.upsertTurn({ user, ...extraction });
+    // Report what was actually written, not what the extractor emitted: the
+    // store skips an entity named after a registered user (it is that user's
+    // account node, never an :Entity) and one no fact connects, and its
+    // end-of-ingest check removes any orphan it still finds — so "extracted"
+    // can exceed "stored" for three distinct reasons, each counted on its own.
+    recordGraphActivity({ kind: "ingest", user, entities: upserted, relations: linked, skippedUsers, skippedUnconnected, orphansRemoved: orphansRemoved.length });
+    console.log(JSON.stringify({ level: "info", requestId, msg: "graph_ingest_success", ms: Date.now() - started, extracted: extraction.entities.length, stored: upserted, extractedRelations: extraction.relations.length, linked, skippedUsers, skippedUnconnected, orphansRemoved }));
   } catch (error) {
     console.log(JSON.stringify({ level: "warn", requestId, msg: "graph_ingest_failure", ms: Date.now() - started, error: error.message }));
   }

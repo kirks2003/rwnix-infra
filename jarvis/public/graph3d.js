@@ -81,6 +81,8 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   // The panel's "Entities" slider: multiplies the base sphere scale of every
   // node (set live via setNodeScale while the view is open).
   let nodeScaleFactor = nodeScale;
+  // Search highlight: { nodeIds:Set, relTypes:Set } or null for "show all".
+  let highlight = null;
 
   const orbit = {
     // Spherical camera position; target* is where the drag/zoom is aiming,
@@ -88,7 +90,14 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     target: { theta: 0.6, phi: 1.15, radius: 175 },
     current: { theta: 0.6, phi: 1.15, radius: 175 },
     lastInteraction: 0,
+    // What the camera orbits and looks at: the origin, or a focused node's
+    // live position. `current` eases toward `target` so the view glides there
+    // and then keeps following the node as the layout moves it.
+    center: new THREE.Vector3(),
+    centerTarget: new THREE.Vector3(),
   };
+  // The node the camera follows (search narrowed to exactly one), or null.
+  let focusId = null;
 
   function nodeColor(node) {
     return node.type ? TYPE_COLORS[node.type] ?? TYPE_COLORS.thing : USER_COLOR;
@@ -148,14 +157,15 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
           (Math.random() - 0.5) * 2,
         ).multiplyScalar(40 + Math.random() * 50);
         // The :User account node renders distinctly, like the 2D view.
-        entry = { mesh, label: makeLabel(node), pos, baseScale: node.type ? 1.7 : 2.7 };
+        entry = { mesh, label: makeLabel(node), pos, baseScale: node.type ? 1.7 : 2.7, baseOpacity: node.isolated ? 0.35 : 1 };
         mesh.scale.setScalar(entry.baseScale * nodeScaleFactor);
         mesh.userData.nodeId = node.id;
         scene.add(mesh);
         nodeState.set(node.id, entry);
       }
       entry.mesh.material.color.setHex(nodeColor(node));
-      entry.mesh.material.opacity = node.isolated ? 0.35 : 1;
+      entry.baseOpacity = node.isolated ? 0.35 : 1;
+      entry.mesh.material.opacity = entry.baseOpacity;
       // A rename keeps the elementId, so a surviving node can carry a new
       // name (or owner) — refresh the label text, diffed like the edge
       // labels, so the caption tracks the data instead of the first render.
@@ -193,7 +203,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
         label.className = "edge";
         label.textContent = text;
         labelLayer.appendChild(label);
-        edgeLabels.set(id, { label, source: edge.source, target: edge.target, offset: index });
+        edgeLabels.set(id, { label, source: edge.source, target: edge.target, offset: index, type: edge.type });
       }
     }
     for (const id of [...edgeLabels.keys()]) {
@@ -216,6 +226,9 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     }
     // New structure: let the layout re-settle, but gently.
     alpha = Math.max(alpha, 1);
+    // Nodes and labels may have been created just now: re-apply the current
+    // search highlight so a poll does not undim what the query filtered out.
+    applyHighlight();
   }
 
   // The panel's "Entities" slider: rescale every sphere in place (the
@@ -223,6 +236,37 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   function setNodeScale(scale) {
     nodeScaleFactor = scale;
     for (const entry of nodeState.values()) entry.mesh.scale.setScalar(entry.baseScale * nodeScaleFactor);
+  }
+
+  // A search hit is an id (an entity the query matched) or a relation type
+  // (every node a link of that type touches). Everything else fades, so the
+  // matches stand out without the layout moving. null restores the full view.
+  function setHighlight(next) {
+    highlight = next && (next.nodeIds?.size || next.relTypes?.size) ? next : null;
+    applyHighlight();
+  }
+
+  function applyHighlight() {
+    const byRelType = new Set();
+    if (highlight?.relTypes?.size) {
+      for (const edge of edges) {
+        if (!highlight.relTypes.has(edge.type)) continue;
+        byRelType.add(edge.source);
+        byRelType.add(edge.target);
+      }
+    }
+    for (const [id, entry] of nodeState) {
+      const matched = !highlight || highlight.nodeIds?.has(id) || byRelType.has(id);
+      entry.mesh.material.opacity = matched ? entry.baseOpacity : 0.1;
+      entry.label.classList.toggle("dimmed", !matched);
+    }
+    for (const entry of edgeLabels.values()) {
+      const matched = !highlight
+        || highlight.relTypes?.has(entry.type)
+        || highlight.nodeIds?.has(entry.source)
+        || highlight.nodeIds?.has(entry.target);
+      entry.label.classList.toggle("dimmed", !matched);
+    }
   }
 
   // One force pass (repulsion + link springs + centering), applied scaled by
@@ -331,14 +375,28 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     orbit.current.theta += (orbit.target.theta - orbit.current.theta) * 0.08;
     orbit.current.phi += (orbit.target.phi - orbit.current.phi) * 0.08;
     orbit.current.radius += (orbit.target.radius - orbit.current.radius) * 0.12;
+    // Re-read the focused node every frame: it is still being moved by the
+    // layout, so following it is what keeps it centred live.
+    const focused = focusId ? nodeState.get(focusId) : null;
+    if (focused) orbit.centerTarget.copy(focused.pos);
+    else orbit.centerTarget.set(0, 0, 0);
+    orbit.center.lerp(orbit.centerTarget, 0.08);
     const { theta, phi, radius } = orbit.current;
     camera.position.set(
-      radius * Math.sin(phi) * Math.sin(theta),
-      radius * Math.cos(phi),
-      radius * Math.sin(phi) * Math.cos(theta),
+      orbit.center.x + radius * Math.sin(phi) * Math.sin(theta),
+      orbit.center.y + radius * Math.cos(phi),
+      orbit.center.z + radius * Math.sin(phi) * Math.cos(theta),
     );
     keyLight.position.copy(camera.position);
-    camera.lookAt(0, 0, 0);
+    camera.lookAt(orbit.center);
+  }
+
+  // Follow one node with the camera (the search narrowed to a single hit), or
+  // null to go back to orbiting the whole graph. An id that is not in the
+  // drawn window is simply not followed — the caller loads it first.
+  function setFocus(nodeId) {
+    focusId = nodeId && nodeState.has(nodeId) ? nodeId : null;
+    return focusId !== null;
   }
 
   // --- interaction -----------------------------------------------------------
@@ -438,5 +496,5 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     cleanupDom();
   }
 
-  return { update, dispose, setNodeScale };
+  return { update, dispose, setNodeScale, setHighlight, setFocus };
 }

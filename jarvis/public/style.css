@@ -16,6 +16,13 @@
   box-sizing: border-box;
 }
 
+html {
+  /* Global text-size: two 20% shrink passes then two 20% grow passes
+     (0.8 * 0.8 * 1.2 * 1.2); every rem-based font-size in this sheet scales
+     off the root, so this one line covers them all. */
+  font-size: 92.16%;
+}
+
 body {
   min-height: 100vh;
   margin: 0;
@@ -43,11 +50,11 @@ body:not(.authenticated) .app-ui {
   display: grid;
   justify-items: center;
   gap: 10px;
-  width: min(440px, 100%);
+  width: min(282px, 100%);
   margin: 10vh auto 0;
-  padding: 34px 30px;
+  padding: 22px 19px;
   border: 1px solid rgba(66, 217, 255, 0.3);
-  border-radius: 22px;
+  border-radius: 14px;
   background: var(--panel);
   box-shadow: 0 30px 120px rgba(0, 0, 0, 0.4);
   text-align: center;
@@ -137,9 +144,9 @@ body:not(.authenticated) .app-ui {
 }
 
 .hero {
-  grid-template-columns: minmax(180px, 240px) 1fr;
+  grid-template-columns: minmax(126px, 168px) 1fr;
   align-items: center;
-  min-height: 280px;
+  min-height: 196px;
 }
 
 .core-wrap {
@@ -152,9 +159,9 @@ body:not(.authenticated) .app-ui {
 .core {
   --stage-color: var(--cyan);
   position: relative;
-  /* 30% smaller core: rings, reactor and the viewBox-scaled waveform follow. */
-  width: 157px;
-  height: 157px;
+  /* Rings, reactor and the viewBox-scaled waveform all follow this size. */
+  width: 110px;
+  height: 110px;
   margin: 0;
   border-radius: 50%;
   filter: brightness(calc(1 + var(--audio-level, 0) * 0.35));
@@ -277,7 +284,9 @@ body:not(.authenticated) .app-ui {
 
 h1 {
   margin: 0;
-  font-size: clamp(2.4rem, 7vw, 6rem);
+  /* 30% smaller than the base headline scale, on top of the global root
+     font-size that already scales the rest of the page's text. */
+  font-size: clamp(1.68rem, 4.9vw, 4.2rem);
   line-height: 0.95;
 }
 
@@ -310,16 +319,16 @@ h2 {
   flex-wrap: wrap;
   justify-content: center;
   align-items: center;
-  padding: 16px;
+  padding: 10px;
   border: 1px solid rgba(66, 217, 255, 0.18);
-  border-radius: 18px;
+  border-radius: 11px;
   background: var(--panel);
 }
 
 button {
   border: 1px solid rgba(66, 217, 255, 0.4);
   border-radius: 999px;
-  padding: 12px 18px;
+  padding: 8px 11px;
   color: var(--text);
   background: rgba(66, 217, 255, 0.1);
   cursor: pointer;
@@ -394,9 +403,9 @@ button:disabled {
 .stage-preview {
   display: grid;
   gap: 10px;
-  padding: 16px;
+  padding: 10px;
   border: 1px solid rgba(66, 217, 255, 0.18);
-  border-radius: 18px;
+  border-radius: 11px;
   background: var(--panel);
 }
 
@@ -478,8 +487,8 @@ button:disabled {
   position: relative;
   display: inline-grid;
   grid-template-columns: 1fr 1fr;
-  width: 190px;
-  height: 42px;
+  width: 122px;
+  height: 27px;
   padding: 3px;
   border: 1px solid rgba(66, 217, 255, 0.4);
   border-radius: 999px;
@@ -519,10 +528,10 @@ button:disabled {
 }
 
 .wake-settings {
-  margin: 18px 0;
-  padding: 18px;
+  margin: 11px 0;
+  padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
-  border-radius: 18px;
+  border-radius: 11px;
   background: var(--panel);
 }
 
@@ -584,17 +593,17 @@ progress {
   display: grid;
   gap: 10px;
   align-content: start;
-  min-height: 260px;
-  padding: 18px;
+  min-height: 160px;
+  padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
-  border-radius: 18px;
+  border-radius: 11px;
   background: var(--panel);
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
 }
 
 .transcript p {
-  min-height: 48px;
-  max-height: 190px;
+  min-height: 46px;
+  max-height: 182px;
   margin: 0;
   overflow: auto;
   overflow-wrap: anywhere;
@@ -604,10 +613,10 @@ progress {
    panels toggle, always visible like the transcript. Display only — the
    backend is read-only against the graph. */
 .graph-panel {
-  margin: 18px 0;
-  padding: 18px;
+  margin: 11px 0;
+  padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
-  border-radius: 18px;
+  border-radius: 11px;
   background: var(--panel);
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
   display: grid;
@@ -673,10 +682,10 @@ progress {
 
 .graph-canvas {
   width: 100%;
-  height: 320px;
+  height: 205px;
   display: block;
   border: 1px solid rgba(66, 217, 255, 0.12);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #02050b;
 }
 
@@ -692,7 +701,7 @@ progress {
    where it crosses the lines. */
 .graph-canvas .edge-label {
   /* Scaled by the panel's "Link text" slider (--graph-text-scale). */
-  font-size: calc(9px * var(--graph-text-scale, 1));
+  font-size: calc(5.76px * var(--graph-text-scale, 1));
   fill: var(--muted);
   text-anchor: middle;
   paint-order: stroke;
@@ -723,9 +732,9 @@ progress {
    the stage would paint over the panels below. */
 .graph-3d-stage {
   position: relative;
-  height: 320px;
+  height: 205px;
   border: 1px solid rgba(66, 217, 255, 0.12);
-  border-radius: 12px;
+  border-radius: 8px;
   background: #02050b;
   overflow: hidden;
   cursor: grab;
@@ -753,7 +762,7 @@ progress {
   left: 0;
   top: 0;
   /* Node names scale with the "Entities" slider (--graph-node-scale). */
-  font-size: calc(10px * var(--graph-node-scale, 1));
+  font-size: calc(6.4px * var(--graph-node-scale, 1));
   color: var(--muted);
   white-space: nowrap;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
@@ -774,7 +783,7 @@ progress {
 /* Relation-type label floating at a 3D link's midpoint (non-interactive). */
 .graph-3d-labels span.edge {
   /* Scaled by the panel's "Link text" slider (--graph-text-scale). */
-  font-size: calc(8px * var(--graph-text-scale, 1));
+  font-size: calc(5.12px * var(--graph-text-scale, 1));
   opacity: 0.6;
   pointer-events: none;
 }
@@ -823,6 +832,217 @@ progress {
   line-height: 1.5;
 }
 
+/* --- Full-size graph page (/graph.html) ------------------------------------
+   Its own tab: a head bar plus a stage that fills the rest of the viewport.
+   The root font-size is 1.5x the app's, and the entity/link-text sliders
+   start at 150%, so both the chrome and the graph itself read larger here. */
+html.graph-full {
+  font-size: 138.24%;
+}
+
+.graph-full-body {
+  display: grid;
+  /* One row per child: head, search, stage, hint. The stage takes the rest —
+     minmax(0, 1fr) and not 1fr, so it may shrink below its content instead of
+     pushing the rows below it off the viewport. */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 8px;
+  height: 100vh;
+  padding: 10px 14px 8px;
+  overflow: hidden;
+}
+
+.graph-full-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.graph-full-head h2 {
+  margin: 0;
+}
+
+/* The signed-in account: which world this tab is drawing. Filled by
+   graph-page.js from /api/config; empty (and thus collapsed) when the tab
+   is signed out. */
+.graph-user {
+  padding: 2px 10px;
+  border: 1px solid rgba(66, 217, 255, 0.25);
+  border-radius: 999px;
+  color: var(--cyan);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.graph-user:empty {
+  display: none;
+}
+
+.graph-full-head .graph-controls {
+  padding: 0;
+  margin-left: auto;
+}
+
+.graph-full-back {
+  color: var(--cyan);
+  font-size: 0.85rem;
+}
+
+.graph-full-stage-wrap {
+  position: relative;
+  min-height: 0;
+}
+
+/* Both views fill the stage; the hidden one contributes nothing. */
+.graph-full-stage, .graph-full-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: 1px solid rgba(66, 217, 255, 0.18);
+  border-radius: 11px;
+  background: #02050b;
+}
+
+.graph-full-stage {
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.graph-full-stage:active {
+  cursor: grabbing;
+}
+
+.graph-full-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-full-stage[hidden], .graph-full-canvas[hidden] {
+  display: none;
+}
+
+.graph-full-canvas circle {
+  cursor: pointer;
+}
+
+.graph-full-canvas .edge-label {
+  font-size: calc(5.76px * var(--graph-text-scale, 1));
+  fill: var(--muted);
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: #02050b;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.graph-full-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+/* The search row: one field over the stage, its results floating on top of
+   the drawing so the graph keeps the full height. */
+.graph-search-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.graph-search {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.graph-search input {
+  width: 100%;
+  padding: 7px 11px;
+  border: 1px solid rgba(66, 217, 255, 0.35);
+  border-radius: 999px;
+  color: var(--text);
+  background: #02050b;
+  font: inherit;
+}
+
+.graph-search input:focus {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 12px rgba(66, 217, 255, 0.3);
+}
+
+.graph-search-status {
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.graph-search-results {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  display: grid;
+  gap: 2px;
+  width: min(320px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  padding: 6px;
+  overflow: auto;
+  border: 1px solid rgba(66, 217, 255, 0.3);
+  border-radius: 11px;
+  background: rgba(2, 5, 11, 0.93);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+
+.graph-search-results[hidden] {
+  display: none;
+}
+
+.graph-search-hit {
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text);
+  background: transparent;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.graph-search-hit:hover, .graph-search-hit:focus-visible {
+  border-color: rgba(66, 217, 255, 0.4);
+  background: rgba(66, 217, 255, 0.12);
+}
+
+/* A link-type hit filters the drawn edges instead of centring the view. */
+.graph-search-hit.link-type {
+  color: var(--cyan);
+}
+
+.graph-search-empty {
+  margin: 0;
+  padding: 5px 9px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Faded by the active search: the 3D labels and the 2D edge captions the
+   query did not match (the node geometry is faded by the renderers). */
+.graph-3d-labels span.dimmed, .edge-label.dimmed {
+  opacity: 0.12;
+}
+
+/* The panel's link to the full-size page, styled like the head's buttons. */
+.graph-full-link {
+  align-self: center;
+  color: var(--cyan);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
 .manual-prompt {
   display: grid;
   gap: 8px;
@@ -846,10 +1066,10 @@ progress {
 }
 
 .panel {
-  min-height: 138px;
-  padding: 18px;
+  min-height: 88px;
+  padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
-  border-radius: 18px;
+  border-radius: 11px;
   background: var(--panel);
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
 }
@@ -890,9 +1110,9 @@ progress {
   gap: 6px;
   justify-items: center;
   text-align: center;
-  padding: 14px 8px 12px;
+  padding: 9px 5px 8px;
   border: 1px solid rgba(66, 217, 255, 0.14);
-  border-radius: 14px;
+  border-radius: 9px;
   background: rgba(2, 5, 11, 0.5);
 }
 
@@ -907,8 +1127,8 @@ progress {
 }
 
 .step-dot {
-  width: 18px;
-  height: 18px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
   border: 2px solid var(--muted);
   transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
@@ -994,7 +1214,7 @@ progress {
 }
 
 #log {
-  height: 340px;
+  height: 218px;
   margin: 0;
   overflow: auto;
   color: #b8e8ff;
@@ -1002,9 +1222,9 @@ progress {
 }
 
 dialog {
-  width: min(560px, calc(100vw - 28px));
+  width: min(358px, calc(100vw - 28px));
   border: 1px solid rgba(66, 217, 255, 0.35);
-  border-radius: 18px;
+  border-radius: 11px;
   color: var(--text);
   background: #07111f;
 }
@@ -1075,7 +1295,7 @@ menu {
   }
 
   .core {
-    width: 122px;
-    height: 122px;
+    width: 85px;
+    height: 85px;
   }
 }

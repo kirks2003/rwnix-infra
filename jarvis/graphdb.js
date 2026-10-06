@@ -64,6 +64,110 @@ function isRelationType(type) {
   return /^[A-Z][A-Z0-9_]{0,23}$/.test(type) && type.split("_").length <= 3;
 }
 
+// --- Search ------------------------------------------------------------------
+// Entity search is index-backed, never a scan: a Neo4j full-text (Lucene)
+// index over (name, owner) answers a query in log time, which is what makes
+// the panel's search usable at millions of nodes. The query text is always
+// data — Lucene's own syntax characters are escaped, so a stray "(" or "~"
+// cannot become an operator or a parse error.
+const LUCENE_SPECIAL = /[+\-&|!(){}[\]^"~*?:\\/]/g;
+
+function escapeLucene(value) {
+  return String(value == null ? "" : value).replace(LUCENE_SPECIAL, (character) => `\\${character}`);
+}
+
+function searchTokens(query) {
+  return String(query == null ? "" : query).trim().toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
+}
+
+// Each token must match (AND); within a token the exact term outranks a
+// prefix, which outranks a typo (fuzzy) match — so "btcusd" finds BTCUSD by
+// case, "nvi" finds Nvidia by prefix and "nvidea" finds it by edit distance.
+// Fuzzy and prefix are skipped on very short tokens, where they match almost
+// anything. The owner is a REQUIRED term for a non-admin session: pushing the
+// per-user boundary into the index is not an optimisation but the only correct
+// way to page it — filtering a global top-N afterwards would silently drop a
+// user's own hits off the end once the graph is large.
+function buildLuceneQuery(query, { owner = null } = {}) {
+  const tokens = searchTokens(query);
+  if (!tokens.length) return null;
+  const clauses = tokens.map((raw) => {
+    const token = escapeLucene(raw);
+    const alternatives = [`name:${token}^4`];
+    if (raw.length >= 2) alternatives.push(`name:${token}*^2`);
+    if (raw.length >= 4) alternatives.push(`name:${token}~^1`);
+    return `+(${alternatives.join(" OR ")})`;
+  });
+  if (owner) clauses.unshift(`+owner:${escapeLucene(String(owner).toLowerCase())}`);
+  return clauses.join(" ");
+}
+
+// Bounded edit distance (Levenshtein). Used only against the small, bounded
+// sets the index cannot cover: relation types, and the memory store's nodes.
+function editDistance(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+// How many typos to forgive at a given term length: none on a 3-character
+// term (where one edit reaches half the alphabet), one up to 5, two beyond.
+function typoBudget(length) {
+  if (length >= 6) return 2;
+  if (length >= 4) return 1;
+  return 0;
+}
+
+// Does a token match this word, by prefix/substring or within the typo budget?
+function tokenMatchesWord(token, word) {
+  if (!word) return false;
+  if (word.includes(token)) return true;
+  return editDistance(token, word) <= typoBudget(token.length);
+}
+
+// Relation types ("connectors") cannot go in a node full-text index, and
+// Neo4j's token store already knows every type that exists — a bounded list,
+// however large the graph gets — so they are matched in JS. A type matches
+// when EVERY token of the query hits one of its words, so "interested in"
+// and "interest" both find INTERESTED_IN.
+function matchRelationTypes(query, types) {
+  const tokens = searchTokens(query);
+  if (!tokens.length) return [];
+  const scored = [];
+  for (const type of types || []) {
+    if (typeof type !== "string" || RESERVED_RELATION_TYPES.has(type)) continue;
+    const words = type.toLowerCase().split("_").filter(Boolean);
+    const haystack = words.join(" ");
+    let distance = 0;
+    const matched = tokens.every((token) => {
+      if (haystack.includes(token)) return true;
+      const best = words.reduce((lowest, word) => Math.min(lowest, editDistance(token, word)), Infinity);
+      if (best <= typoBudget(token.length)) {
+        distance += best;
+        return true;
+      }
+      return false;
+    });
+    if (matched) scored.push({ type, distance });
+  }
+  // Closest first, then alphabetical so the order is stable between calls.
+  scored.sort((a, b) => a.distance - b.distance || a.type.localeCompare(b.type));
+  return scored.slice(0, 10).map((entry) => entry.type);
+}
+
 // The brain replies with a JSON object, possibly wrapped in a code fence or
 // surrounded by prose. Anything that does not parse comes back empty: a bad
 // extraction is skipped, never a crash and never a partial write.
@@ -236,6 +340,63 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
   return {
     memory: false,
 
+    // Schema the store needs to stay fast as the graph grows. Idempotent
+    // (IF NOT EXISTS), so startup converges on an existing database and a
+    // redeploy is a no-op. Without these, every owner-scoped read is a label
+    // scan and search is impossible above demo size:
+    //  - entity_search: the full-text (Lucene) index search queries, over the
+    //    name AND the owner, so the per-user filter is answered by the index.
+    //  - entity_owner: every read pinned to owner = the session user.
+    //  - entity_owner_last_seen: the panel's own world, newest first. The
+    //    composite index serves the equality AND the ordering, so the query
+    //    stops after `limit` rows instead of sorting the owner's whole set.
+    //  - entity_last_seen: the same read for the admin's global view.
+    //  - user_name: the account lookups the ingest and the fact endpoints do.
+    async ensureIndexes() {
+      const statements = [
+        "CREATE FULLTEXT INDEX entity_search IF NOT EXISTS FOR (e:Entity) ON EACH [e.name, e.owner]",
+        "CREATE INDEX entity_owner IF NOT EXISTS FOR (e:Entity) ON (e.owner)",
+        "CREATE INDEX entity_owner_last_seen IF NOT EXISTS FOR (e:Entity) ON (e.owner, e.last_seen)",
+        "CREATE INDEX entity_last_seen IF NOT EXISTS FOR (e:Entity) ON (e.last_seen)",
+        "CREATE INDEX user_name IF NOT EXISTS FOR (u:User) ON (u.name)",
+      ];
+      for (const statement of statements) await run(writeClient, statement);
+      return { created: statements.length };
+    },
+
+    // Fuzzy entity search, scoped like every other read: a user searches
+    // their own world, the admin session searches the whole graph. The
+    // owner term is inside the Lucene query AND re-checked here — the
+    // isolation boundary must not depend on the query string being built
+    // right. Bounded by `limit`, with one row fetched beyond it so the UI can
+    // say the list was cut without a second counting query.
+    async search({ user, query, admin = false, limit = 25 } = {}) {
+      const lucene = buildLuceneQuery(query, { owner: admin ? null : user });
+      const relTypeRows = rows(await run(readClient, "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS type"));
+      const relTypes = matchRelationTypes(query, relTypeRows.map((row) => row.type));
+      if (!lucene) return { nodes: [], relTypes, truncated: false };
+      const cap = Math.min(Math.max(1, Number(limit) || 25), 100);
+      const nodeRows = rows(await run(readClient,
+        "CALL db.index.fulltext.queryNodes('entity_search', $lucene, {limit: $limit}) YIELD node, score " +
+        "WITH node, score " +
+        (admin ? "" : "WHERE node.owner = $user ") +
+        "RETURN elementId(node) AS id, node.name AS name, node.type AS type, node.owner AS owner, score " +
+        "ORDER BY score DESC, name",
+        { lucene, limit: neo4j.int(cap + 1), user },
+      ));
+      return {
+        nodes: nodeRows.slice(0, cap).map((row) => ({
+          id: row.id,
+          name: row.name,
+          type: row.type,
+          owner: row.owner,
+          score: Math.round(Number(row.score) * 1000) / 1000,
+        })),
+        relTypes,
+        truncated: nodeRows.length > cap,
+      };
+    },
+
     // Counts of the signed-in user's drawn world (must match the panel's
     // subgraph exactly): their :User node, the entities they own (isolated
     // mentions included, flagged by the subgraph) and those fact edges.
@@ -245,8 +406,12 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       // 60 = the panel's default /api/graph/subgraph?limit=60.
       const [world, labelRows, relRows] = await Promise.all([
         visibleWorld(user, 60, null, admin),
-        rows(await run(readClient, "MATCH (n) UNWIND labels(n) AS label RETURN DISTINCT label ORDER BY label LIMIT 50")),
-        rows(await run(readClient, "MATCH ()-[r]->() UNWIND [type(r)] AS t RETURN DISTINCT t ORDER BY t LIMIT 50")),
+        // db.labels()/db.relationshipTypes() read the token store: the answer
+        // costs the same on ten nodes as on ten million. The equivalent
+        // "MATCH (n) UNWIND labels(n)" is a full scan of the graph, and the
+        // panel asks for this every 15 seconds.
+        rows(await run(readClient, "CALL db.labels() YIELD label RETURN label ORDER BY label LIMIT 50")),
+        rows(await run(readClient, "CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t ORDER BY t LIMIT 50")),
       ]);
       // KNOWS is bookkeeping, not a link the panel should advertise.
       const relTypes = relRows.map((row) => row.t).filter((type) => type !== "KNOWS");
@@ -348,9 +513,13 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
 
     async schema() {
       const [labels, relTypes, propKeys] = await Promise.all([
-        rows(await run(readClient, "MATCH (n) UNWIND labels(n) AS label RETURN DISTINCT label ORDER BY label LIMIT 50")),
-        rows(await run(readClient, "MATCH ()-[r]->() UNWIND [type(r)] AS t RETURN DISTINCT t ORDER BY t LIMIT 50")),
-        rows(await run(readClient, "MATCH (n) UNWIND keys(n) AS key RETURN DISTINCT key ORDER BY key LIMIT 50")),
+        // db.labels()/db.relationshipTypes() read the token store: the answer
+        // costs the same on ten nodes as on ten million. The equivalent
+        // "MATCH (n) UNWIND labels(n)" is a full scan of the graph, and the
+        // panel asks for this every 15 seconds.
+        rows(await run(readClient, "CALL db.labels() YIELD label RETURN label ORDER BY label LIMIT 50")),
+        rows(await run(readClient, "CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t ORDER BY t LIMIT 50")),
+        rows(await run(readClient, "CALL db.propertyKeys() YIELD propertyKey AS key RETURN key ORDER BY key LIMIT 50")),
       ]);
       // KNOWS is bookkeeping, not a fact the panel should advertise.
       return {
@@ -394,9 +563,36 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       const userNames = new Set(users);
       userNames.add(user);
       const isUser = (name) => userNames.has(name);
-      const otherEntities = entities.filter((entity) => !isUser(entity.name));
+      const candidates = entities.filter((entity) => !isUser(entity.name));
+      const skippedUsers = entities.length - candidates.length;
+      // An entity is only worth storing when a fact connects it: a bare
+      // mention ("we talked about Vienna") would otherwise land as a node no
+      // edge touches, which is noise in the panel and in the brain's context.
+      // So the writable facts are resolved FIRST, and only their endpoints are
+      // created. An endpoint resolves when it is a registered user (their
+      // :User node is merged below), an entity this turn is about to store, or
+      // one this owner already has — the last one needs a read, otherwise a
+      // fact onto an earlier entity would look unresolvable and its endpoint
+      // would be dropped.
+      const typed = relations.filter((relation) => isRelationType(relation.type));
+      const lower = (name) => String(name).toLowerCase();
+      const candidateNames = new Set(candidates.map((entity) => lower(entity.name)));
+      const referenced = [...new Set(typed.flatMap((relation) => [lower(relation.from), lower(relation.to)]))];
+      const storedNames = new Set();
+      if (referenced.length) {
+        const storedRows = rows(await run(readClient,
+          "MATCH (e:Entity {owner: $user}) WHERE toLower(e.name) IN $names RETURN toLower(e.name) AS name",
+          { user, names: referenced },
+        ));
+        for (const row of storedRows) storedNames.add(row.name);
+      }
+      const resolvable = (name) => isUser(name) || candidateNames.has(lower(name)) || storedNames.has(lower(name));
+      const writable = typed.filter((relation) => resolvable(relation.from) && resolvable(relation.to) && lower(relation.from) !== lower(relation.to));
+      const connected = new Set(writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]));
+      const otherEntities = candidates.filter((entity) => connected.has(lower(entity.name)));
+      const skippedUnconnected = candidates.length - otherEntities.length;
       // Referenced users' :User nodes must exist before relations target them.
-      const referencedUsers = new Set(relations.flatMap((relation) => [relation.from, relation.to]).filter(isUser));
+      const referencedUsers = new Set(writable.flatMap((relation) => [relation.from, relation.to]).filter(isUser));
       await run(writeClient, "UNWIND $names AS name MERGE (u:User {name: name})", { names: [...new Set([user, ...referencedUsers])] });
      if (otherEntities.length) {
         // Keyed by (name, owner), the name CASE-INSENSITIVELY — the type is a
@@ -427,10 +623,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       // (type, from-label, to-label) so the MERGE targets the right nodes
       // (the parser already drops from === to).
       const buckets = new Map();
-      for (const relation of relations) {
-        // Known types and well-formed introduced types (Neo4j creates the
-        // type on first use); anything else is dropped.
-        if (!isRelationType(relation.type)) continue;
+      for (const relation of writable) {
         const key = `${relation.type}|${isUser(relation.from) ? "U" : "E"}|${isUser(relation.to) ? "U" : "E"}`;
         const list = buckets.get(key) || [];
         list.push({ from: relation.from, to: relation.to, negative: relation.negative === true });
@@ -452,7 +645,38 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         );
         linked += list.length;
       }
-      return { upserted, relations: linked };
+      // The check at the end of every ingest: nothing this turn touched may be
+      // left without a fact edge. The write above is built not to make one,
+      // but an orphan can still appear — a fact whose other endpoint failed to
+      // match, or a concurrent turn — so the invariant is verified against the
+      // database instead of trusted, and what it finds is removed and
+      // reported. KNOWS is bookkeeping, not a fact, so it does not count as a
+      // connection (the same rule the panel's `isolated` flag uses).
+      //
+      // Deliberately scoped to this turn's names, not to everything the owner
+      // has: the check must cost the same on a graph of millions as on one of
+      // ten, and "this ingest created no orphan" is the invariant an ingest
+      // can actually own. A pre-existing orphan (one an older write or a
+      // delete left behind) is a maintenance job, not this code path.
+      const touched = [...new Set([
+        ...otherEntities.map((entity) => lower(entity.name)),
+        ...writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]),
+      ])];
+      const orphanRows = touched.length ? rows(await run(writeClient,
+        "MATCH (e:Entity {owner: $user}) WHERE toLower(e.name) IN $names " +
+        "AND NOT EXISTS { MATCH (e)-[r]-() WHERE type(r) <> 'KNOWS' } " +
+        "WITH e, e.name AS name " +
+        "DETACH DELETE e " +
+        "RETURN name",
+        { user, names: touched },
+      )) : [];
+      return {
+        upserted,
+        relations: linked,
+        skippedUsers,
+        skippedUnconnected,
+        orphansRemoved: orphanRows.map((row) => row.name),
+      };
     },
 
     // The one explicit delete path in the app: a user removes one of their
@@ -614,6 +838,50 @@ function createMemoryStore(users = []) {
   return {
     memory: true,
 
+    // No schema to create in memory; the method exists so the backend can
+    // call it without caring which store it got.
+    async ensureIndexes() {
+      return { created: 0 };
+    },
+
+    // The Lucene index's behaviour, scored in JS over the store's handful of
+    // nodes: exact name, then prefix/substring, then a typo within the budget.
+    // Scoped like every other read — own world, or the whole store for admin.
+    async search({ user, query, admin = false, limit = 25 } = {}) {
+      const relTypes = matchRelationTypes(query, [...new Set(edges.map((edge) => edge.type))]);
+      const tokens = searchTokens(query);
+      if (!tokens.length) return { nodes: [], relTypes, truncated: false };
+      const cap = Math.min(Math.max(1, Number(limit) || 25), 100);
+      const scored = [];
+      for (const node of nodes.values()) {
+        if (node.props.role === "user") continue;
+        if (!admin && node.owner !== user) continue;
+        const name = String(node.name).toLowerCase();
+        const words = name.split(/\s+/).filter(Boolean);
+        let score = 0;
+        const matched = tokens.every((token) => {
+          if (name === token) { score += 4; return true; }
+          if (name.startsWith(token) || words.some((word) => word.startsWith(token))) { score += 2; return true; }
+          if (name.includes(token)) { score += 1.5; return true; }
+          if (words.some((word) => tokenMatchesWord(token, word))) { score += 1; return true; }
+          return false;
+        });
+        if (matched) scored.push({ node, score });
+      }
+      scored.sort((a, b) => b.score - a.score || String(a.node.name).localeCompare(String(b.node.name)));
+      return {
+        nodes: scored.slice(0, cap).map(({ node, score }) => ({
+          id: node.id,
+          name: node.name,
+          type: node.type,
+          owner: node.owner,
+          score,
+        })),
+        relTypes,
+        truncated: scored.length > cap,
+      };
+    },
+
     // Counts of the signed-in user's drawn world (must match the panel's
     // subgraph exactly): their :User node, the entities they own (isolated
     // mentions included) and those edges. Never another user's node or edge —
@@ -734,19 +1002,35 @@ function createMemoryStore(users = []) {
       userNames.add(user);
       const isUser = (name) => userNames.has(name);
       const userNode = [...nodes.values()].find((node) => node.name === user && node.props.role === "user") || addUser(user);
+      // Same rule as the Neo4j store: only an entity a fact actually connects
+      // is stored, so the writable facts are resolved before anything is
+      // created (an endpoint resolves when it is a registered user, an entity
+      // this turn stores, or one this owner already has).
+      const lower = (name) => String(name).toLowerCase();
+      const candidates = entities.filter((entity) => !isUser(entity.name));
+      const skippedUsers = entities.length - candidates.length;
+      const typed = relations.filter((relation) => isRelationType(relation.type));
+      const candidateNames = new Set(candidates.map((entity) => lower(entity.name)));
+      const storedNames = new Set([...nodes.values()]
+        .filter((node) => node.props.role !== "user" && node.owner === user)
+        .map((node) => lower(node.name)));
+      const resolvable = (name) => isUser(name) || candidateNames.has(lower(name)) || storedNames.has(lower(name));
+      const writable = typed.filter((relation) => resolvable(relation.from) && resolvable(relation.to) && lower(relation.from) !== lower(relation.to));
+      const connected = new Set(writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]));
       let upserted = 0;
-      for (const entity of entities) {
-        if (isUser(entity.name)) continue;
+      let skippedUnconnected = 0;
+      for (const entity of candidates) {
+        if (!connected.has(lower(entity.name))) {
+          skippedUnconnected += 1;
+          continue;
+        }
         const node = addNode({ name: entity.name, type: entity.type, owner: user, props: entity.props || {} });
         node.mentionCount += 1;
         node.lastSeen = new Date().toISOString();
         upserted += 1;
       }
       let linked = 0;
-      for (const relation of relations) {
-        // Same gate as the Neo4j store: known or well-formed introduced
-        // types only.
-        if (!isRelationType(relation.type)) continue;
+      for (const relation of writable) {
         const resolve = (name) => {
           if (isUser(name)) return [...nodes.values()].find((node) => node.name === name && node.props.role === "user") || addUser(name);
           // Entity endpoints are the turn user's own copies (keyed by name,
@@ -761,7 +1045,25 @@ function createMemoryStore(users = []) {
           linked += 1;
         }
       }
-      return { upserted, relations: linked };
+      // The same end-of-ingest check as the Neo4j store, over the same scope:
+      // the names this turn touched, so the cost does not grow with the graph.
+      const touched = new Set([
+        ...candidates.map((entity) => lower(entity.name)),
+        ...writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]),
+      ]);
+      const orphansRemoved = [];
+      for (const node of [...nodes.values()]) {
+        if (node.props.role === "user" || node.owner !== user) continue;
+        if (!touched.has(lower(node.name))) continue;
+        const connectedByFact = edges.some((edge) => edge.type !== "KNOWS" && (edge.source === node.id || edge.target === node.id));
+        if (connectedByFact) continue;
+        orphansRemoved.push(node.name);
+        nodes.delete(node.id);
+        for (let i = edges.length - 1; i >= 0; i -= 1) {
+          if (edges[i].source === node.id || edges[i].target === node.id) edges.splice(i, 1);
+        }
+      }
+      return { upserted, relations: linked, skippedUsers, skippedUnconnected, orphansRemoved };
     },
 
     // Mirrors the Neo4j store's explicit delete path: the id must be an
@@ -829,6 +1131,8 @@ module.exports = {
   normalizeRelationType,
   sanitizeName,
   formatGraphContext,
+  buildLuceneQuery,
+  matchRelationTypes,
   createGraphStore,
   createMemoryStore,
 };

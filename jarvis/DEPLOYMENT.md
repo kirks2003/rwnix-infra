@@ -2504,3 +2504,119 @@ untouched); synced `public/graph3d.js` + `tests/graph.browser.mjs`
 (md5-verified), image rebuilt, container `healthy`, `/api/health` ok, and the
 served `graph3d.js` md5 matches the source. Static asset changed → a browser
 hard refresh (Ctrl+Shift+R) is needed to pick up the new `graph3d.js`.
+
+## 2026-10-06: full-size knowledge-graph page with whole-graph fuzzy search
+
+The panel head's **Full view ↗** link opened `/graph.html` in its own tab:
+the same 3D/2D renderers filling the viewport (150% default entity/link-text
+sizes, persisted under `jarvis.graphSizes.full` so the panel's sliders are
+untouched), a signed-in account chip in the head bar, and a search row whose
+results run **server-side against the whole graph** — a Neo4j full-text
+(Lucene) index over `(name, owner)` created idempotently at startup
+(`ensureIndexes()` in `graphdb.js`, plus the owner/last-seen indexes the
+panel reads need), so search stays index-time at millions of nodes. Query
+tokens AND-match; within a token exact outranks prefix outranks fuzzy (edit
+distance grows with token length), so typos and casing are forgiven; relation
+types are matched in JS against the bounded token-store type list (`KNOWS`
+never emittable). The owner is a required Lucene term for non-admin sessions
+(re-checked server-side), the admin searches the whole graph, results are
+paged and the drawn window is not (60 nodes). Typing highlights the hits in
+the drawn window in both views (everything else fades); narrowing to exactly
+one entity moves the 3D camera onto it live (`setFocus()` re-reads the node's
+position every frame; a lone hit outside the window is fetched first), and
+picking a paged result re-centres on its neighbourhood. The 2D renderer was
+extracted from `app.js` into `public/graph2d.js` (shared by panel and page);
+`public/graph.html` + `public/graph-page.js` are new. Unit tests: Lucene
+escaping/owner term, relation-type matching, memory-store fuzzy search,
+Neo4j index-backed owner-pinned bounded query.
+
+Rolled out to vm104 with the file-copy + `docker compose up -d --build`
+procedure. Files synced: `server.js`, `graphdb.js`, `public/app.js`,
+`public/index.html`, `public/style.css`, `public/graph3d.js`, `public/graph.html`,
+`public/graph-page.js`, `public/graph2d.js`, `tests/`. Verified against the
+running container: container `healthy`, `/api/health` ok, served files
+md5-matched the source. The user then reported issues on the live page
+(panels overlapping, no single-hit centring, no account shown, and clearing
+the search not restoring the initial objects), each fixed and rolled out the
+same day — see the following section.
+
+## 2026-10-06: full-size graph page — panels overlapped, single hit not centred, no account shown
+
+The full-size knowledge-graph page (`/graph.html`, its own tab opened from the
+app's **Full view ↗** link) shipped the same day earlier: the 2D/3D renderers
+plus a server-side fuzzy search (`/api/graph/search`, Lucene full-text index in
+`graphdb.js`) that covers the whole graph, not just the drawn window. Typing
+highlights the hits in the drawing (dimming the rest) — that part was right.
+Three things were wrong:
+
+1. **The panels overlapped vertically.** The body grid declared
+   `grid-template-rows: auto minmax(0, 1fr) auto` — three rows for four
+   children (head, search row, stage, hint). The search row landed in the
+   `1fr` track and the stage in an `auto` track. In a short window (e.g.
+   844×390) the 1fr track collapsed to zero, the search input overflowed its
+   zero-height row and painted over the head's controls row and the stage —
+   the reported "three panels overlapping". In a tall window the same bug
+   showed as a stretched empty gap under the search field. Fixed by the
+   four-row template `auto auto minmax(0, 1fr) auto`: head, search and hint
+   take their natural height and the stage gets the rest (and may shrink to
+   fit, never pushing the others off-screen).
+2. **A lone search hit was not centred.** Narrowing the query to exactly one
+   entity now also moves the 3D camera onto that node, live: `setFocus(id)` in
+   `graph3d.js` points `orbit.centerTarget` at the node's position every frame
+   (the layout keeps moving it, so the follow is per-frame, not a one-off
+   recentre) and `applyMatchHighlight()` in `graph-page.js` calls it with the
+   single match. A lone hit outside the drawn window is fetched first
+   (`loadGraph`) so the camera has something to follow; re-typing the same
+   query does not refetch (`focusLoadedFor` guard).
+3. **The signed-in account was not shown.** `graph-page.js` already wrote the
+   config's user into `#graphUser`, but `graph.html` had no such element (the
+   page would have thrown on load). Added the element to the head bar plus a
+   small `.graph-user` chip (empty/hidden when signed out).
+
+**Tests:** two new browser regressions in `tests/graph.browser.mjs` — the
+short-viewport page stacks head/search/stage/hint with no overlap, the search
+field never collapses and `#graphUser` shows the account; and a lone search
+hit stays highlighted, dims everything else and ends up centred in the live
+3D view (within a quarter of the stage from centre). Unit **136/136**;
+browser **42 pass + 2 opt-in skips** (the 12 in `graph.browser.mjs` all green).
+
+**Deploy:** backup `jarvis-code.bak-20261006_145823.tgz` (code only, `.env`
+untouched); synced `public/graph.html`, `public/graph-page.js`,
+`public/graph3d.js`, `public/style.css` (md5-verified against the source),
+image rebuilt, container `healthy`, `/api/health` ok. Live check on
+`192.168.54.111:8094` signed in as Mila at 844×390: no overlap, `#graphUser`
+shows "Mila", and searching "Lego" (1 hit) centred it in the 3D view with the
+rest dimmed. Static assets changed → a browser hard refresh (Ctrl+Shift+R)
+picks up the new `style.css` / `graph.html` / `graph-page.js` / `graph3d.js`.
+
+### Same day: clearing the search must bring back the initial objects
+
+Follow-up report: deleting the search text (or hitting the input's X / the
+Clear button) lifted the highlight, but if the query had narrowed to a lone
+hit **outside the drawn window** — or a result had been clicked — the drawing
+window was that entity's neighbourhood, and it stayed there: the initial
+objects never came back, and the 15 s poll kept re-fetching the neighbourhood
+(`graphCenter` was never reset).
+
+Fix in `public/graph-page.js`: the empty-query path of `runSearch()` now
+detects a search-derived window (`focusLoadedFor` is set exactly when a lone
+hit was fetched or a result clicked) and calls `loadGraph(null)`, which
+re-fetches the initial subgraph and resets `graphCenter` — so the 15 s poll
+stops chasing the neighbourhood too. A window the user chose deliberately by
+clicking a node in the drawing is untouched (that persists until Refresh, as
+before).
+
+**Tests:** new browser regression `clearing the search brings back the
+initial objects after a lone hit swapped the window` — the initial window is
+a 4-node subset, the lone hit (Amelie) is outside it, clearing restores the
+original 4 labels with nothing dimmed; the lone-hit test additionally asserts
+the Clear button lifts every dim. The regression test fails on the old code
+(timeout waiting for the initial objects). Graph browser **13/13**; unit
+**136/136**.
+
+**Deploy:** backup `jarvis-code.bak-20261006_151533.tgz` (code only, `.env`
+untouched); synced `public/graph-page.js` + `tests/graph.browser.mjs`
+(md5-verified), image rebuilt, container `healthy`, `/api/health` ok. Live
+check signed in as Mila: search "Lego" → centred with the other node dimmed;
+Clear → both nodes bright again, camera back on the whole graph. Hard refresh
+(Ctrl+Shift+R) picks up the new `graph-page.js`.
