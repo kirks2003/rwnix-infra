@@ -94,14 +94,21 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     return node.type ? TYPE_COLORS[node.type] ?? TYPE_COLORS.thing : USER_COLOR;
   }
 
-  function makeLabel(node) {
-    const label = document.createElement("span");
+  // The label text for a node, derived fresh from the subgraph row. A rename
+  // keeps the elementId, so the same node row can carry a new name between
+  // polls — the text must be re-derived on update, not just at creation.
+  function labelText(node) {
     const suffix = !node.type && userName && node.name === userName ? " (you)" : "";
     // Admin view: every owner's copy of an entity is drawn, so same-named
     // copies (two "Lego") need the owner in the label. For a regular user
     // this never fires (own entities have owner === them; markers have none).
     const ownerSuffix = node.owner && node.owner !== userName ? ` (${node.owner})` : "";
-    label.textContent = `${String(node.name || node.type).slice(0, 24)}${ownerSuffix}${suffix}`;
+    return `${String(node.name || node.type).slice(0, 24)}${ownerSuffix}${suffix}`;
+  }
+
+  function makeLabel(node) {
+    const label = document.createElement("span");
+    label.textContent = labelText(node);
     if (!node.type) label.classList.add("user");
     if (node.isolated) label.classList.add("isolated");
     label.addEventListener("click", () => onNodeClick?.(node.id));
@@ -149,6 +156,12 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
       }
       entry.mesh.material.color.setHex(nodeColor(node));
       entry.mesh.material.opacity = node.isolated ? 0.35 : 1;
+      // A rename keeps the elementId, so a surviving node can carry a new
+      // name (or owner) — refresh the label text, diffed like the edge
+      // labels, so the caption tracks the data instead of the first render.
+      const text = labelText(node);
+      if (entry.label.textContent !== text) entry.label.textContent = text;
+      entry.label.classList.toggle("user", !node.type);
       entry.label.classList.toggle("isolated", Boolean(node.isolated));
     }
     const byId = nodeState;
