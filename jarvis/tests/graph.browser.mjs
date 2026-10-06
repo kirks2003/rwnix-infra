@@ -324,6 +324,28 @@ test("the 3D view: new data appears live on the next refresh", async (t) => {
   assert.equal(await page.locator(".graph-3d-labels span:not(.edge)").count(), GRAPH_FIXTURE.nodes.length + 1);
 });
 
+test("the 3D view: a rename (same elementId, new name) re-labels the node live", async (t) => {
+  const page = await openPanel(t);
+  await page.waitForSelector('.graph-3d-labels span:has-text("Rocky")');
+  const before = await page.locator(".graph-3d-labels span:not(.edge)").allTextContents();
+  assert.ok(before.includes("Rocky"), `initial labels: ${JSON.stringify(before)}`);
+  // Registered last, so it wins: n1 is renamed IN PLACE — same id, new name.
+  // A rename-entity keeps the elementId, so the 3D diff must re-label the
+  // surviving node rather than spawn a twin (or keep the stale caption).
+  await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: {
+    nodes: GRAPH_FIXTURE.nodes.map((node) => (node.id === "n1" ? { ...node, name: "Rocky Jr" } : node)),
+    edges: GRAPH_FIXTURE.edges,
+  } }));
+  await page.click("#graphRefreshButton");
+  await page.waitForFunction(() => {
+    const labels = [...document.querySelectorAll(".graph-3d-labels span:not(.edge)")].map((span) => span.textContent);
+    return labels.includes("Rocky Jr") && !labels.includes("Rocky");
+  });
+  const after = await page.locator(".graph-3d-labels span:not(.edge)").allTextContents();
+  assert.ok(after.includes("Rocky Jr"), `the surviving node is re-labelled: ${JSON.stringify(after)}`);
+  assert.equal(after.length, before.length, "a rename re-labels in place; it does not add a node");
+});
+
 test("the 3D view falls back to 2D when WebGL is unavailable", async (t) => {
   const page = await browser.newPage();
   t.after(() => page.close());

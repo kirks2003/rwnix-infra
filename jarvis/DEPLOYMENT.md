@@ -2470,3 +2470,37 @@ session), then ran the user's actual request through the **new
 `Trading` under Roman as one atomic call — the node kept its elementId and
 all its links (`Roman OWNS Trading`, `Trump PART_OF Trading`,
 `Robinhood PART_OF Trading`) came with it.
+
+## 2026-10-06: the 3D panel kept a stale node name after a rename
+
+Reported: after the admin renamed an entity (e.g. `Trading` → `Trading
+Monitoring`), the 3D knowledge-graph panel showed no change — the sphere kept
+its old caption. The data was correct (the API, the 2D view, the status
+counts and the activity feed all showed the new name); only the 3D label was
+stale.
+
+Root cause: `rename-entity` changes the node's `name` but keeps the same
+`elementId` (that is how its links survive). The 3D view (`public/graph3d.js`)
+diffs each poll against the live scene **by `elementId`** to keep node
+positions stable, and for a surviving node it refreshed the mesh colour,
+opacity and `isolated` flag — but the label text was set exactly once, in
+`makeLabel()` at node creation, and `update()` never re-read it. So a
+renamed node kept its first-rendered caption forever. The 2D view was
+unaffected (it rebuilds its SVG from scratch on every poll).
+
+Fix: extract the label text into `labelText(node)` (name + owner suffix + the
+`(you)` marker, re-derived from the current subgraph row) and, in `update()`,
+refresh a surviving node's label text (diffed, like the edge labels) plus its
+`user` class on every poll — so the 3D caption tracks the data instead of the
+first render.
+
+**Tests:** new browser regression "the 3D view: a rename (same elementId, new
+name) re-labels the node live" — a node renamed in place gets its caption
+updated on the next refresh and no twin node is spawned. Browser **40 pass +
+2 opt-in skips**; unit **127/127** (unchanged).
+
+**Deploy:** backup `jarvis-code.bak-20261006_130301.tgz` (code only, `.env`
+untouched); synced `public/graph3d.js` + `tests/graph.browser.mjs`
+(md5-verified), image rebuilt, container `healthy`, `/api/health` ok, and the
+served `graph3d.js` md5 matches the source. Static asset changed → a browser
+hard refresh (Ctrl+Shift+R) is needed to pick up the new `graph3d.js`.
