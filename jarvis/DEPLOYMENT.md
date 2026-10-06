@@ -2200,3 +2200,56 @@ idempotently). The `/api/graph/subgraph` the 3D panel renders now includes
 the `TradingMonitor List` node (not isolated — it carries an edge) with the
 `Trump -[part of]-> TradingMonitor List` label — the node the user could
 not see before the fix now exists and is drawn.
+
+## 2026-10-06: dynamic graph entities never stored — the ingest extraction call was undersized for the reasoning model
+
+Reported: the user asked Jarvis to track "Robinhood after hours" on the
+TradingMonitor List, and the brain confirmed it, but no such entity appeared
+in the live 2D/3D graph panel. The suspicion was that the panel's graph
+query was too narrow to pick up dynamically created entities.
+
+Root cause: the panel query was fine. `visibleWorld` in `graphdb.js` matches
+**every** `:Entity {owner: $user}` (newest first, capped at the 60-node
+default) plus every fact edge between them — a freshly stored entity has the
+freshest `last_seen` and lands at the top of the draw set, and the panel
+re-fetches on a 15 s poll (plus a 4 s refresh after a chat turn). The real
+defect was upstream, in the **only write path**: the post-turn ingestion
+extraction call in `server.js` still sent `max_tokens: 1200` to a reasoning
+model. `deepseek-v4-flash` spends the whole budget on thinking tokens, so the
+JSON reply came back as `content: null` (or a JSON object truncated at 16
+chars) and `parseExtraction` found nothing. Live logs from vm104 showed
+**every** `/api/chat` turn since 2026-10-05 21:35Z ending in
+`graph_ingest_empty` with `content: null` + a `reasoning` field in the raw
+brain response — while the main chat path had already been raised to
+`max_tokens: 4096` for exactly this failure class ("Wetter Wien", 2026-10-04).
+The graph's Neo4j state confirmed it: Roman's newest entity was `TradingMonitor
+List` at 2026-10-05 21:35Z; no Robinhood/NVDA/after-hours node existed at all.
+The brain's "the link is in your list" was answered from the stored list
+entity, not from a stored Robinhood fact.
+
+Fix (same as the chat path, plus the matching timeout):
+
+- `server.js` `ingestTurn`: extraction request `max_tokens: 1200` -> `4096`,
+  and its abort `AbortSignal.timeout(30000)` -> `45000` — a full 4096-token
+  budget can be ~27 s of pure reasoning at the measured ~150 tok/s, so 30 s
+  would race the extraction. Fire-and-forget, so the longer deadline never
+  blocks the user's reply.
+- `tests/server.test.mjs`: the end-to-end ingest test now also asserts the
+  extraction request (the last upstream call of the turn) carries a
+  reasoning-safe budget (`max_tokens >= 4096`) — the regression that let this
+  ship.
+
+**Tests:** unit **117/117** (the ingest end-to-end test now carries the
+budget assertion).
+
+**Deploy + live verification:** backup `jarvis-code.bak-20261006_103103.tgz`;
+synced `server.js` + `tests/server.test.mjs`, image rebuilt, container
+`healthy`, `/api/health` ok, the running `/app/server.js` carries the
+4096/45000 values. Live as Roman: "Add Robinhood after hours to my
+TradingMonitor List" -> brain confirmed, `graph_ingest_success extracted=3
+stored=2 extractedRelations=2 linked=2`, and Neo4j now holds
+`Robinhood after hours (topic, owner: Roman)` with
+`Roman -[:WATCHES]-> Robinhood after hours -[:PART_OF]-> TradingMonitor
+List`. The `/api/graph/subgraph?limit=60` the panel renders lists the node
+plus both edges, so the 2D/3D view (15 s poll / 4 s post-turn refresh) picks
+it up automatically — no panel query change was needed.

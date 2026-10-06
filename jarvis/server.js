@@ -1132,11 +1132,19 @@ async function ingestTurn({ user, prompt, searchResults, answer, requestId }) {
     const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
       method: "POST",
       headers,
-      signal: AbortSignal.timeout(30000),
+      // 45 s, like the brain's own deadline: a full 4096-token budget can be
+      // ~27 s of pure reasoning at the measured ~150 tok/s, so the old 30 s
+      // abort would race the extraction.
+      signal: AbortSignal.timeout(45000),
       body: JSON.stringify({
         model: config.brainModel,
         temperature: 0,
-        max_tokens: 1200,
+        // The brain is a reasoning model: max_tokens covers its thinking
+        // tokens too. 1200 left no budget for the JSON reply — live turns
+        // came back with content: null (finish_reason "length") and the
+        // extraction silently stored nothing (every turn graph_ingest_empty
+        // from 2026-10-05 21:35Z on). Same fix as the chat path.
+        max_tokens: 4096,
         messages: [
           { role: "system", content: EXTRACT_SYSTEM_PROMPT },
           {
