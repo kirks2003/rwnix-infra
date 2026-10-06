@@ -34,20 +34,20 @@ test("no query uses the nonexistent direction() Cypher function", () => {
   }
 });
 
-test("the MCP tool surface: four read tools plus three admin-gated write/delete tools, never free-form Cypher", () => {
+test("the MCP tool surface: four read tools plus four admin-gated write/delete tools, never free-form Cypher", () => {
   const names = TOOLS.map((tool) => tool.name);
   assert.deepEqual(
     [...names].sort(),
-    ["delete-entity", "get-entity", "get-schema", "list-my-facts", "list-my-knowledge", "store-entity", "store-fact"],
+    ["delete-entity", "get-entity", "get-schema", "list-my-facts", "list-my-knowledge", "rename-entity", "store-entity", "store-fact"],
   );
   for (const name of names) {
     assert.doesNotMatch(name, /cypher/i, `no free-form query on the surface: ${name}`);
   }
-  assert.deepEqual([...ADMIN_WRITE_TOOLS].sort(), ["delete-entity", "store-entity", "store-fact"]);
+  assert.deepEqual([...ADMIN_WRITE_TOOLS].sort(), ["delete-entity", "rename-entity", "store-entity", "store-fact"]);
   // The write tools' schema carries the owner the handler validates against
   // the injected user list — and exposes no admin/users parameter, so the
   // brain can never claim admin (only the backend's injection can).
-  for (const name of ["store-entity", "store-fact", "delete-entity"]) {
+  for (const name of ["store-entity", "store-fact", "rename-entity", "delete-entity"]) {
     const tool = TOOLS.find((entry) => entry.name === name);
     assert.ok(tool.inputSchema.required.includes("owner"), `${name} requires an owner`);
     assert.ok(!("admin" in tool.inputSchema.properties), `${name} exposes no admin parameter`);
@@ -172,6 +172,13 @@ test("write queries: entities are owner-keyed like the ingestion (name case-inse
   // findEntity is the same match: "not found" is identical for a foreign and
   // a nonexistent entity.
   assert.match(QUERIES.findEntity, /MATCH \(e:Entity \{owner: \$owner\}\) WHERE toLower\(e\.name\) = toLower\(\$name\)/);
+  // rename-entity: a name-property change on the owner-pinned node — the
+  // elementId and every link survive (a delete+recreate would detach them),
+  // and it can never match a :User account node or another owner's copy.
+  assert.match(QUERIES.renameEntity, /MATCH \(e:Entity \{owner: \$owner\}\) WHERE toLower\(e\.name\) = toLower\(\$name\)/);
+  assert.match(QUERIES.renameEntity, /SET e\.name = \$newName/);
+  assert.doesNotMatch(QUERIES.renameEntity, /DELETE/);
+  assert.doesNotMatch(QUERIES.renameEntity, /User/);
 });
 
 test("factQuery: one query per endpoint-kind pair, typed and owner-pinned, no injection", () => {
@@ -208,8 +215,8 @@ test("validateWriteTool: the admin flag and a registered owner gate every write 
   // Without the backend-injected admin flag: refused, whatever else is set
   // (the brain can never set it; a forged flag is overridden by the
   // backend's injection).
-  for (const tool of ["store-entity", "store-fact", "delete-entity"]) {
-    const result = validateWriteTool(tool, { ...base, owner: "Mila", name: "Berlin", from: "Mila", to: "Pizza", type: "LIKES" }, users);
+  for (const tool of ["store-entity", "store-fact", "rename-entity", "delete-entity"]) {
+    const result = validateWriteTool(tool, { ...base, owner: "Mila", name: "Berlin", newName: "Berlintown", from: "Mila", to: "Pizza", type: "LIKES" }, users);
     assert.equal(result.ok, false, `${tool} without the admin flag`);
   }
   // The owner must be a registered user (case-insensitive, canonicalised to
@@ -233,6 +240,14 @@ test("validateWriteTool: the admin flag and a registered owner gate every write 
   assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Pizza", to: "pizza", type: "LIKES" }, users).ok, false, "case-variant self-fact (would MERGE a self-loop)");
   assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila", to: "Pizza", type: "I really do not know" }, users).params.type, "RELATED_TO");
   assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: true }, users).params.negative, true);
+  // Rename takes owner + name + newName: the name is case-insensitively
+  // identical to the current one (no rename), and a registered user's name
+  // is their account node, never an entity.
+  const rename = validateWriteTool("rename-entity", { ...admin, owner: "mila", name: "  Berlin  ", newName: "Berlintown" }, users);
+  assert.equal(rename.ok, true, JSON.stringify(rename));
+  assert.deepEqual(rename.params, { owner: "Mila", name: "Berlin", newName: "Berlintown" });
+  assert.equal(validateWriteTool("rename-entity", { ...admin, owner: "Mila", name: "Berlin", newName: "BERLIN" }, users).ok, false, "case-variant same name is no rename");
+  assert.equal(validateWriteTool("rename-entity", { ...admin, owner: "Mila", name: "Berlin", newName: "Roman" }, users).ok, false, "user's name is their account node");
   // Deletion takes owner + name only (the :Entity match pins both; :User can
   // never match).
   const del = validateWriteTool("delete-entity", { ...admin, owner: "roman", name: "Lego" }, users);
@@ -241,4 +256,5 @@ test("validateWriteTool: the admin flag and a registered owner gate every write 
   // Missing required arguments are refused, too.
   assert.equal(validateWriteTool("store-entity", { ...admin, owner: "Mila" }, users).ok, false, "missing name");
   assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila" }, users).ok, false, "missing to");
+  assert.equal(validateWriteTool("rename-entity", { ...admin, owner: "Mila", name: "Berlin" }, users).ok, false, "missing newName");
 });

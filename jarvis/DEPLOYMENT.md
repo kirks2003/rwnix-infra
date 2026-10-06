@@ -2395,3 +2395,78 @@ Then, live against the real Neo4j over the **new ingestion code path**
 stayed `topic`); a fresh entity stored twice with different casing+type
 stayed one node (first spelling+type kept); a fact to the case-variant
 added one edge to the one node; test data removed via the admin delete.
+
+## 2026-10-06: the admin rename leak — tool-call XML shown as the answer; rename-entity tool; no admin ingestion
+
+Reported: the admin asked to rename "TradingMonitor List" to "Trading"
+(Roman's list); the answer panel showed raw tool-call markup instead of an
+answer — `<|tool_calls|><|invoke| name="list-my-facts"><|parameter|
+name="relation" string="true">PART_OF<|/parameter|><|/invoke|><|/tool_calls|>`:
+the brain's native tool-call XML leaked out as the answer text.
+
+Root cause: the DeepSeek brain endpoint (behind an OpenAI-compatible proxy)
+**intermittently** returns tool calls in the model's native XML format inside
+the message `content` instead of the OpenAI `tool_calls` field. The backend
+only looked at `tool_calls`, so in those rounds the XML was treated as the
+final answer — rendered, spoken, and the call never executed. The activity
+feed showed how fragile those turns were: the user's turn had performed a
+real partial rename (`Robinhood after hours` → `Robinhood`) and then ended
+in the leaked (never-executed) XML call; the follow-up turn made NO writes
+yet the brain *claimed* the rename was done — and auto-ingestion of that
+admin turn then materialised the hallucination as `owner=admin` copies plus
+phantom edges (`TradingMonitor List RENAMED_TO Trading`) from the answer
+text.
+
+Fix (three parts):
+
+- **Tool-call XML fallback** (`graphdb.js`): new `parseToolCallsFromContent`
+  recovers OpenAI-shaped calls from the native XML — the `invoke`/`parameter`
+  anchors with `name="..."` matched leniently (wrapper tokens vary between
+  model builds), a gate that requires the `tool_calls` wrapper, or both an
+  invoke and a parameter tag, so ordinary prose is never reinterpreted; max
+  8 calls; values try `JSON.parse` then plain string. The `runBrain` tool
+  loop falls back to it when `tool_calls` is empty and carries the parsed
+  calls on the assistant turn, so the tool result's id stays protocol-valid
+  for the next round. Parsed calls flow through the exact same path as
+  native ones — same backend injection, same audit.
+- **`rename-entity` admin tool** (`mcp/graph.mjs` + `server.js`): the brain
+  had no rename primitive before, so it improvised delete+recreate+relink —
+  a five-round-budget dance in which the old node survived and the links
+  were lost. The new fourth admin write tool renames in place: `SET e.name`
+  on the owner-pinned node — elementId, type and **every link survive**.
+  Validated before any database access: `owner` is a registered user, `name`
+  and `newName` are present and differ case-insensitively (a case variant is
+  no rename), and `newName` is not a registered user's name; the handler
+  additionally refuses a collision with an existing copy of the same owner
+  (the `(name, owner)` key stays unique) and a missing old name. Audited in
+  the global feed as `brain_write`.
+- **Admin turns are no longer auto-ingested** (`server.js`): the admin is a
+  service account for graph maintenance — ingesting its turns minted
+  `owner=admin` copies of every user's entity it touched (the live graph
+  showed four such copies plus the phantom edges after two turns). The admin
+  now changes the graph only through its explicit, audited write tools. The
+  admin system prompt was updated to match: `rename-entity` is documented as
+  THE way to rename ("never delete+store"), and the "graph is updated
+  automatically after every answer" line is replaced with the truth for
+  admin sessions.
+
+**Tests:** unit **127/127** (5 new: the parser unit — native XML recovered
+as OpenAI-shaped calls, multi-call + typed values + missing wrapper tokens,
+and ordinary prose never reinterpreted; the admin `rename-entity` surface,
+routing with the injected args and audit; the XML fallback end-to-end — the
+tool executes and the answer stays prose, with the parsed call riding on the
+assistant turn; the admin no-ingestion — an admin turn mints no
+`owner=admin` entities); browser **39 pass + 2 opt-in skips**.
+
+**Deploy + live verification:** backup
+`jarvis-code.bak-20261006_123614.tgz` (code only, `.env` untouched); synced
+`server.js`, `graphdb.js`, `mcp/graph.mjs`, `README.md`, `DEPLOYMENT.md`
+and the three test files (md5-verified), image rebuilt, container `healthy`,
+`/api/health` ok. Live data cleanup + dogfooding: removed the orphaned
+`Trading (Roman)` node the failed half-rename left behind and the four
+`owner=admin` pollution entities (via the panel delete endpoint, admin
+session), then ran the user's actual request through the **new
+`rename-entity` tool** in an admin chat turn: `TradingMonitor List` →
+`Trading` under Roman as one atomic call — the node kept its elementId and
+all its links (`Roman OWNS Trading`, `Trump PART_OF Trading`,
+`Robinhood PART_OF Trading`) came with it.
