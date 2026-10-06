@@ -21,3 +21,4 @@ See `scripts/check-hosts/` for the mesh-test script and host list (copies; sourc
 See `scripts/host/mesh-password-rotate.py` for the emergency password rotation tool (copy; source of truth is `kirks2003/rw_mesh`).
 See `jarvis/README.md` for the browser voice assistant (wake word, Whisper STT, brain, HAL 9000 answer voice, MCP web-search toggle) and `jarvis/DEPLOYMENT.md` for its live deployment, the gpu-1 Whisper/TTS service, the MCP web-search server and the measured voice-pipeline findings.
 See `ovhcloud-exporter.md` for the nbg-1 OVHcloud billing/AI-endpoint-cost exporter, the "Cloud & AI Credits" Grafana dashboard (provisioned-file workflow), the OVH in-arrears billing finding, and the live `usage/current` integration.
+See `vie1-grafana-ip-conflict.md` for the vie-1 Grafana stack, the `authelia_shared-grafana` network IP allocation, and the 2026-10-06 static-IP-conflict finding (telegraf stole grafana's pinned IP after a reboot).
