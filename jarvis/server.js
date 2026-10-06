@@ -865,7 +865,7 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
         role: "system",
         content: `Web search results for this prompt (use them if relevant, keep the answer short and spoken):\n${results}`,
       };
-      mcpStates.push("Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. You can also call the tools web_search (your own query) and web_news (latest news for a topic or an interest area: technik, it, finance, geek, nerd). For 'latest news' questions — including about the user's interests and their stored topics (the WATCHES facts from the knowledge graph, e.g. a trading news list the user asked to track, or the members of one of the user's named list entities via its PART_OF edges) — call web_news with the concrete topic, one interest at a time. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.");
+      mcpStates.push("Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. You can also call the tools web_search (your own query), web_news (latest news for a topic or an interest area: technik, it, finance, geek, nerd) and web_fetch (open a specific URL in a real headless browser and return the rendered page text — use it when the user asks to pull or open a specific page, e.g. a stock quote or a link from the web_search results; it runs the page's JavaScript so it reads dynamic content a plain fetch would miss). For 'latest news' questions — including about the user's interests and their stored topics (the WATCHES facts from the knowledge graph, e.g. a trading news list the user asked to track, or the members of one of the user's named list entities via its PART_OF edges) — call web_news with the concrete topic, one interest at a time. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.");
     } catch (error) {
       if (signal.aborted) throw error;
       console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_skipped", error: error.message }));
@@ -1085,7 +1085,7 @@ function graphTools(admin) {
 // are read-only live lookups (mcp/websearch.mjs runs free keyless engines and
 // news sources); `lang` is injected per call by this backend — like the graph
 // user — so the brain (or a prompt injection) cannot steer the locale.
-const WEB_TOOL_NAMES = new Set(["web_search", "web_news"]);
+const WEB_TOOL_NAMES = new Set(["web_search", "web_news", "web_fetch"]);
 const WEB_TOOL_TIMEOUT_MS = 20000;
 function webTools() {
   return [
@@ -1103,6 +1103,14 @@ function webTools() {
         name: "web_news",
         description: "Fetch the latest news (past 7 days) from free news sources (Google News, Bing News, heise, Golem, Ars Technica, The Verge, TechCrunch, CNBC, MarketWatch, Financial Times, Hacker News, Lobsters, r/programming). Use whenever the user asks for news or the latest developments: with a concrete topic (e.g. one of their interests from the knowledge graph or the conversation) or an interest area — technik, it, finance, geek, nerd.",
         parameters: { type: "object", properties: { topic: { type: "string", description: "A concrete topic (e.g. 'Home Assistant') or an interest area: technik, it, finance, geek, nerd." }, max_results: { type: "number", description: "Optional maximum number of news items (default 8, max 15)." } }, required: ["topic"] },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "web_fetch",
+        description: "Open a specific URL in a real headless browser (as a human user's browser would) and return the rendered page as text. Use it when the user asks to pull or open a specific page — e.g. a stock quote or a link from the web_search results — or when a search snippet is too thin to answer. It runs the page's JavaScript, so it reads dynamic content a plain fetch would miss. Pass the exact URL.",
+        parameters: { type: "object", properties: { url: { type: "string", description: "The http(s) URL to open." }, max_chars: { type: "number", description: "Optional maximum characters of page text to return (default 12000, max 30000)." } }, required: ["url"] },
       },
     },
   ];
@@ -1219,8 +1227,9 @@ async function runBrain({ messages, user, useTools, webTools: webToolsOn = false
         try {
           const result = await withAbort(mcpWebSearch.call(name, { ...args, lang }, WEB_TOOL_TIMEOUT_MS), totalSignal);
           const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
-          console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_tool", tool: name, detail: (name === "web_news" ? args.topic : args.query) || "", ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));
-          if (!result.isError) webResults.push(`${name} (${name === "web_news" ? args.topic : args.query}):\n${resultText}`);
+          const detail = (name === "web_news" ? args.topic : name === "web_fetch" ? args.url : args.query) || "";
+          console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_tool", tool: name, detail: String(detail).slice(0, 300), ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));
+          if (!result.isError) webResults.push(`${name} (${detail}):\n${resultText}`);
           local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
         } catch (error) {
           if (totalSignal.aborted) throw error;
@@ -1233,7 +1242,7 @@ async function runBrain({ messages, user, useTools, webTools: webToolsOn = false
         if (useTools) recordGraphActivity({ kind: GRAPH_WRITE_TOOL_NAMES.has(name) ? "brain_write" : "brain_query", user, tool: name, ok: false, error: "unknown tool", ms: 0 });
         const available = [
           ...(useTools ? ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", ...(admin ? ["store-entity", "store-fact", "rename-entity", "delete-entity"] : [])] : []),
-          ...(webToolsOn ? ["web_search", "web_news"] : []),
+          ...(webToolsOn ? ["web_search", "web_news", "web_fetch"] : []),
         ];
         local.push({ role: "tool", tool_call_id: call.id, content: `Unknown tool. Use: ${available.join(", ")}.` });
       }

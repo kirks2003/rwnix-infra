@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 // Minimal Model Context Protocol server (stdio transport, newline-delimited
-// JSON-RPC 2.0) exposing two tools to the Jarvis backend:
+// JSON-RPC 2.0) exposing three tools to the Jarvis backend:
 //   - web_search: general web search (see below)
 //   - web_news: latest news for a topic or an interest area (technik, it,
 //     finance, geek, nerd) from free keyless news sources
+//   - web_fetch: open a URL in a real headless Chromium browser (a human
+//     browser's TLS/HTTP2 fingerprint plus JavaScript execution — what
+//     bypasses bot recognition that a header set alone cannot) and hand the
+//     rendered page text to the brain. This is what lets "pull the price
+//     from google finance" work: the quote loads in a post-load XHR, so only
+//     a browser that runs the page's JS sees it.
 // The backend spawns this process on demand (see mcpWebSearch in server.js).
 //
 // web_search runs every free keyless engine in parallel and merges the
@@ -39,9 +45,11 @@
 // search + news for the brain".
 
 import readline from "node:readline";
+import dns from "node:dns/promises";
 import {
   cleanHtml, decodeDuckDuckGoHref, decodeBingUrl, mergeResults, formatSearchResults,
   normalizeUrlForDedupe, browserHeaders, INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems,
+  isSafeFetchUrl, isBlockedIp, htmlToText,
 } from "./engines.mjs";
 
 const TOOL = {
@@ -72,6 +80,21 @@ const NEWS_TOOL = {
   },
 };
 
+// Opens the page in a real browser, so the tool description can promise what
+// it does: rendered content, not the raw HTML shell a plain fetch gets.
+const FETCH_TOOL = {
+  name: "web_fetch",
+  description: "Open a URL in a real headless browser (as a human user's browser would) and return the rendered page as text. Use it when the user asks to pull or open a specific page — e.g. a stock quote from a search result — or when a search snippet is too thin to answer. Pass the exact URL from the search results.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "The http(s) URL to open." },
+      max_chars: { type: "number", description: "Maximum characters of page text to return (default 12000, max 30000)." },
+    },
+    required: ["url"],
+  },
+};
+
 const readLine = readline.createInterface({ input: process.stdin, terminal: false });
 readLine.on("line", (line) => {
   const trimmed = line.trim();
@@ -94,16 +117,19 @@ async function handleMessage(message) {
       return respond(id, {
         protocolVersion: params?.protocolVersion || "2025-06-18",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "jarvis-websearch", version: "1.3.0" },
+        serverInfo: { name: "jarvis-websearch", version: "1.4.0" },
       });
     case "notifications/initialized":
     case "notifications/cancelled":
       return;
     case "tools/list":
-      return respond(id, { tools: [TOOL, NEWS_TOOL] });
+      return respond(id, { tools: [TOOL, NEWS_TOOL, FETCH_TOOL] });
     case "tools/call": {
       if (params?.name === "web_news") {
         return handleNews(id, params.arguments || {});
+      }
+      if (params?.name === "web_fetch") {
+        return handleFetch(id, params.arguments || {});
       }
       if (params?.name !== "web_search") {
         return respond(id, null, { code: -32602, message: `Unknown tool: ${params?.name}` });
@@ -261,6 +287,118 @@ async function resolveRedirectUrl(url, lang) {
     return final;
   } catch {
     return "";
+  }
+}
+
+// --- web_fetch: open a URL in a real browser ----------------------------------
+//
+// One persistent Chromium per MCP process (this server is one long-lived
+// child of the backend), launched lazily on the first fetch and closed when
+// the process dies. A fresh context per fetch keeps cookies isolated between
+// pages; the locale follows the answer language so the browser (and every
+// request it makes) speaks the user's language. `--no-sandbox` because the
+// container runs as root, `--disable-dev-shm-usage` because the container's
+// /dev/shm is 64 MB.
+let browserPromise = null;
+let browserUnavailable = false;
+function ensureBrowser() {
+  if (browserUnavailable) throw new Error("browser unavailable");
+  if (!browserPromise) {
+    browserPromise = import("playwright").then(({ chromium }) => chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    })).catch((error) => {
+      // A missing browser (not installed, crashed, no system libraries) must
+      // not kill the tool: the plain-fetch fallback below still answers, just
+      // without JavaScript.
+      browserUnavailable = true;
+      browserPromise = null;
+      throw error;
+    });
+  }
+  return browserPromise;
+}
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    browserPromise?.then((browser) => browser.close()).catch(() => {});
+    process.exit(signal === "SIGINT" ? 130 : 0);
+  });
+}
+process.on("exit", () => {
+  // Synchronous best-effort: the event loop is gone, this only helps when
+  // the browser is already closed or closing fast.
+  browserPromise?.then((browser) => browser.close({ timeout: 500 })).catch(() => {});
+});
+
+async function handleFetch(id, arguments_) {
+  const url = String(arguments_.url || "").trim();
+  const maxChars = Math.min(30000, Math.max(2000, Number(arguments_.max_chars) || 12000));
+  const lang = arguments_.lang === "en" ? "en" : "de";
+  const started = Date.now();
+  if (!url) return respond(id, { content: [{ type: "text", text: "Empty URL" }], isError: true });
+  const unsafe = isSafeFetchUrl(url);
+  if (unsafe) {
+    console.log(JSON.stringify({ level: "warn", msg: "webfetch_blocked", url: url.slice(0, 200), reason: unsafe }));
+    return respond(id, { content: [{ type: "text", text: `Cannot open ${url}: ${unsafe}` }], isError: true });
+  }
+  // A hostname can point at any IP (DNS rebinding included), so the guard is
+  // re-checked against the resolved addresses right before the fetch.
+  const hostname = new URL(url).hostname;
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) && !hostname.includes(":")) {
+    let addresses;
+    try {
+      addresses = (await dns.lookup(hostname, { all: true })).map((entry) => entry.address);
+    } catch {
+      return respond(id, { content: [{ type: "text", text: `Cannot open ${url}: the hostname does not resolve` }], isError: true });
+    }
+    if (!addresses.length || addresses.some(isBlockedIp)) {
+      return respond(id, { content: [{ type: "text", text: `Cannot open ${url}: it resolves to a private/internal address` }], isError: true });
+    }
+  }
+  try {
+    const result = await fetchWithBrowser(url, maxChars, lang);
+    console.log(JSON.stringify({ level: "info", msg: "webfetch_success", url: url.slice(0, 200), ms: Date.now() - started, chars: result.text.length, browser: true }));
+    return respond(id, { content: [{ type: "text", text: result.text }] });
+  } catch (browserError) {
+    // The page may simply be slow or walled for the browser; a plain
+    // browser-header fetch is a degraded but real fallback (no JavaScript).
+    try {
+      const html = await fetchText(url, { headers: browserHeaders(lang, true) });
+      const text = `${htmlToText(html, maxChars)}\n\n[fetched without JavaScript — dynamic page content may be missing]`;
+      console.log(JSON.stringify({ level: "info", msg: "webfetch_fallback", url: url.slice(0, 200), ms: Date.now() - started, error: browserError.message.slice(0, 120) }));
+      return respond(id, { content: [{ type: "text", text }] });
+    } catch (fallbackError) {
+      console.log(JSON.stringify({ level: "warn", msg: "webfetch_failure", url: url.slice(0, 200), ms: Date.now() - started, error: fallbackError.message.slice(0, 120) }));
+      return respond(id, { content: [{ type: "text", text: `Fetch failed: ${fallbackError.message}` }], isError: true });
+    }
+  }
+}
+
+// Open the page in the shared browser and wait for the post-load XHRs that
+// render dynamic content (a stock quote loads exactly this way): domcontent-
+// loaded first (hard 10 s cap — the backend's tool timeout is 20 s), then the
+// load event, then a bounded network-idle settle. The rendered innerText is
+// what the brain reads: visible text only, in reading order.
+async function fetchWithBrowser(url, maxChars, lang) {
+  const browser = await ensureBrowser();
+  const context = await browser.newContext({
+    locale: lang === "en" ? "en-US" : "de-DE",
+    viewport: { width: 1366, height: 900 },
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10000 });
+    await page.waitForLoadState("load", { timeout: 4000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => {});
+    const { title, text, finalUrl } = await page.evaluate(() => ({
+      title: document.title || "",
+      text: document.body ? document.body.innerText : "",
+      finalUrl: location.href,
+    }));
+    const body = htmlToText(text, maxChars);
+    return { finalUrl, text: `Page: ${finalUrl}\nTitle: ${title}\n\n${body || "[the page rendered no readable text]"}` };
+  } finally {
+    await context.close().catch(() => {});
   }
 }
 

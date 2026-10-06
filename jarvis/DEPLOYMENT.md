@@ -2620,3 +2620,66 @@ untouched); synced `public/graph-page.js` + `tests/graph.browser.mjs`
 check signed in as Mila: search "Lego" → centred with the other node dimmed;
 Clear → both nodes bright again, camera back on the whole graph. Hard refresh
 (Ctrl+Shift+R) picks up the new `graph-page.js`.
+
+## 2026-10-06: MCP web-search gains a real-browser `web_fetch` tool
+
+Report: "pull from google finance" → the brain found the Google Finance link
+in the `web_search` results but had **no tool to open a URL** (`mcp/websearch.mjs`
+exposed only `web_search` + `web_news`), so "I pulled up the page … couldn't
+extract a live price" was a hallucination off the result title. And a plain
+HTTP fetch would not have helped anyway: the live quote loads in a **post-load
+XHR (JS)**. Measured from both server IPs, the existing Chrome header set gets
+HTTP 200 with the real page shell (~1.3 MB), no bot wall — but no price in the
+static HTML. So the fix needed a browser that actually runs the page.
+
+Change: a third MCP tool, **`web_fetch(url)`**, in `mcp/websearch.mjs`. It
+opens the URL in a **real headless Chromium** (Playwright) — a genuine
+human-browser fingerprint (real TLS/HTTP2 stack, JavaScript execution,
+cookies, locale), which is what bypasses bot recognition a spoofed header set
+alone cannot and what reads JS-rendered content. One **persistent browser per
+MCP process** (lazy launch, closed on SIGTERM/SIGINT/exit), a fresh isolated
+context per fetch (locale follows the answer language, so German answers get a
+German-rendered page), `goto(domcontentloaded, 10 s)` then the `load` event and
+a bounded `networkidle` settle (4 s) so post-load XHRs land, then the rendered
+`document.body.innerText` (visible text, reading order) capped at 12 000 chars
+(max 30 000). If the browser is unavailable (not installed, crashed, no system
+libraries) it degrades to a plain browser-header fetch and marks the result
+`[fetched without JavaScript — dynamic page content may be missing]`.
+Because the brain is prompt-injectable, `web_fetch` is **SSRF-guarded** like the
+graph is owner-scoped: http/https only, default ports 80/443, no embedded
+credentials, and private/loopback/link-local/CGNAT/benchmarking IPs blocked —
+both as URL literals and against the **DNS-resolved** addresses (a hostname that
+rebinds to `169.254.169.254`, the Neo4j container or the app itself is
+refused), so the brain reaches the public web as a human but never the internal
+network. New pure helpers `isSafeFetchUrl` / `isBlockedIp` / `htmlToText` live
+in `mcp/engines.mjs` (unit-testable without network). The backend wires
+`web_fetch` into `WEB_TOOL_NAMES`, `webTools()`, the ON-state brain prompt line
+and the tool log; `playwright` moves from dev to production dependency and the
+Dockerfile installs Chromium + its Debian system libs at build time
+(`npx playwright install --with-deps chromium`, `--no-sandbox
+--disable-dev-shm-usage` launch args because the container runs as root with a
+64 MB `/dev/shm`).
+
+**Tests:** new unit tests for `isBlockedIp` (v4/v6/mapped/garbage),
+`isSafeFetchUrl` (scheme/port/creds/literal-IP), `htmlToText` (head/script
+stripping, cap), a live SSRF-rejection test over the MCP protocol (loopback,
+metadata, private, IPv6, file://, non-default port, creds — all rejected before
+any network), the protocol test now asserts three tools, and a server.test.mjs
+end-to-end round where the mock brain calls `web_fetch` on the exact Google
+Finance URL (tool offered, system prompt mentions it, lang injected per call).
+Unit **141/141**. Live in-container MCP `web_fetch` of
+`https://www.google.com/finance/quote/NVD:FRA` returned the rendered page with
+the live quote; the no-browser fallback path verified separately (returns the
+shell + the `[fetched without JavaScript]` marker).
+
+**Deploy:** backup `jarvis-code.bak-20261006_155629.tgz` (code only, `.env`
+untouched); synced `Dockerfile`, `package.json`, `package-lock.json`,
+`server.js`, `mcp/engines.mjs`, `mcp/websearch.mjs`, `tests/mcp.test.mjs`,
+`tests/server.test.mjs` (all md5-verified), image rebuilt (Chromium v1208 +
+system deps, image now **1.25 GB**), container `healthy`, `/api/health` ok.
+Live end-to-end signed in as Mila (web search on): "Rufe die Nvidia Aktie von
+Google Finance ab (…NVD:FRA) und sag mir den aktuellen Kurs" → the brain called
+`web_fetch` (backend log: `websearch_tool web_fetch … ok 5401 ms 4179 chars`)
+and answered **214,70 € (+0,82 %, +1,75 €)**, Vortagesschluss 212,95 € — the
+exact live quote, read from the rendered page, not recalled. No static-asset
+change, so no browser hard refresh is needed (backend/image only).

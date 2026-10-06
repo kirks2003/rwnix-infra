@@ -229,6 +229,91 @@ export function parseFeedItems(xml, source) {
   return items;
 }
 
+// --- Page fetch (the web_fetch tool) -----------------------------------------
+//
+// The brain is prompt-injectable, so a tool that opens arbitrary URLs needs
+// the same boundary thinking as the graph's owner pinning: it may reach the
+// public web as a human browser would, never the internal network (metadata
+// endpoint, the Neo4j container, the app itself).
+
+// Literal-IP ranges that must never be fetched: loopback, private,
+// link-local (169.254/16 is the cloud metadata address), CGNAT,
+// benchmarking and the unspecified block — IPv4 and IPv6 (including
+// IPv4-mapped IPv6, the classic bypass).
+export function isBlockedIp(ip) {
+  if (typeof ip !== "string" || !ip) return true;
+  // IPv6 first: an IPv4-mapped address (::ffff:a.b.c.d) carries dots and
+  // would otherwise fall into the IPv4 branch and fail closed.
+  if (ip.includes(":")) {
+    const v6 = ip.toLowerCase();
+    const mapped = v6.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (mapped) return isBlockedIp(mapped[1]);
+    if (v6 === "::" || v6 === "::1") return true;
+    if (v6.startsWith("fc") || v6.startsWith("fd")) return true; // unique-local
+    if (v6.startsWith("fe8") || v6.startsWith("fe9") || v6.startsWith("fea") || v6.startsWith("feb")) return true; // link-local
+    return false;
+  }
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return true;
+  const [a, b] = parts;
+  return a === 0 || a === 10 || a === 127
+    || (a === 100 && b >= 64 && b <= 127)
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 198 && (b === 18 || b === 19));
+}
+
+// A URL the web_fetch tool may open: http/https on a default port (80/443),
+// no credentials in the URL, and — for literal-IP hosts — not in a blocked
+// range. Hostname URLs are additionally DNS-resolved by the caller before the
+// fetch (a hostname can point anywhere). Returns an error string, or null.
+export function isSafeFetchUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || ""));
+  } catch {
+    return "not a valid URL";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `only http/https URLs can be opened (got ${parsed.protocol})`;
+  }
+  if (parsed.username || parsed.password) return "URLs with embedded credentials are not allowed";
+  if (parsed.port && parsed.port !== "80" && parsed.port !== "443") {
+    return `only default ports 80/443 are allowed (got ${parsed.port})`;
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  // Only IP literals are checked here (a dotted hostname is not an IP);
+  // hostname URLs are additionally DNS-resolved by the caller before the
+  // fetch, because a hostname can point anywhere.
+  const isV4Literal = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+  if (isV4Literal || host.includes(":")) {
+    if (isBlockedIp(host)) return "that address is on a private/internal network and cannot be opened";
+  }
+  return null;
+}
+
+// Readable text from a page's HTML (the fallback when no browser is
+// available): drop the non-content blocks, take the body, strip tags, decode
+// the common entities, collapse whitespace and cap the length. Pure, so the
+// unit tests run without a page.
+export function htmlToText(html, maxChars = 12000) {
+  let text = String(html || "");
+  text = text
+    .replace(/<head[\s>][\s\S]*?<\/head>/gi, " ")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript\b[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<template\b[\s\S]*?<\/template>/gi, " ")
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, " ");
+  const body = text.match(/<body\b[^>]*>([\s\S]*)<\/body>/i);
+  if (body) text = body[1];
+  text = cleanHtml(text);
+  const cap = Math.max(200, Number(maxChars) || 12000);
+  return text.length > cap ? `${text.slice(0, cap)}… [truncated]` : text;
+}
+
 // One text block for the brain: newest first, numbered, with source, date and
 // URL per item.
 export function formatNewsItems(items) {

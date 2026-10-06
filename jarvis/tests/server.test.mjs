@@ -103,6 +103,25 @@ before(async () => {
         }
         return res.end(JSON.stringify({ choices: [{ message: { content: "Fresh news delivered." } }] }));
       }
+      if (mode === "web-fetch") {
+        // The mock brain asks for the web_fetch tool on the first round (the
+        // exact Google Finance URL from the user report) and answers once the
+        // result arrives — exercising the browser-fetch tool loop end to end.
+        const body = JSON.parse(received.toString("utf8") || "{}");
+        const hasToolResult = (body.messages || []).some((message) => message.role === "tool");
+        if (body.tools && !hasToolResult) {
+          return res.end(JSON.stringify({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call_fetch", type: "function", function: { name: "web_fetch", arguments: JSON.stringify({ url: "https://www.google.com/finance/quote/NVD:FRA" }) } }],
+              },
+            }],
+          }));
+        }
+        return res.end(JSON.stringify({ choices: [{ message: { content: "Fetched the quote page." } }] }));
+      }
       res.end(mode === "empty-answer"
         ? '{"choices":[{"message":{"content":null},"finish_reason":"length"}]}'
         : '{"choices":[{"message":{"content":"Hello"}}]}');
@@ -492,9 +511,10 @@ test("the brain gets web_search and web_news tools and can fetch live news", asy
   });
   const result = await response.json();
   assert.equal(result.answer, "Fresh news delivered.");
-  // The final request (after the tool round) still offers both web tools...
+  // The final request (after the tool round) still offers all three web
+  // tools...
   const body = JSON.parse(received.toString("utf8"));
-  assert.deepEqual(body.tools.map((tool) => tool.function.name), ["web_search", "web_news"]);
+  assert.deepEqual(body.tools.map((tool) => tool.function.name), ["web_search", "web_news", "web_fetch"]);
   // ...and the tool round landed: the brain's web_news call got the mock
   // result, the backend injected the answer language (lang) per call, and
   // the brain only supplied the topic — the MCP never sees a brain-chosen
@@ -507,6 +527,55 @@ test("the brain gets web_search and web_news tools and can fetch live news", asy
   // The system prompt tells the brain about the news tool and the areas.
   assert.match(body.messages[0].content, /web_news/);
   assert.match(body.messages[0].content, /technik, it, finance, geek, nerd/);
+  // ...and about the browser-fetch tool for specific pages.
+  assert.match(body.messages[0].content, /web_fetch/);
+  mode = "success";
+});
+
+test("the brain gets the web_fetch tool and can open a page in the browser", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-web-fetch-mock-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // Same mock MCP as the news test: it echoes the tool name and the full
+  // arguments, so the backend's per-call lang injection is pinned without any
+  // network or real browser.
+  const script = join(dir, "mcp-web-fetch.mjs");
+  await writeFile(script, `
+    import readline from "node:readline";
+    readline.createInterface({ input: process.stdin }).on("line", (line) => {
+      const message = JSON.parse(line);
+      if (message.id === undefined) return;
+      let result;
+      if (message.method === "initialize") {
+        result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-websearch", version: "1.0.0" } };
+      } else if (message.method === "tools/call") {
+        result = { isError: false, content: [{ type: "text", text: "Mock " + message.params.name + " result: 42. args=" + JSON.stringify(message.params.arguments || {}) }] };
+      } else {
+        result = {};
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+    });
+  `);
+  const { process: child, origin: toolsOrigin } = await startBackend({ MCP_SEARCH_SCRIPT: script });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  mode = "web-fetch";
+  const response = await auth(toolsOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Pull the Nvidia quote from Google Finance.", sessionId: "web-fetch-loop", language: "de", websearch: true }),
+  });
+  const result = await response.json();
+  assert.equal(result.answer, "Fetched the quote page.");
+  const body = JSON.parse(received.toString("utf8"));
+  // The web_fetch tool is offered to the brain...
+  const offered = body.tools.map((tool) => tool.function.name);
+  assert.ok(offered.includes("web_fetch"), "web_fetch is in the offered tools");
+  // ...the system prompt describes it, and the tool round landed with the
+  // exact URL the brain chose plus the injected answer language.
+  assert.match(body.messages[0].content, /web_fetch/);
+  const toolMessage = body.messages.find((message) => message.role === "tool");
+  assert.ok(toolMessage, "the tool result is in the final request");
+  assert.match(toolMessage.content, /Mock web_fetch result: 42/);
+  assert.match(toolMessage.content, /"url":"https:\/\/www\.google\.com\/finance\/quote\/NVD:FRA"/);
+  assert.match(toolMessage.content, /"lang":"de"/);
   mode = "success";
 });
 

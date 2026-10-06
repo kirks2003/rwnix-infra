@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   cleanHtml, decodeDuckDuckGoHref, decodeBingUrl, normalizeUrlForDedupe, mergeResults, formatSearchResults,
   INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems, browserHeaders,
+  isSafeFetchUrl, isBlockedIp, htmlToText,
 } from "../mcp/engines.mjs";
 
 test("cleanHtml strips tags and named plus numeric entities", () => {
@@ -180,6 +181,65 @@ test("browserHeaders look like a normal Chrome request and steer the language", 
   assert.equal(en.accept, "*/*");
 });
 
+test("isBlockedIp rejects private/loopback/link-local/internal ranges in v4 and v6", () => {
+  // Loopback, unspecified, private, CGNAT, link-local (metadata), benchmarking.
+  assert.equal(isBlockedIp("127.0.0.1"), true);
+  assert.equal(isBlockedIp("0.0.0.0"), true);
+  assert.equal(isBlockedIp("10.0.0.5"), true);
+  assert.equal(isBlockedIp("192.168.1.1"), true);
+  assert.equal(isBlockedIp("172.16.0.1"), true);
+  assert.equal(isBlockedIp("172.31.255.255"), true);
+  assert.equal(isBlockedIp("100.64.0.1"), true);
+  assert.equal(isBlockedIp("169.254.169.254"), true); // cloud metadata
+  assert.equal(isBlockedIp("198.18.0.1"), true);
+  // Public ranges are allowed.
+  assert.equal(isBlockedIp("8.8.8.8"), false);
+  assert.equal(isBlockedIp("1.1.1.1"), false);
+  assert.equal(isBlockedIp("172.32.0.1"), false); // just outside 172.16/12
+  assert.equal(isBlockedIp("100.128.0.1"), false); // just outside CGNAT
+  // IPv6: unspecified, loopback, unique-local, link-local.
+  assert.equal(isBlockedIp("::"), true);
+  assert.equal(isBlockedIp("::1"), true);
+  assert.equal(isBlockedIp("fd00::1"), true);
+  assert.equal(isBlockedIp("fe80::1"), true);
+  // IPv4-mapped IPv6 of a private address is blocked too.
+  assert.equal(isBlockedIp("::ffff:10.0.0.1"), true);
+  assert.equal(isBlockedIp("::ffff:8.8.8.8"), false);
+  // Garbage is fail-closed.
+  assert.equal(isBlockedIp(""), true);
+  assert.equal(isBlockedIp("not-an-ip"), true);
+  assert.equal(isBlockedIp(null), true);
+});
+
+test("isSafeFetchUrl allows only http(s) on default ports, no creds, no internal IPs", () => {
+  assert.equal(isSafeFetchUrl("https://example.com/page"), null);
+  assert.equal(isSafeFetchUrl("http://example.com"), null);
+  assert.equal(isSafeFetchUrl("https://example.com:443/"), null);
+  assert.equal(isSafeFetchUrl("http://example.com:80/"), null);
+  assert.match(isSafeFetchUrl("ftp://example.com"), /only http\/https/);
+  assert.match(isSafeFetchUrl("https://example.com:8443/"), /default ports/);
+  assert.match(isSafeFetchUrl("https://user:pass@example.com/"), /credentials/);
+  assert.match(isSafeFetchUrl("http://127.0.0.1/admin"), /private\/internal/);
+  assert.match(isSafeFetchUrl("http://169.254.169.254/latest/meta-data/"), /private\/internal/);
+  assert.match(isSafeFetchUrl("http://10.0.0.5/"), /private\/internal/);
+  assert.match(isSafeFetchUrl("not a url"), /not a valid URL/);
+  assert.match(isSafeFetchUrl(""), /not a valid URL/);
+});
+
+test("htmlToText strips head/script/style, takes the body, collapses whitespace and caps length", () => {
+  const html = `<html><head><title>Ignored</title><style>body{}</style><script>var x=1;</script></head>
+  <body><h1>Headline</h1><p>Body text&nbsp;here &amp; more.</p><script>more()</script></body></html>`;
+  const text = htmlToText(html, 1000);
+  assert.match(text, /Headline/);
+  assert.match(text, /Body text here & more\./);
+  assert.doesNotMatch(text, /Ignored/);
+  assert.doesNotMatch(text, /var x=1/);
+  assert.doesNotMatch(text, /body\{\}/);
+  const capped = htmlToText(`<body>${"a".repeat(5000)}</body>`, 2000);
+  assert.ok(capped.length < 2100);
+  assert.match(capped, /truncated/);
+});
+
 test("the interest feed map covers the five areas with reachable http(s) feeds", () => {
   for (const area of ["technik", "it", "finance", "geek", "nerd"]) {
     const feeds = INTEREST_FEEDS[area];
@@ -266,9 +326,10 @@ test("MCP web-search server speaks the MCP protocol over stdio", async (t) => {
   server.notify("notifications/initialized");
 
   const tools = await server.request("tools/list");
-  assert.deepEqual(tools.tools.map((tool) => tool.name), ["web_search", "web_news"]);
+  assert.deepEqual(tools.tools.map((tool) => tool.name), ["web_search", "web_news", "web_fetch"]);
   assert.deepEqual(tools.tools[0].inputSchema.required, ["query"]);
   assert.deepEqual(tools.tools[1].inputSchema.required, ["topic"]);
+  assert.deepEqual(tools.tools[2].inputSchema.required, ["url"]);
 
   const empty = await server.request("tools/call", { name: "web_search", arguments: { query: "   " } });
   assert.equal(empty.isError, true);
@@ -276,4 +337,34 @@ test("MCP web-search server speaks the MCP protocol over stdio", async (t) => {
   assert.equal(emptyNews.isError, true);
   await assert.rejects(server.request("tools/call", { name: "no_such_tool", arguments: {} }), /Unknown tool/);
   await assert.rejects(server.request("resources/list", {}), /Method not found/);
+});
+
+// The web_fetch SSRF guard must reject internal addresses BEFORE any network
+// or browser work, so the brain (or a prompt injection) can never reach the
+// metadata endpoint, the DB container or the app itself.
+test("web_fetch rejects unsafe URLs over the protocol without touching the network", async (t) => {
+  const server = startMcpServer();
+  t.after(() => server.close());
+  await server.request("initialize", {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "jarvis-test", version: "0.1.0" },
+  });
+
+  const cases = [
+    { url: "http://127.0.0.1/api/health", pattern: /private\/internal/ },
+    { url: "http://127.0.0.1:8094/api/health", pattern: /default ports/ },
+    { url: "http://169.254.169.254/latest/meta-data/", pattern: /private\/internal/ },
+    { url: "http://10.1.2.3/", pattern: /private\/internal/ },
+    { url: "http://[::1]/", pattern: /private\/internal/ },
+    { url: "file:///etc/passwd", pattern: /only http\/https/ },
+    { url: "https://example.com:8443/", pattern: /default ports/ },
+    { url: "https://user:pw@example.com/", pattern: /credentials/ },
+    { url: "   ", pattern: /Empty URL/ },
+  ];
+  for (const { url, pattern } of cases) {
+    const result = await server.request("tools/call", { name: "web_fetch", arguments: { url } });
+    assert.equal(result.isError, true, `web_fetch(${url}) is an error`);
+    assert.match(result.content[0].text, pattern, `web_fetch(${url}) message matches`);
+  }
 });
