@@ -91,6 +91,9 @@ async function routeGraphApi(page, { configured = true } = {}) {
       { at: new Date().toISOString(), kind: "ingest", user: "Mila", entities: 2, relations: 1 },
       // 0 stored / 2 skipped: the extractor only named registered users.
       { at: new Date().toISOString(), kind: "ingest", user: "Mila", entities: 0, relations: 0, skippedUsers: 2 },
+      // The admin session's write (global feed, admin view): rendered as a
+      // write line with the call detail.
+      { at: new Date().toISOString(), kind: "brain_write", user: "admin", tool: "store-fact", detail: "store-fact: owner=Mila, from=Mila, to=Pizza, type=LIKES", ok: true, ms: 8 },
     ] } }));
   }
 }
@@ -134,13 +137,16 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   assert.ok(!edgeLabels.includes("knows"), "KNOWS is not rendered");
   assert.match(await page.textContent("#graphSchema"), /Labels: User, Entity/);
   const activity = await page.locator("#graphActivity li").allTextContents();
-  assert.equal(activity.length, 3);
+  assert.equal(activity.length, 4);
   assert.match(activity[0], /brain read list-my-facts/);
   // The feed is scoped to the session user, so no per-entry user suffix.
   assert.match(activity[1], /stored 2 entities \+ 1 link$/);
   // Nothing stored (the mentions were user accounts) must not read as
   // "stored 0 entities" — the feed says what actually happened.
   assert.match(activity[2], /2 user-account mentions — nothing stored as an entity$/);
+  // The admin session's write renders as a write line with the call detail
+  // (not as a read).
+  assert.match(activity[3], /brain wrote store-fact: owner=Mila, from=Mila, to=Pizza, type=LIKES$/);
 });
 
 test("clicking a node re-centres the panel on its neighbourhood", async (t) => {
