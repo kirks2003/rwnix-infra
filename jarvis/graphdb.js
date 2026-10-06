@@ -83,7 +83,11 @@ function parseExtraction(text) {
   for (const raw of Array.isArray(data.entities) ? data.entities : []) {
     const entity = sanitizeEntity(raw);
     if (!entity) continue;
-    const key = `${entity.name}|${entity.type}`;
+    // One entity per turn per NAME (case-insensitive): the store's key is
+    // (name, owner) without the type, so a same-turn name+type and
+    // name+other-type pair would just bump the same node twice — the first
+    // occurrence wins, and the count stays honest.
+    const key = entity.name.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     entities.push(entity);
@@ -94,13 +98,15 @@ function parseExtraction(text) {
   for (const raw of Array.isArray(data.relations) ? data.relations : []) {
     const from = sanitizeName(raw && raw.from);
     const to = sanitizeName(raw && raw.to);
-    if (!from || !to || from === to) continue;
+    if (!from || !to || from.toLowerCase() === to.toLowerCase()) continue;
     // Known types pass through; a well-formed new type is introduced as-is
     // (the store creates it on first use); malformed prose falls back to the
     // generic RELATED_TO so the fact itself is never lost.
     const normalised = normalizeRelationType(raw && raw.type);
     const type = isRelationType(normalised) ? normalised : "RELATED_TO";
-    const key = `${from}|${to}|${type}`;
+    // Endpoint names case-insensitive: entity identity is (name, owner)
+    // without the type, so "likes btcusd" and "likes BTCUSD" are one fact.
+    const key = `${from.toLowerCase()}|${to.toLowerCase()}|${type}`;
     if (relationKeys.has(key)) continue;
     relationKeys.add(key);
     // Negation is a flag on the relation, never a separate type: "I don't
@@ -148,7 +154,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
 
   // The signed-in user's visible world: their :User node, the entities they
   // own, and the real fact edges between them. Ownership is the isolation
-  // boundary: an :Entity exists once per owner (keyed name+type+owner), so
+  // boundary: an :Entity exists once per owner (keyed by name, case-insensitive), so
   // there is no shared tier and no neighbour expansion to bound — an entity
   // is visible to exactly the user who owns it. A fact edge is visible when
   // every :Entity endpoint is in the user's set; :User endpoints are account
@@ -372,10 +378,12 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
     // The only write path in the app: the backend ingests a finished
     // conversation turn. The caller passes already-sanitised entities and
     // relations (see parseExtraction). Every entity is written keyed by
-    // (name, type, owner) with owner = the signed-in user of the turn: each
-    // user gets their own copy of every entity they mention, which is what
-    // makes the whole graph per-user private by construction (reads match on
-    // owner, so no query can cross the boundary).
+    // (name, owner) — the name case-insensitively, the type NOT part of the
+    // identity — with owner = the signed-in user of the turn: each user gets
+    // their own copy of every entity they mention (and one copy only, no
+    // matter how the type or casing is re-extracted), which is what makes the
+    // whole graph per-user private by construction (reads match on owner, so
+    // no query can cross the boundary).
     async upsertTurn({ user, entities = [], relations = [] }) {
       const now = new Date().toISOString();
       // Every registered user is ONE node: their :User account doubles as the
@@ -390,13 +398,22 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       // Referenced users' :User nodes must exist before relations target them.
       const referencedUsers = new Set(relations.flatMap((relation) => [relation.from, relation.to]).filter(isUser));
       await run(writeClient, "UNWIND $names AS name MERGE (u:User {name: name})", { names: [...new Set([user, ...referencedUsers])] });
-      if (otherEntities.length) {
-        // Keyed by owner: "Lego" mentioned by two users is two nodes, one per
-        // owner. No common flag, no KNOWS edge — ownership IS the provenance.
+     if (otherEntities.length) {
+        // Keyed by (name, owner), the name CASE-INSENSITIVELY — the type is a
+        // property, not part of the identity: a thing first stored as "topic"
+        // and later extracted as "thing" (or with different casing) is ONE
+        // node per owner, and the first stored copy's spelling+type is kept.
+        // (A MERGE on {name, type, owner} would create one node per type —
+        // the "two BTCUSD" bug.) "Lego" mentioned by two users is still two
+        // nodes, one per owner — no common flag, no KNOWS edge, ownership IS
+        // the provenance.
         await run(writeClient,
           "UNWIND $rows AS row " +
-          "MERGE (e:Entity {name: row.name, type: row.type, owner: $user}) " +
-          "ON CREATE SET e.first_seen = row.now " +
+          "OPTIONAL MATCH (e:Entity {owner: $user}) " +
+          "WHERE toLower(e.name) = toLower(row.name) " +
+          "FOREACH (_ IN CASE WHEN e IS NULL THEN [1] ELSE [] END | " +
+          "CREATE (e:Entity {name: row.name, type: row.type, owner: $user, first_seen: row.now}) " +
+          ") " +
           "SET e.last_seen = row.now, " +
           "    e.mention_count = coalesce(e.mention_count, 0) + 1 " +
           "SET e += row.props",
@@ -422,8 +439,11 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       let linked = 0;
       for (const [key, list] of buckets) {
         const [type, fromLabel, toLabel] = key.split("|");
-        const fromPattern = fromLabel === "U" ? "MATCH (a:User {name: row.from})" : "MATCH (a:Entity {name: row.from, owner: $user})";
-        const toPattern = toLabel === "U" ? "MATCH (b:User {name: row.to})" : "MATCH (b:Entity {name: row.to, owner: $user})";
+        // Entity endpoints match by (owner, lower(name)) — the same identity
+        // as the upsert above, so a casing variant of a stored name resolves
+        // to the existing copy instead of a fact edge into thin air.
+        const fromPattern = fromLabel === "U" ? "MATCH (a:User {name: row.from})" : "MATCH (a:Entity {owner: $user}) WHERE toLower(a.name) = toLower(row.from)";
+        const toPattern = toLabel === "U" ? "MATCH (b:User {name: row.to})" : "MATCH (b:Entity {owner: $user}) WHERE toLower(b.name) = toLower(row.to)";
         // SET (not just ON CREATE): a later "I don't like X" flips an
         // existing edge to negative, and vice versa.
         await run(writeClient,
@@ -469,9 +489,14 @@ function createMemoryStore(users = []) {
   let nextId = 1;
 
   function addNode({ name, type, owner = null, props = {} }) {
-    // Entities are keyed by (name, type, owner): one node per owner, so each
-    // user's world is private by construction (mirrors the Neo4j MERGE key).
-    const existing = [...nodes.values()].find((node) => node.name === name && node.type === type && node.owner === owner);
+    // Entities are keyed by (name, owner), the name CASE-INSENSITIVELY (the
+    // type is not part of the identity — mirrors the Neo4j upsert): one node
+    // per owner, so each user's world is private by construction. The first
+    // stored copy's spelling+type is kept. User nodes keep the exact
+    // configured spelling (they are only ever created with one).
+    const existing = owner === null
+      ? [...nodes.values()].find((node) => node.name === name && node.type === type && node.owner === owner)
+      : [...nodes.values()].find((node) => node.owner === owner && node.props.role !== "user" && node.name.toLowerCase() === name.toLowerCase());
     if (existing) return existing;
     const now = new Date().toISOString();
     const node = { id: `mem-${nextId++}`, name, type, owner, props, firstSeen: now, lastSeen: now, mentionCount: 0 };
@@ -724,10 +749,10 @@ function createMemoryStore(users = []) {
         if (!isRelationType(relation.type)) continue;
         const resolve = (name) => {
           if (isUser(name)) return [...nodes.values()].find((node) => node.name === name && node.props.role === "user") || addUser(name);
-          // Entity endpoints are the turn user's own copies (owner-keyed): a
-          // relation to an entity this user has not mentioned yet is dropped,
-          // like the Neo4j MATCH finds no row.
-          return [...nodes.values()].find((node) => node.name === name && node.props.role !== "user" && node.owner === user) || null;
+          // Entity endpoints are the turn user's own copies (keyed by name,
+          // case-insensitive — like the Neo4j MATCH): a relation to an entity
+          // this user has not mentioned yet is dropped.
+          return [...nodes.values()].find((node) => node.props.role !== "user" && node.owner === user && node.name.toLowerCase() === name.toLowerCase()) || null;
         };
         const from = resolve(relation.from);
         const to = resolve(relation.to);
@@ -765,6 +790,8 @@ module.exports = {
   MAX_RELATIONS,
   parseExtraction,
   isRelationType,
+  normalizeRelationType,
+  sanitizeName,
   formatGraphContext,
   createGraphStore,
   createMemoryStore,

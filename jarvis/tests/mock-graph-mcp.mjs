@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Fake knowledge-graph MCP server for tests: same stdio newline-delimited
 // JSON-RPC protocol and tool names as mcp/graph.mjs (the user-scoped,
-// parameterized read tools), with canned results. Every tools/call is logged
-// to stderr (the backend forwards it as mcp_stderr) so tests can assert what
-// the brain's tool loop sent — including the user the backend injected.
+// parameterized read tools plus the admin write/delete tools), with canned
+// results. Every tools/call is logged to stderr (the backend forwards it as
+// mcp_stderr) so tests can assert what the brain's tool loop sent — including
+// the user, admin flag and registered user list the backend injected.
 
 import readline from "node:readline";
 
@@ -12,6 +13,9 @@ const TOOLS = [
   { name: "get-entity", description: "fake entity lookup", inputSchema: { type: "object", properties: { name: { type: "string" } } } },
   { name: "list-my-knowledge", description: "fake knowledge list", inputSchema: { type: "object", properties: {} } },
   { name: "list-my-facts", description: "fake facts list", inputSchema: { type: "object", properties: { about: { type: "string" }, relation: { type: "string" } } } },
+  { name: "store-entity", description: "fake store entity (admin)", inputSchema: { type: "object", properties: { owner: { type: "string" }, name: { type: "string" }, type: { type: "string" } } } },
+  { name: "store-fact", description: "fake store fact (admin)", inputSchema: { type: "object", properties: { owner: { type: "string" }, from: { type: "string" }, to: { type: "string" }, type: { type: "string" }, negative: { type: "boolean" } } } },
+  { name: "delete-entity", description: "fake delete entity (admin)", inputSchema: { type: "object", properties: { owner: { type: "string" }, name: { type: "string" } } } },
 ];
 
 const readLine = readline.createInterface({ input: process.stdin, terminal: false });
@@ -61,6 +65,18 @@ async function handleMessage(message) {
       if (name === "list-my-facts") {
         const filter = args.about ? ` mentioning "${args.about}"` : "";
         return respond(id, { content: [{ type: "text", text: `Facts about ${user}${filter}: likes -> Lego. (mock data)` }] });
+      }
+      // The admin write/delete tools: the mock does not write anything — it
+      // just echoes what the brain's tool loop (with the backend-injected
+      // arguments) sent, so the assertions can pin the call shape.
+      if (name === "store-entity") {
+        return respond(id, { content: [{ type: "text", text: `Stored ${args.name || "?"} (${args.type || "thing"}) under ${args.owner || "?"}. (mock data)` }] });
+      }
+      if (name === "store-fact") {
+        return respond(id, { content: [{ type: "text", text: `Stored ${args.type || "?"} from ${args.from || "?"} to ${args.to || "?"} under ${args.owner || "?"}. (mock data)` }] });
+      }
+      if (name === "delete-entity") {
+        return respond(id, { content: [{ type: "text", text: `Deleted ${args.name || "?"} (owner ${args.owner || "?"}). (mock data)` }] });
       }
       return respond(id, null, { code: -32602, message: `Unknown tool: ${name}` });
     }

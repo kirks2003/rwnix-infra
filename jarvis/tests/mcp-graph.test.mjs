@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { QUERIES, TOOLS, formatEntity, formatEntityAll, formatKnowledge, formatKnowledgeAll, formatFacts, formatFactsAll } from "../mcp/graph.mjs";
+import { QUERIES, TOOLS, ADMIN_WRITE_TOOLS, factQuery, validateWriteTool, formatEntity, formatEntityAll, formatKnowledge, formatKnowledgeAll, formatFacts, formatFactsAll } from "../mcp/graph.mjs";
 
 // The MCP graph server is the brain's only window into the database. These
 // pins keep every query bounded by the signed-in user (owner = them): a
@@ -9,8 +9,10 @@ import { QUERIES, TOOLS, formatEntity, formatEntityAll, formatKnowledge, formatK
 
 test("get-entity is owner-scoped: a foreign entity name is indistinguishable from a nonexistent one", () => {
   // The entity match is pinned to owner = $user — the parameter the backend
-  // injects; the brain never sees or sets it.
-  assert.ok(QUERIES.getEntity.includes("MATCH (e:Entity {name: $name, owner: $user})"), QUERIES.getEntity);
+  // injects; the brain never sees or sets it. The name is matched
+  // case-insensitively (entity identity is name+owner, type is a property).
+  assert.ok(QUERIES.getEntity.includes("MATCH (e:Entity {owner: $user})"), QUERIES.getEntity);
+  assert.ok(QUERIES.getEntity.includes("WHERE toLower(e.name) = toLower($name)"), QUERIES.getEntity);
   assert.doesNotMatch(QUERIES.getEntity, /MATCH \(e:Entity \{name: \$name\}\)/, "no unscoped entity match");
   // Links are only to :User account markers or the user's own entities —
   // never to another user's entity.
@@ -32,14 +34,24 @@ test("no query uses the nonexistent direction() Cypher function", () => {
   }
 });
 
-test("the MCP tool surface is read-only: no write or delete tool exists", () => {
+test("the MCP tool surface: four read tools plus three admin-gated write/delete tools, never free-form Cypher", () => {
   const names = TOOLS.map((tool) => tool.name);
   assert.deepEqual(
     [...names].sort(),
-    ["get-entity", "get-schema", "list-my-facts", "list-my-knowledge"],
+    ["delete-entity", "get-entity", "get-schema", "list-my-facts", "list-my-knowledge", "store-entity", "store-fact"],
   );
   for (const name of names) {
-    assert.doesNotMatch(name, /write|delete|remove|create|update|cypher/i, `read-only surface: ${name}`);
+    assert.doesNotMatch(name, /cypher/i, `no free-form query on the surface: ${name}`);
+  }
+  assert.deepEqual([...ADMIN_WRITE_TOOLS].sort(), ["delete-entity", "store-entity", "store-fact"]);
+  // The write tools' schema carries the owner the handler validates against
+  // the injected user list — and exposes no admin/users parameter, so the
+  // brain can never claim admin (only the backend's injection can).
+  for (const name of ["store-entity", "store-fact", "delete-entity"]) {
+    const tool = TOOLS.find((entry) => entry.name === name);
+    assert.ok(tool.inputSchema.required.includes("owner"), `${name} requires an owner`);
+    assert.ok(!("admin" in tool.inputSchema.properties), `${name} exposes no admin parameter`);
+    assert.ok(!("users" in tool.inputSchema.properties), `${name} exposes no users parameter`);
   }
 });
 
@@ -90,7 +102,8 @@ test("formatFacts renders facts and the empty state with filters", () => {
 // ONLY when the backend injects admin: true (an app-level session property,
 // never brain input), and they must report each row's owner.
 test("admin queries read across all owners (no user or owner pinning) and report the owner", () => {
-  assert.ok(QUERIES.getEntityAll.includes("MATCH (e:Entity {name: $name})"), QUERIES.getEntityAll);
+  assert.ok(QUERIES.getEntityAll.includes("MATCH (e:Entity)"), QUERIES.getEntityAll);
+  assert.ok(QUERIES.getEntityAll.includes("WHERE toLower(e.name) = toLower($name)"), QUERIES.getEntityAll);
   assert.doesNotMatch(QUERIES.getEntityAll, /owner: \$user/, "no owner pinning in the admin lookup");
   assert.ok(QUERIES.getEntityAll.includes("e.owner AS owner"), "the admin lookup returns each copy's owner");
   assert.ok(
@@ -132,4 +145,100 @@ test("formatKnowledgeAll and formatFactsAll group per user (and render empty sta
     formatFactsAll([{ type: "LIKES", user: "Mila", name: "Lego", negative: false }, { type: "OWNS", user: "Mila", name: "Car", negative: false }]),
     "Stored facts per user: Mila: likes -> Lego; owns -> Car.",
   );
+});
+
+// The admin write queries: run ONLY for the backend-injected admin flag and
+// ONLY over the write database user. They must land in exactly the shape the
+// panel and the brain reads expect (the ingestion's upsert semantics), and
+// the delete can never match a :User account node.
+test("write queries: entities are owner-keyed like the ingestion (name case-insensitive), delete never matches :User", () => {
+  // store-entity: the same upsert key as the ingestion — (name, owner), the
+  // name case-insensitively, the type NOT part of the identity (the old
+  // type-keyed MERGE is the "two BTCUSD" bug) — with the same bookkeeping.
+  assert.match(QUERIES.ensureEntity, /OPTIONAL MATCH \(e:Entity \{owner: \$owner\}\)/);
+  assert.match(QUERIES.ensureEntity, /WHERE toLower\(e\.name\) = toLower\(\$name\)/);
+  assert.match(QUERIES.ensureEntity, /CREATE \(e:Entity \{name: \$name, type: \$type, owner: \$owner, first_seen: \$now\}\)/);
+  assert.doesNotMatch(QUERIES.ensureEntity, /MERGE \(e:Entity/, "no type-keyed entity MERGE");
+  assert.match(QUERIES.ensureEntity, /e\.mention_count = coalesce\(e\.mention_count, 0\) \+ 1/);
+  // store-fact: referenced users are their :User account nodes (MERGEd if
+  // missing, like the ingestion), entity endpoints are the owner's copies.
+  assert.equal(QUERIES.ensureUser, "MERGE (u:User {name: $name})");
+  assert.match(QUERIES.touchEntity, /MATCH \(e:Entity \{owner: \$owner\}\) WHERE toLower\(e\.name\) = toLower\(\$name\) SET e\.last_seen = \$now/);
+  // delete-entity: :Entity only (a :User account node can never match),
+  // owner-pinned — the admin's cross-user reach is the $owner parameter,
+  // never a missing pin.
+  assert.equal(QUERIES.deleteEntity, "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) DETACH DELETE e");
+  assert.doesNotMatch(QUERIES.deleteEntity, /User/);
+  // findEntity is the same match: "not found" is identical for a foreign and
+  // a nonexistent entity.
+  assert.match(QUERIES.findEntity, /MATCH \(e:Entity \{owner: \$owner\}\) WHERE toLower\(e\.name\) = toLower\(\$name\)/);
+});
+
+test("factQuery: one query per endpoint-kind pair, typed and owner-pinned, no injection", () => {
+  // User -> entity, entity -> user, entity -> entity: the pattern pair comes
+  // from the validated endpoint kinds, the type is interpolated only after
+  // the isRelationType check.
+  assert.equal(
+    factQuery("LIKES", true, false),
+    "UNWIND $rows AS row MATCH (a:User {name: row.from}) MATCH (b:Entity {owner: $owner}) WHERE toLower(b.name) = toLower(row.to) MERGE (a)-[r:LIKES]->(b) SET r.last_seen = $now, r.negative = $negative",
+  );
+  assert.equal(
+    factQuery("FRIEND_OF", false, true),
+    "UNWIND $rows AS row MATCH (a:Entity {owner: $owner}) WHERE toLower(a.name) = toLower(row.from) MATCH (b:User {name: row.to}) MERGE (a)-[r:FRIEND_OF]->(b) SET r.last_seen = $now, r.negative = $negative",
+  );
+  assert.equal(
+    factQuery("RELATED_TO", false, false),
+    "UNWIND $rows AS row MATCH (a:Entity {owner: $owner}) WHERE toLower(a.name) = toLower(row.from) MATCH (b:Entity {owner: $owner}) WHERE toLower(b.name) = toLower(row.to) MERGE (a)-[r:RELATED_TO]->(b) SET r.last_seen = $now, r.negative = $negative",
+  );
+  assert.equal(
+    factQuery("LIKES", true, true),
+    "UNWIND $rows AS row MATCH (a:User {name: row.from}) MATCH (b:User {name: row.to}) MERGE (a)-[r:LIKES]->(b) SET r.last_seen = $now, r.negative = $negative",
+  );
+  // Anything that is not a valid Neo4j relation identifier is refused — the
+  // type never reaches the query string unvalidated.
+  assert.throws(() => factQuery("BAD TYPE", true, true), /invalid relation type/);
+  assert.throws(() => factQuery("LIKES) DETACH DELETE", true, true), /invalid relation type/);
+  // A well-formed introduced type (like the ingestion's) passes through.
+  assert.match(factQuery("INTERESTED_IN", false, false), /\[r:INTERESTED_IN\]/);
+});
+
+test("validateWriteTool: the admin flag and a registered owner gate every write call", () => {
+  const users = ["Mila", "Roman", "admin"];
+  const base = { user: "admin", users };
+  // Without the backend-injected admin flag: refused, whatever else is set
+  // (the brain can never set it; a forged flag is overridden by the
+  // backend's injection).
+  for (const tool of ["store-entity", "store-fact", "delete-entity"]) {
+    const result = validateWriteTool(tool, { ...base, owner: "Mila", name: "Berlin", from: "Mila", to: "Pizza", type: "LIKES" }, users);
+    assert.equal(result.ok, false, `${tool} without the admin flag`);
+  }
+  // The owner must be a registered user (case-insensitive, canonicalised to
+  // the configured spelling) — a brain or a prompt injection cannot mint
+  // data under a made-up owner.
+  const admin = { ...base, admin: true };
+  assert.equal(validateWriteTool("store-entity", { ...admin, owner: "Stranger", name: "Berlin" }, users).ok, false, "unregistered owner");
+  const entity = validateWriteTool("store-entity", { ...admin, owner: "mila", name: "  Berlin  ", type: "PLACE" }, users);
+  assert.equal(entity.ok, true, JSON.stringify(entity));
+  assert.deepEqual(entity.params, { owner: "Mila", name: "Berlin", type: "place" });
+  // Unknown entity types fall back to "thing" (never a rejected turn).
+  assert.equal(validateWriteTool("store-entity", { ...admin, owner: "Mila", name: "Berlin", type: "gibberish" }, users).params.type, "thing");
+  // Facts: user-named endpoints canonicalise to their :User account nodes, a
+  // self-fact is refused, a malformed relation type degrades to RELATED_TO
+  // (like the ingestion) so the fact is never lost, the negative flag is
+  // boolean.
+  const fact = validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "mila", to: "Pizza", type: "likes" }, users);
+  assert.equal(fact.ok, true, JSON.stringify(fact));
+  assert.deepEqual(fact.params, { owner: "Mila", from: "Mila", to: "Pizza", fromIsUser: true, toIsUser: false, type: "LIKES", negative: false });
+  assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila", to: "mila", type: "LIKES" }, users).ok, false, "self-fact");
+  assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Pizza", to: "pizza", type: "LIKES" }, users).ok, false, "case-variant self-fact (would MERGE a self-loop)");
+  assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila", to: "Pizza", type: "I really do not know" }, users).params.type, "RELATED_TO");
+  assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: true }, users).params.negative, true);
+  // Deletion takes owner + name only (the :Entity match pins both; :User can
+  // never match).
+  const del = validateWriteTool("delete-entity", { ...admin, owner: "roman", name: "Lego" }, users);
+  assert.equal(del.ok, true, JSON.stringify(del));
+  assert.deepEqual(del.params, { owner: "Roman", name: "Lego" });
+  // Missing required arguments are refused, too.
+  assert.equal(validateWriteTool("store-entity", { ...admin, owner: "Mila" }, users).ok, false, "missing name");
+  assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila" }, users).ok, false, "missing to");
 });

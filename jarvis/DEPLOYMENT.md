@@ -2253,3 +2253,145 @@ stored=2 extractedRelations=2 linked=2`, and Neo4j now holds
 List`. The `/api/graph/subgraph?limit=60` the panel renders lists the node
 plus both edges, so the 2D/3D view (15 s poll / 4 s post-turn refresh) picks
 it up automatically — no panel query change was needed.
+
+## 2026-10-06: admin session can write to the graph via MCP (store-entity / store-fact / delete-entity)
+
+Requested: an `admin`/`admin` login whose session can also **write, delete and
+read all users' graph data via the brain's MCP tools** — not just the
+cross-owner reads the admin session already had. `admin` was already in the
+live `USERS` (since PR #37) and in `ADMIN_USERS` (default), so the login
+itself worked; the gap was the MCP surface: `mcp/graph.mjs` was read-only.
+
+Changes:
+
+- `server.js`: `USERS` default is now `Mila,Roman,admin` (a default
+  deployment can actually log in as admin; a name in `ADMIN_USERS` that is
+  not in `USERS` cannot sign in, as before). The `mcpGraph` child now also
+  gets `NEO4J_WRITE_USER`/`NEO4J_WRITE_PASSWORD`. The admin brain is offered
+  three extra tools — `store-entity(owner, name, type)`,
+  `store-fact(owner, from, to, type, negative?)`, `delete-entity(owner, name)`
+  — and the tool loop routes them to the graph MCP server **only for admin
+  sessions**, injecting `{ ...args, user, admin, users: config.users }` per
+  call (the spread order means a brain-supplied `user`/`admin`/`users` can
+  never win). A non-admin brain asking for a write-tool name gets
+  "Unknown tool" and the attempt is audited as a failed `brain_write`
+  activity entry; successful writes are audited as `brain_write` too
+  (`graphToolDetail` carries owner/from/to/type/negative, never Cypher).
+- `mcp/graph.mjs`: the three tools are on the surface but **refused by the
+  handler before any database access** unless the backend-injected
+  `admin === true`; `owner` is validated against the backend-injected
+  registered-user list (case-insensitive, canonicalised to the configured
+  spelling), names/types are sanitised with the shared graphdb helpers,
+  user-named fact endpoints resolve to their `:User` account nodes, a
+  self-fact is refused, and a malformed relation type degrades to
+  `RELATED_TO` (never lost, never an injection: the type is only
+  interpolated after the `isRelationType` check). Writes run over a **second
+  driver** opened only when `NEO4J_WRITE_USER` is set (the `jarvis_write`
+  credentials; reads stay on `jarvis_read`). Semantics mirror the ingestion
+  upserts: `MERGE (e:Entity {name, type, owner})` with `first_seen`/
+  `last_seen`/`mention_count` bookkeeping, `MERGE (a)-[r:TYPE]->(b)` edge
+  upsert, and a `DETACH DELETE` that matches `:Entity` only, pinned to
+  `owner` — a `:User` account node can never be deleted.
+- `graphdb.js`: `sanitizeName`/`normalizeRelationType` exported (single
+  source of truth for the sanitisation both write paths use).
+- `public/app.js`: the activity feed renders `brain_write` entries as
+  "brain wrote <detail>" / "brain write failed <detail>".
+- `.env.example` + `README.md`: `USERS=Mila,Roman,admin` + `ADMIN_USERS`,
+  the admin account documented under Login, the write surface + double gate
+  (backend offer/injection, MCP re-validation) under Knowledge graph.
+- Tests: `tests/mcp-graph.test.mjs` (new surface pin: 4 read + 3 admin write
+  tools, no free-form Cypher, no `admin`/`users` in the write schemas;
+  `validateWriteTool` gate/owner/sanitisation/self-fact/type-degradation
+  pins; `factQuery` pattern-pair + injection pins; write-query pins —
+  owner-keyed MERGE, `:User` MERGE, `DETACH DELETE` `:Entity`-only),
+  `tests/mock-graph-mcp.mjs` (echoes the write tools with the injected
+  args), `tests/graph.test.mjs` (integration: the admin brain gets all
+  seven tools and the write call reaches the MCP server with
+  `user=admin, admin=true, users=[Mila, Roman, admin]` injected, the result
+  feeds back to the brain, the feed shows a `brain_write` entry; a
+  non-admin brain gets the four reads only and a forged write call is
+  rejected as unknown before the MCP server sees it, audited as a failed
+  write), `tests/graph.browser.mjs` (a `brain_write` feed entry renders as a
+  write line).
+
+**Tests:** unit **121/121**; browser **39 pass + 2 opt-in skips**.
+
+**Deploy + live verification:** backup
+`jarvis-code.bak-20261006_112627.tgz` (code only, `.env` untouched — the
+live `USERS=Mila,Roman,admin` was already in place); synced `server.js`,
+`graphdb.js`, `mcp/graph.mjs`, `public/app.js`, `.env.example`, `README.md`
++ the four test files, md5-verified against the worktree, image rebuilt,
+container `healthy`, `/api/health` ok, served `app.js` md5 == worktree.
+Live: `admin`/`admin` logs in, `/api/config` reports `admin: true`
+(Mila: `false`); an in-container run of `mcp/graph.mjs` against the live
+Neo4j showed the full write cycle — no-admin call refused, `store-entity`
++ `store-fact` landed (`DeployCheck… (place, owner: Roman)` +
+`Roman -[:LIKES]->`), unregistered owner refused, `delete-entity` removed
+node + links. Then through the app itself: as **admin**, one chat turn
+("store the city DeployCheckLive as a place under Roman, then the LIKES
+fact") — the brain called `store-entity` + `store-fact`, the live graph
+showed the entity + `LIKES` edge, the global activity feed recorded both as
+`brain_write` (`store-fact: owner=Roman, from=Roman, to=DeployCheckLive,
+type=LIKES`), and the panel's `DELETE /api/graph/entity` (admin, cross-owner)
+removed the test data again. Note: the same turn's **automatic ingestion**
+also stored an `owner: admin` copy of the entity (ingestion is pinned to
+the session user, as always) — expected, cleaned up as well; the admin's
+first turn also created the `admin` `:User` account marker, like any
+first-mentioned user.
+
+## 2026-10-06: one entity per user per name — the type (and casing) no longer splits an entity into copies
+
+Reported: Roman's panel showed the entity "BTCUSD" **twice**. The live
+graph confirmed two same-named nodes under one owner — `BTCUSD (topic)`
+and `BTCUSD (thing)` (and the same for `Robinhood after hours` /
+`robinhood after hours`). Root cause: entities were keyed by
+`(name, type, owner)` — the ingestion `MERGE (e:Entity {name, type, owner})`
+created one node per type, so the same thing re-extracted with a different
+type (or casing) in a later turn became a second node. The panel, the
+brain context and the brain tools all read by owner, so every one of them
+saw the twin.
+
+Fix: entity identity is now **(name, owner), the name
+case-insensitively** — the type is a property of the first stored copy, not
+part of the key. The same user re-mentioning the same thing (any type, any
+casing) always lands on the one existing node; the same name under another
+owner is still a separate copy (ownership stays the isolation boundary).
+
+- `graphdb.js` (Neo4j store): the ingestion upsert is now a
+  `OPTIONAL MATCH (e:Entity {owner: $user}) WHERE toLower(e.name) =
+  toLower(row.name)` + `FOREACH … CREATE` + `SET` (the MERGE-less upsert
+  idiom) — no `MERGE (e:Entity {name, type, owner})` left anywhere; the
+  fact-endpoint matches use the same `owner + toLower(name)` identity.
+  `parseExtraction` dedupes per turn by lower-cased name (first occurrence
+  wins) and drops case-variant self-relations. The memory store mirrors the
+  key (case-insensitive name per owner; first copy's spelling+type kept).
+- `mcp/graph.mjs`: `get-entity`/`get-entity` (admin) match
+  `toLower(e.name)`; the admin write tools' `ensureEntity` uses the same
+  MERGE-less upsert as the ingestion, `touchEntity`/`findEntity`/
+  `delete-entity` match by `owner + toLower(name)`, and `store-fact`
+  endpoint patterns do the same — plus a case-variant self-fact is refused
+  (it would MERGE a self-loop).
+- Tests: the upsert-cypher pins now assert the `OPTIONAL MATCH` +
+  `toLower` key and explicitly reject a type-keyed `MERGE (e:Entity` (the
+  "two BTCUSD" regression); new memory-store regression: the same name
+  re-extracted with a different type/casing stays ONE node (first copy
+  wins, facts to the variant resolve to it, per-owner copies unaffected);
+  `parseExtraction` dedupe updated to the per-name rule; MCP write-query
+  and fact-query pins updated; a case-variant self-fact is refused.
+
+**Tests:** unit **122/122**; browser **39 pass + 2 opt-in skips**.
+
+**Deploy + live verification:** backup
+`jarvis-code.bak-20261006_114830.tgz` (code only, `.env` untouched); synced
+`graphdb.js`, `mcp/graph.mjs`, `README.md` + the two test files
+(md5-verified), image rebuilt, container `healthy`, `/api/health` ok.
+One-off data migration (in-container, via the `neo4j` admin user,
+`DETACH DELETE` of the younger copy per `(owner, lower(name))` group,
+keeping the oldest `first_seen`): merged exactly the 2 reported pairs —
+`BTCUSD (thing)` → `BTCUSD (topic)`, `robinhood after hours (thing)` →
+`Robinhood after hours (topic)`; Roman's live subgraph now shows each once.
+Then, live against the real Neo4j over the **new ingestion code path**
+(`upsertTurn`): re-storing `BTCUSD` as `thing` left exactly one node (type
+stayed `topic`); a fresh entity stored twice with different casing+type
+stayed one node (first spelling+type kept); a fact to the case-variant
+added one edge to the one node; test data removed via the admin delete.

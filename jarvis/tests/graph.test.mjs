@@ -68,7 +68,11 @@ test("parseExtraction drops duplicates, self-relations and garbage", () => {
       { from: "Mila", to: "Roman", type: "FRIEND_OF" },
     ],
   }));
-  assert.deepEqual(parsed.entities.map((entity) => `${entity.name}:${entity.type}`), ["Mila:person", "Mila:place"]);
+  // One entity per turn per NAME (case-insensitive — the store's key is
+  // name+owner without the type): "  Mila  "/PERSON and "Mila" are the same
+  // entity, and the same name with a different type ("Mila" place) is the
+  // SAME entity re-described, not a second one — the first occurrence wins.
+  assert.deepEqual(parsed.entities.map((entity) => `${entity.name}:${entity.type}`), ["Mila:person"]);
   assert.deepEqual(parsed.relations, [{ from: "Mila", to: "Roman", type: "FRIEND_OF", negative: false }]);
 });
 
@@ -215,6 +219,37 @@ test("memory store: introduced relation types are stored, malformed ones are dro
   // The schema picks the new type up from the store itself.
   const schema = await store.schema();
   assert.ok(schema.relTypes.includes("INTERESTED_IN"), JSON.stringify(schema.relTypes));
+});
+
+test("memory store: one entity per owner per name — a re-extracted type or casing never creates a second copy", async () => {
+  const store = graphdb.createMemoryStore(["Mila", "Roman"]);
+  // The reported bug: the same name extracted as "topic" in one turn and as
+  // "thing" (or with different casing) in a later turn was TWO nodes.
+  await store.upsertTurn({ user: "Roman", entities: [{ name: "BTCUSD", type: "topic", props: {} }], relations: [] });
+  await store.upsertTurn({ user: "Roman", entities: [{ name: "btcusd", type: "thing", props: {} }], relations: [] });
+  const sub = await store.subgraph({ user: "Roman" });
+  const btc = sub.nodes.filter((node) => node.name.toLowerCase() === "btcusd" && node.owner === "Roman");
+  assert.equal(btc.length, 1, `one node per owner per name: ${JSON.stringify(btc)}`);
+  // The first stored copy wins (spelling + type); the re-mention only bumps
+  // the bookkeeping.
+  assert.equal(btc[0].name, "BTCUSD");
+  assert.equal(btc[0].type, "topic");
+  // Facts to the case/type variant resolve to the SAME node — no dangling
+  // edges, no second node.
+  await store.upsertTurn({ user: "Roman", relations: [{ from: "Roman", to: "btcusd", type: "WATCHES" }] });
+  const sub2 = await store.subgraph({ user: "Roman" });
+  const edges = sub2.edges.filter((edge) => {
+    const node = sub2.nodes.find((candidate) => candidate.id === edge.target);
+    return node && node.name.toLowerCase() === "btcusd";
+  });
+  assert.deepEqual(edges.map((edge) => edge.type), ["WATCHES"], JSON.stringify(edges));
+  assert.equal(sub2.nodes.filter((node) => node.name.toLowerCase() === "btcusd").length, 1);
+  // Ownership is still the isolation boundary: the same name under another
+  // owner is that other user's own copy.
+  await store.upsertTurn({ user: "Mila", entities: [{ name: "btcusd", type: "topic", props: {} }], relations: [] });
+  const milaSub = await store.subgraph({ user: "Mila" });
+  assert.ok(milaSub.nodes.some((node) => node.name.toLowerCase() === "btcusd" && node.owner === "Mila"), "Mila gets her own copy");
+  assert.equal((await store.subgraph({ user: "Roman" })).nodes.filter((node) => node.name.toLowerCase() === "btcusd").length, 1);
 });
 
 test("memory store: negation is a flag on the same edge and flips on re-statement", async () => {
@@ -490,7 +525,7 @@ test("neo4j store: an introduced relation type is merged under its own name (own
   assert.ok(merge, "expected the MERGE for the introduced type");
   assert.ok(merge.cypher.includes("MERGE (a)-[r:INTERESTED_IN]->(b)"), merge.cypher);
   assert.ok(merge.cypher.includes("MATCH (a:User {name: row.from})"), merge.cypher);
-  assert.ok(merge.cypher.includes("MATCH (b:Entity {name: row.to, owner: $user})"), merge.cypher);
+  assert.ok(merge.cypher.includes("MATCH (b:Entity {owner: $user}) WHERE toLower(b.name) = toLower(row.to)"), merge.cypher);
   // A malformed type never reaches the database.
   calls.length = 0;
   await store.upsertTurn({
@@ -532,11 +567,15 @@ test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", asy
   });
   assert.ok(calls.length >= 3, "user MERGE, entity MERGE and relation MERGE must all run");
   assert.ok(calls.every((cypher) => !/-\[:[A-Z_]+<-\]/.test(cypher)), JSON.stringify(calls));
-  // Entities are written owner-keyed (name+type+owner = the turn user) and no
-  // KNOWS bookkeeping edge is written any more — ownership IS provenance.
-  const entityMerge = calls.find((cypher) => cypher.includes("MERGE (e:Entity"));
-  assert.ok(entityMerge, "the entity MERGE must run");
-  assert.ok(entityMerge.includes("MERGE (e:Entity {name: row.name, type: row.type, owner: $user})"), entityMerge);
+  // Entities are upserted keyed by (name, owner) — the name case-insensitively,
+  // the type NOT part of the identity (a type-keyed MERGE is exactly the
+  // "two BTCUSD" bug) — and no KNOWS bookkeeping edge is written any more
+  // (ownership IS provenance).
+  const entityUpsert = calls.find((cypher) => cypher.includes("CREATE (e:Entity"));
+  assert.ok(entityUpsert, "the entity upsert must run");
+  assert.ok(entityUpsert.includes("OPTIONAL MATCH (e:Entity {owner: $user})"), entityUpsert);
+  assert.ok(entityUpsert.includes("WHERE toLower(e.name) = toLower(row.name)"), entityUpsert);
+  assert.doesNotMatch(entityUpsert, /MERGE \(e:Entity/, "no type-keyed entity MERGE");
   assert.ok(!calls.some((cypher) => cypher.includes("KNOWS")), JSON.stringify(calls));
   // The relation MERGE stores the negation flag; SET (not ON CREATE) is what
   // lets a later "I don't like X" flip an existing edge.
@@ -580,10 +619,10 @@ test("neo4j store: endpoints named after other users target their :User node, ne
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
   // The person entity "Mila" is user Mila: it must not be created as an :Entity.
-  const entityMerge = calls.find((call) => call.cypher.includes("MERGE (e:Entity"));
-  assert.ok(entityMerge, "the non-user entities still get merged");
-  assert.ok(!entityMerge.params.rows.some((row) => row.name === "Mila"), JSON.stringify(entityMerge.params.rows));
-  assert.ok(entityMerge.params.rows.some((row) => row.name === "Lego"));
+  const entityUpsert = calls.find((call) => call.cypher.includes("CREATE (e:Entity"));
+  assert.ok(entityUpsert, "the non-user entities still get upserted");
+  assert.ok(!entityUpsert.params.rows.some((row) => row.name === "Mila"), JSON.stringify(entityUpsert.params.rows));
+  assert.ok(entityUpsert.params.rows.some((row) => row.name === "Lego"));
   // The referenced user's :User node is ensured to exist ...
   const userMerge = calls.find((call) => call.cypher.includes("MERGE (u:User {name: name})"));
   assert.ok(userMerge, "referenced users' :User nodes must be merged");
@@ -592,7 +631,7 @@ test("neo4j store: endpoints named after other users target their :User node, ne
   // entity endpoint is owner-scoped to the turn user.
   const relationMerge = calls.find((call) => call.cypher.includes("r:LIKES"));
   assert.ok(relationMerge.cypher.includes("MATCH (a:User {name: row.from})"), relationMerge.cypher);
-  assert.ok(relationMerge.cypher.includes("MATCH (b:Entity {name: row.to, owner: $user})"), relationMerge.cypher);
+  assert.ok(relationMerge.cypher.includes("MATCH (b:Entity {owner: $user}) WHERE toLower(b.name) = toLower(row.to)"), relationMerge.cypher);
 });
 
 test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and returns the negation flag", async () => {
@@ -732,17 +771,17 @@ test("neo4j store: the user's own person is not MERGEd as an :Entity and user re
     ],
     relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
   });
-  const entityMerge = calls.find((call) => call.cypher.includes("MERGE (e:Entity"));
-  assert.ok(entityMerge, "expected the entity MERGE");
+  const entityUpsert = calls.find((call) => call.cypher.includes("CREATE (e:Entity"));
+  assert.ok(entityUpsert, "expected the entity upsert");
   // The user's own person must not be part of the entity rows (that would
   // create the duplicate "Mila" node the panel used to show).
-  assert.ok(!JSON.stringify(entityMerge.params.rows).includes("Mila"), JSON.stringify(entityMerge.params.rows));
+  assert.ok(!JSON.stringify(entityUpsert.params.rows).includes("Mila"), JSON.stringify(entityUpsert.params.rows));
   // The LIKES relation named after the user must target their :User node, and
   // the entity endpoint is owner-scoped to the turn user.
   const likes = calls.find((call) => call.cypher.includes("r:LIKES"));
   assert.ok(likes, "expected the LIKES MERGE");
   assert.ok(likes.cypher.includes("MATCH (a:User {name: row.from})"), likes.cypher);
-  assert.ok(likes.cypher.includes("MATCH (b:Entity {name: row.to, owner: $user})"), likes.cypher);
+  assert.ok(likes.cypher.includes("MATCH (b:Entity {owner: $user}) WHERE toLower(b.name) = toLower(row.to)"), likes.cypher);
 });
 
 // --- backend integration -------------------------------------------------------
@@ -787,6 +826,13 @@ before(async () => {
     }
     const lastUser = [...(body.messages || [])].reverse().find((message) => message.role === "user");
     const wantsDelete = String(lastUser?.content || "").includes("Delete everything");
+    // The "Store the entity/fact" and "Delete the entity via the graph"
+    // turns make the mock brain request the admin write/delete tools — used
+    // by BOTH the admin (routed to the MCP server) and a regular user
+    // (rejected as unknown before it reaches the MCP server) in the tests.
+    const wantsStoreEntity = String(lastUser?.content || "").includes("Store the entity");
+    const wantsStoreFact = String(lastUser?.content || "").includes("Store the fact");
+    const wantsDeleteViaTool = String(lastUser?.content || "").includes("Delete the entity via the graph");
     // "Loop the tools" makes the mock brain request tools on every round, so
     // the server-side round budget is exercised; like a real brain, it stops
     // looping once told the budget is reached.
@@ -799,9 +845,15 @@ before(async () => {
       // never forward it to the MCP server.
       const tool = wantsDelete
         ? { name: "read-cypher", arguments: JSON.stringify({ query: "MATCH (e:Entity) DETACH DELETE e" }) }
-        : loopTools
-          ? { name: "list-my-knowledge", arguments: "{}" }
-          : { name: "list-my-facts", arguments: "{}" };
+        : wantsStoreEntity
+          ? { name: "store-entity", arguments: JSON.stringify({ owner: "Mila", name: "Test Entity", type: "thing" }) }
+          : wantsStoreFact
+            ? { name: "store-fact", arguments: JSON.stringify({ owner: "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: false }) }
+            : wantsDeleteViaTool
+              ? { name: "delete-entity", arguments: JSON.stringify({ owner: "Mila", name: "Berlin" }) }
+              : loopTools
+                ? { name: "list-my-knowledge", arguments: "{}" }
+                : { name: "list-my-facts", arguments: "{}" };
       return res.end(JSON.stringify({
         choices: [{
           message: {
@@ -1146,6 +1198,72 @@ test("admin session: global panel, cross-owner brain tools, full activity feed",
   // ...while Mila's own feed does not include the admin's brain read.
   const milaActivity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
   assert.ok(!milaActivity.entries.some((entry) => entry.user === "admin"), JSON.stringify(milaActivity.entries));
+});
+
+test("admin write tools: offered only to the admin, routed to the MCP server with the injected admin flag and user list", async () => {
+  const origin = origins[1];
+  const backend = backends[1];
+  const adminCookie = await login(origin, "admin");
+  const milaCookie = await login(origin, "Mila");
+
+  // The admin brain gets the three write/delete tools on top of the four
+  // reads...
+  toolRequests = [];
+  finalRequests = [];
+  const logStart = backend.logs.length;
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: adminCookie },
+    body: JSON.stringify({ prompt: "Store the fact", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(toolRequests.length, 1);
+  assert.deepEqual(
+    toolRequests[0].tools.map((tool) => tool.function.name),
+    ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "delete-entity"],
+  );
+  // ...and the write call reached the MCP server with the backend-injected
+  // session user, admin flag and registered user list (the mock logs the
+  // arguments to stderr; the backend JSON-stringifies the line, so the
+  // quotes are escaped).
+  const logDelta = backend.logs.slice(logStart);
+  assert.match(logDelta, /MOCK_GRAPH_CALL store-fact/);
+  assert.match(logDelta, /\\"user\\":\\"admin\\",\\"admin\\":true,\\"users\\":\[\\"Mila\\",\\"Roman\\",\\"admin\\"\]/);
+  // The (mock) write result came back through the tool loop to the brain.
+  const lastFinal = finalRequests[finalRequests.length - 1];
+  const toolMessage = [...lastFinal.messages].reverse().find((message) => message.role === "tool");
+  assert.match(String(toolMessage?.content), /Stored LIKES from Mila to Pizza under Mila/);
+  // And it was audited in the admin's global activity feed as a write.
+  const activity = await (await auth(origin, "/api/graph/activity", adminCookie)).json();
+  assert.ok(
+    activity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "admin" && entry.tool === "store-fact" && entry.ok),
+    JSON.stringify(activity.entries),
+  );
+
+  // A regular user's brain is never offered the write tools...
+  toolRequests = [];
+  finalRequests = [];
+  const milaLogStart = backend.logs.length;
+  const milaResponse = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: milaCookie },
+    body: JSON.stringify({ prompt: "Store the fact", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(milaResponse.status, 200);
+  assert.deepEqual(
+    toolRequests[0].tools.map((tool) => tool.function.name),
+    ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"],
+  );
+  // ...and a forged write-tool call from one is rejected as unknown before
+  // it can reach the MCP server (there is no write surface for non-admins).
+  assert.doesNotMatch(backend.logs.slice(milaLogStart), /MOCK_GRAPH_CALL (store-entity|store-fact|delete-entity)/);
+  const milaFinal = finalRequests[finalRequests.length - 1];
+  const milaToolMessage = [...milaFinal.messages].reverse().find((message) => message.role === "tool");
+  assert.match(String(milaToolMessage?.content), /Unknown tool/);
+  // The attempted write is audited in the user's own feed as a failed write.
+  const milaActivity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
+  assert.ok(
+    milaActivity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "store-fact" && entry.ok === false),
+    JSON.stringify(milaActivity.entries),
+  );
 });
 
 test("the panel's explicit delete removes only the caller's own entity", async () => {

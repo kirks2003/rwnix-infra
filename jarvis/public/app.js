@@ -432,7 +432,9 @@ async function loadGraph(center) {
           ? `${when} · ${ingestLine(entry)}`
           : entry.kind === "delete"
             ? `${when} · removed ${entry.name || "entity"}`
-            : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.detail ? `: ${entry.detail}` : entry.error ? `: ${entry.error}` : ""}`;
+            : entry.kind === "brain_write"
+              ? `${when} · brain ${entry.ok === false ? "write failed" : "wrote"} ${entry.detail || entry.tool}`
+              : `${when} · brain ${entry.ok ? "read" : "failed"} ${entry.tool}${entry.detail ? `: ${entry.detail}` : entry.error ? `: ${entry.error}` : ""}`;
         return item;
       }));
     } else {
