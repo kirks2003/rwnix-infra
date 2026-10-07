@@ -47,3 +47,39 @@ telegraf keeps the address, so `unless-stopped` never recovers it.
 adding a new container to the network, allocate the next free IP from the table
 above (`.5` free) — otherwise it can steal a pinned address after a reboot or
 recreate and wedge its victim with exit 255.
+
+## 2026-10-07: dashboards broke after the IP rework + reboot
+
+**Symptom:** "Node Exporter Full" showed no data; "Cloud & AI Credits" showed
+old/wrong values, after the static-IP rework and the ~20:08 UTC (22:08 CEST)
+host reboot. Container IPs themselves were fine afterwards (table above
+matches the live state) — the breakage was in two **host-bound** exporters
+that bind the bridge gateway IP `172.28.0.1`:
+
+| Exporter | Binds | Failure |
+|---|---|---|
+| `prometheus-node-exporter.service` (systemd package, `ARGS=--web.listen-address=172.28.0.1:9101` in `/etc/default/prometheus-node-exporter`) | `172.28.0.1:9101` | Boot-ordering race: at boot the docker bridge had not yet received `172.28.0.1`, so `bind: cannot assign requested address`; systemd exhausted its restart burst and sat `failed` even after the bridge came up. |
+| claude-code-exporter (plain host process `python3 /home/ubuntu/docker/claude-code-exporter/exporter.py`, binds `172.28.0.1:8002`, sshes `kandev@127.0.0.1:2222` for `claude --print /usage`) | `172.28.0.1:8002` | Not a service — died at the reboot and nothing restarted it. |
+
+Both feed VictoriaMetrics via static targets in
+`/home/ubuntu/docker/victoria-metrics/scrape.yml` (jobs `node`, `claude-code`,
+`openrouter`, `ovhcloud`, `gpu`); "Cloud & AI Credits" (uid
+`openrouter-credits`) has no per-panel datasources — all its panels use the
+system default datasource **VictoriaMetrics**, so a dead scrape job freezes
+the `lastNotNull` stat panels at their pre-outage value ("old data").
+
+**Fix (deployed 2026-10-07):**
+- `prometheus-node-exporter.service.d/after-docker.conf` drop-in:
+  `After=docker.service docker.socket network-online.target` so the bind
+  target exists before first start; then `systemctl restart`.
+- New unit `/etc/systemd/system/claude-code-exporter.service`
+  (`User=ubuntu`, `Restart=always`, logs appended to
+  `/home/ubuntu/docker/claude-code-exporter/exporter.log`) — replaces the
+  unmanaged nohup so it survives reboots. nbg-1 still runs the same exporter
+  as an unmanaged host process (known gap).
+- Verified live: all VM scrape jobs `up=1`, `node_time_seconds` fresh,
+  `claude_code_up=1`.
+
+**Rule:** anything that binds a docker-bridge gateway IP (e.g. `172.28.0.1`)
+must be a supervised service ordered after `docker.service` — at boot the
+bridge address only appears once docker has recreated/restored the network.

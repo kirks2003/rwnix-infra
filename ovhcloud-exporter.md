@@ -1,6 +1,8 @@
 # ovhcloud-exporter and the "Cloud & AI Credits" dashboard
 
-Live-deployed on **nbg-1** (`gw-1-nbg-1-de-netcup.rwnix.net`, the Grafana host):
+Live-deployed on **nbg-1** (`gw-1-nbg-1-de-netcup.rwnix.net`, the Grafana host)
+and **vie-1** (same exporter, container on `172.28.0.4:8001` on vie-1's
+`authelia_shared-grafana` network):
 
 | Item | Location |
 |---|---|
@@ -113,9 +115,42 @@ anywhere in OVH until ~Nov 1. Not an exporter/scrape failure
 matched the raw API (`totalPrice` 0.79609 EUR; Qwen3.6-27B 0.0141 +
 Qwen3.8-27B 0.782); Grafana DB confirmed the reloaded panel exprs.
 
+**vie-1 rollout (2026-10-07, backups `*.bak-20261007101343` /
+`openrouter-credits.json.bak-20261007` on vie-1):** vie-1 was still running
+the pre-fix invoice-only build (its "AI Endpoints Cost" panel showed
+September's 0.48 EUR in October — same in-arrears symptom). Copied the nbg-1
+`exporter.py`, added `OVH_CLOUD_PROJECT` to the compose (same OVH account /
+project), recreated the container (kept `172.28.0.4`), and switched vie-1's
+provisioned dashboard AI panels to the `ovhcloud_ai_live_*_total` queries.
+Verified: `ovhcloud_ai_live_total_eur{month="2026-10"} 0.7961` in vie-1's
+VictoriaMetrics, panel exprs re-synced in the Grafana DB.
+
 **Behaviour note:** at each month rollover the live total resets to ~0 for
 the new month until the first token is used; the just-finished month's final
 value appears in `ovhcloud_ai_cost_eur{model,month}` when its invoice lands.
+
+## 2026-10-07: silent invoice-fetch failure wedged "Current Month Total"
+
+**Symptom:** right after the exporter swap, "OVHcloud Costs → Current Month
+Total" showed no data (no `ovhcloud_current_month_total_eur` samples in VM
+for ~1h) while `ovhcloud_up=1` and all `ovhcloud_ai_live_*` metrics were fine.
+
+**Root cause:** the fresh fetch at container start ran while the OVH API was
+degraded — every `/me/bill/{id}` call hit the 15 s timeout, and `fetch_data`
+swallowed those with bare `except Exception: continue` (no logging), so it
+finished "successfully" (`metrics_up=1`) with zero invoice metrics. With
+`REFRESH_INTERVAL=3600` the next try was an hour away; the missing samples
+also fell outside VM's 5-min instant-query staleness, so the panel read as
+"no data" even though the exporter looked up. (The same fetch-on-scrape
+design also explains the recurring 1-per-hour `context deadline exceeded`
+scrape warnings in the VM logs.)
+
+**Fix (deployed 2026-10-07, backups `exporter.py.bak-20261007b` on both
+hosts):** all the swallowed exception paths in `fetch_data` now log to
+stderr (→ `docker logs`): non-list `/me/bill`, per-invoice fetch, details
+list, detail item, and the outer `fetch_data` failure. Same file deployed to
+nbg-1 (identical md5); both containers restarted, verified
+`ovhcloud_current_month_total_eur{month="2026-10"} 103.97` fresh in both VMs.
 
 ## Ops
 
