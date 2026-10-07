@@ -11,6 +11,11 @@ COPY package.json ./
 # cache and lack the system libraries); it is installed explicitly below.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm install --omit=dev
+# The Vikunja MCP server (@eargollo/vikunja-mcp, stdio) is a published
+# package: server.js spawns /usr/local/bin/vikunja-mcp, one child per
+# (region, user), pinned to that user's own API token for that region's
+# instance (region-pinned service-MCP policy, see AGENTS.md).
+RUN npm install -g @eargollo/vikunja-mcp@1.2.3
 # Chromium for the web_fetch tool + the Debian libraries it needs. ~500 MB
 # larger image; the host has the space (measured on vm104).
 RUN npx playwright install --with-deps chromium

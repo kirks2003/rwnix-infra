@@ -49,9 +49,14 @@ entries):
   header). The public route therefore cannot be the backend's API path
   (Authelia would gate the API calls); the backend must reach the Vikunja
   API internally (see Connectivity).
-- **Users** (both instances, identical): `admin`,
-  `roman.windpassinger@gmail.com`. No `Mila` and no short-name `Roman` user
-  yet on either instance.
+- **Users** (both instances, identical since 2026-10-07): `admin`,
+  `roman.windpassinger@gmail.com` (kept for the admin UI), plus the
+  short-name `Roman` and `Mila` accounts matching the Jarvis accounts
+  (created via the container CLI `vikunja user create`; the CLI's password
+  prompt needs a TTY, which `docker exec -it` provides only when the caller
+  side has one — a small python `pty.fork` wrapper on each gateway host does
+  the feeding, password via pty, never argv). Each new user has a generated
+  password (reported to the user once, not stored here).
 - **Parked sidecar**: the `vikunja-mcp` containers run `sleep infinity`
   (image CMD) with one API token each (`VIKUNJA_API_TOKEN`,
   `VIKUNJA_MCP_ALLOW_WRITE=1`, `VIKUNJA_URL=http://vikunja:3456/api/v1`).
@@ -145,19 +150,93 @@ entries):
    port bound to the mesh/tunnel interface only (never the public IP) —
    rejected by default because it adds a new network surface to the gateway.
 
-## Open items (implementation steps, in order)
+## Implementation (done 2026-10-07, rolled out live)
 
-1. Decide Roman's account form (email vs `Roman`) and create the missing
-   users on **both** instances.
-2. Mint the per-user `jarvis` tokens on both hosts (script variant); copy
-   the two `VIKUNJA_TOKENS` map entries into vm104's `.env`.
-3. Set up the two SSH tunnels on vm104 (systemd) and verify
-   `GET /user` returns the right username per region.
-4. Backend: region resolution, token map, per-(region, user) MCP child,
-   `mcpServers` advertisement (`id: "vikunja"`), brain prompt line,
-   `.env.example` additions.
-5. Tests: unit (region resolution, token map, spawn env per region/user,
-   feature-off/unavailable paths) with a mock stdio Vikunja server, like
-   `tests/mock-graph-mcp.mjs`; browser (switch in the controls row).
-6. Rollout per `jarvis/DEPLOYMENT.md` procedure; retire or re-purpose the
-   parked sidecars; record the rollout.
+All six steps landed; the feature is live on vm104.
+
+1. **Users** — short-name `Roman` and `Mila` created on **both** instances
+   (the email user kept). The `vikunja user create` CLI reads its password
+   with a TTY prompt that `docker exec -i` (pipe) cannot satisfy
+   ("inappropriate ioctl for device"); `docker exec -it` requires the caller
+   side to have a TTY too. Working feeder: a small python `pty.fork` wrapper
+   (`/tmp/vk-pty.py` on each gateway) gives the docker CLI a real pty,
+   disables local echo, and writes the password when the "Enter Password:"
+   prompt appears (plus one retry write); `docker exec -it` then carries it
+   into the container TTY. Passwords: generated per (host, user), reported
+   to the user once, not stored anywhere but the user's own notes.
+2. **Tokens** — one API token per (region, user), title `jarvis`, minted by
+   `/tmp/vk-jarvis-token.sh` on each gateway (variant of
+   `mcp-token-owner.sh`: PBKDF2-SHA256 hash into `api_tokens`, permissions
+   copied from the existing `mcp` token, verified via `GET /user` against
+   the owner, **no sidecar switch, no revoke**; idempotent — it refuses to
+   double-mint). Plaintext tokens live only in vm104's `.env`
+   (`VIKUNJA_TOKENS` JSON map, region → user → token). Rotation = delete the
+   old `jarvis` row on that gateway, re-run the script, update the `.env`
+   map, `docker compose up -d` (no code change).
+3. **Tunnels** — two systemd units on vm104,
+   `jarvis-vikunja-tunnel-nbg1.service` / `jarvis-vikunja-tunnel-vie1.service`:
+   `ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L
+   172.17.0.1:3456{1,2}:172.29.0.2:3456 gw-{nbg-1,vie-1}` (mesh IPs
+   10.1.1.1 / 10.2.1.1, `HostKeyAlias` on the public IP so known_hosts
+   matches; `ServerAliveInterval 15`, `Restart=always`). **Bind address is
+   `172.17.0.1` (the host's docker0 gateway), not `127.0.0.1`**: the jarvis
+   container's loopback is its own, and its `host.docker.internal`
+   (`host-gateway` in the compose `extra_hosts`) resolves to the docker0
+   gateway on this host — a loopback-bound tunnel is invisible from inside
+   the container (the first live smoke test failed with "connection
+   refused" for exactly this reason, which the brain reported cleanly as
+   "Vikunja is currently unreachable"). The container's `VIKUNJA_URLS`
+   therefore point at `http://host.docker.internal:34561/api/v1` (nbg-1)
+   and `:34562` (vie-1). Verified from inside the container: all four
+   (region, user) token combos return the right username.
+4. **Backend** (`jarvis/server.js`):
+   - `VIKUNJA_HOST_REGIONS` maps the two public Host names to regions;
+     `vikunjaRegionFor(host)` falls back to `VIKUNJA_DEFAULT_REGION`
+     (live: `nbg-1`). The `/api/chat` handler passes `req.headers.host`
+     into `chat()`.
+   - `VIKUNJA_URLS` / `VIKUNJA_TOKENS` are parsed from JSON env
+     (`parseJsonEnv`, warn-on-invalid); `vikunjaConfigured` = non-empty URL
+     map, and only then does `/api/config` advertise the third switch
+     (`{ id: "vikunja", label: "Vikunja" }`) — the UI builds it
+     dynamically, no client change.
+   - `vikunjaClientFor(region, user)` keeps one `McpClient` per
+     (region, user), spawned as `node /usr/local/bin/vikunja-mcp`
+     (`VIKUNJA_MCP_SCRIPT` overrides for tests) with `VIKUNJA_URL`,
+     `VIKUNJA_API_TOKEN` and `VIKUNJA_MCP_ALLOW_WRITE=1` (no delete tier).
+     New `McpClient.listTools()` (the package's `tools/list`) feeds the
+     brain's tool list live; a per-request brain line tells the brain it
+     acts as the user themself, per region, no delete, confirm changes.
+   - `runBrain` offers the Vikunja tools in the shared five-round budget
+     and dispatches by the live tool-name set; failures land as a
+     "Vikunja lookup failed" tool result, never a 500.
+   - `Dockerfile`: `npm install -g @eargollo/vikunja-mcp@1.2.3` (pinned,
+     build-time, like the old `neo4j-mcp`); `.env.example` documents the
+     three `VIKUNJA_*` vars.
+5. **Tests** — unit: `server.test.mjs` "vikunja is region-pinned per
+   request and scoped to the signed-in user" (mock stdio server whose
+   `tools/call` echoes the spawned env, so the assertions pin URL **and**
+   token per (region, user): Roman-on-nbg-1, Roman-on-vie-1, Mila-on-nbg-1,
+   plus the OFF line, the no-token-for-region line, and the config
+   advertisement; region is driven with a raw `http.request` because
+   undici's `fetch` replaces a custom `Host` header). Browser: the
+   MCP-switch test now advertises a second server and asserts a switch is
+   built per advertised entry and the untouched flag rides along as `false`.
+6. **Rollout** — see `jarvis/DEPLOYMENT.md` (2026-10-07 ~19:35 entry):
+   backup `jarvis-code.bak-20261007_191340.tgz`, synced `server.js` /
+   `Dockerfile` / `.env.example`, `docker compose up -d --build`, live
+   verification incl. a real end-to-end `create_task` through the nbg-1
+   entry (task landed on the nbg-1 instance only, absent on vie-1, deleted
+   again afterwards).
+
+Remaining: the parked `vikunja-mcp` sidecars (and their old single-owner
+`mcp` tokens) are still running `sleep infinity` on both gateways — retired
+or re-purposed at the next maintenance pass; nothing depends on them.
+
+### Vikunja 2.6 API notes (measured)
+
+- List endpoints are plural: `GET /api/v1/tasks`, `GET /api/v1/projects`
+  (`/task`, `/project` are 404). Delete: `DELETE /api/v1/tasks/{id}`.
+- Login: `POST /api/v1/login` with `{"username": ..., "password": ...}`
+  (the field is `username`, not `email`).
+- `api_tokens` hash scheme (verified against an existing token):
+  `hex(pbkdf2_sha256(token, salt, 10000, 50))`.

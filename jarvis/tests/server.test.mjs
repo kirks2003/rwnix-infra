@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -39,6 +39,27 @@ async function login(target, user = "Mila") {
 async function auth(target, pathname, init = {}, cookie) {
   const value = cookie || (await login(target));
   return fetch(`${target}${pathname}`, { ...init, headers: { cookie: value, ...(init.headers || {}) } });
+}
+
+// POST /api/chat with an explicit Host header: undici's fetch() replaces a
+// custom host with the actual target, and the Vikunja region is resolved from
+// exactly that header (the public gateway name), so a raw request pins it.
+function postChatWithHost(target, host, body, cookie) {
+  const url = new URL(`${target}/api/chat`);
+  const payload = JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: url.hostname, port: url.port, path: url.pathname, method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload),
+        cookie,
+        host,
+      },
+    }, resolve);
+    request.on("error", reject);
+    request.end(payload);
+  });
 }
 before(async () => {
   upstream = createServer(async (req, res) => {
@@ -121,6 +142,25 @@ before(async () => {
           }));
         }
         return res.end(JSON.stringify({ choices: [{ message: { content: "Fetched the quote page." } }] }));
+      }
+      if (mode === "vikunja-tools") {
+        // The mock brain asks for list_tasks on the first round (the vikunja
+        // tools offered, no tool result yet) and answers once the result
+        // arrives — exercising the server-side Vikunja tool loop end to end.
+        const body = JSON.parse(received.toString("utf8") || "{}");
+        const hasToolResult = (body.messages || []).some((message) => message.role === "tool");
+        if (body.tools && !hasToolResult) {
+          return res.end(JSON.stringify({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call_vikunja", type: "function", function: { name: "list_tasks", arguments: "{}" } }],
+              },
+            }],
+          }));
+        }
+        return res.end(JSON.stringify({ choices: [{ message: { content: "Tasks checked." } }] }));
       }
       res.end(mode === "empty-answer"
         ? '{"choices":[{"message":{"content":null},"finish_reason":"length"}]}'
@@ -639,6 +679,88 @@ test("the brain gets the web_fetch tool and can open a page in the browser", asy
   assert.match(toolMessage.content, /Mock web_fetch result: 42/);
   assert.match(toolMessage.content, /"url":"https:\/\/www\.google\.com\/finance\/quote\/NVD:FRA"/);
   assert.match(toolMessage.content, /"lang":"de"/);
+  mode = "success";
+});
+
+test("vikunja is region-pinned per request and scoped to the signed-in user", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-vikunja-mock-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // Mock @eargollo/vikunja-mcp: tools/list offers a few tools, and tools/call
+  // echoes the VIKUNJA_URL/VIKUNJA_API_TOKEN env the backend spawned it with,
+  // so the (region, user) routing is pinned without any network.
+  const script = join(dir, "mcp-vikunja.mjs");
+  await writeFile(script, `
+    import readline from "node:readline";
+    readline.createInterface({ input: process.stdin }).on("line", (line) => {
+      const message = JSON.parse(line);
+      if (message.id === undefined) return;
+      let result;
+      if (message.method === "initialize") {
+        result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-vikunja", version: "1.0.0" } };
+      } else if (message.method === "tools/list") {
+        result = { tools: [
+          { name: "list_projects", description: "List projects.", inputSchema: { type: "object", properties: {} } },
+          { name: "list_tasks", description: "List tasks.", inputSchema: { type: "object", properties: { status: { type: "string" } } } },
+          { name: "create_task", description: "Create a task.", inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] } },
+        ] };
+      } else if (message.method === "tools/call") {
+        result = { isError: false, content: [{ type: "text", text: "Mock " + message.params.name + ": url=" + process.env.VIKUNJA_URL + " token=" + process.env.VIKUNJA_API_TOKEN }] };
+      } else {
+        result = {};
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+    });
+  `);
+  const { process: child, origin: vikunjaOrigin } = await startBackend({
+    VIKUNJA_URLS: JSON.stringify({ "nbg-1": "http://127.0.0.1:34561/api/v1", "vie-1": "http://127.0.0.1:34562/api/v1" }),
+    VIKUNJA_TOKENS: JSON.stringify({
+      "nbg-1": { Roman: "tk-nbg-roman", Mila: "tk-nbg-mila" },
+      "vie-1": { Roman: "tk-vie-roman", Mila: "tk-vie-mila" },
+    }),
+    VIKUNJA_MCP_SCRIPT: script,
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  // The backend advertises the Vikunja switch in /api/config (the UI builds
+  // one switch per advertised server); without VIKUNJA_URLS it stays off.
+  const config = await (await auth(vikunjaOrigin, "/api/config")).json();
+  assert.ok(config.mcpServers.some((server) => server.id === "vikunja" && server.label === "Vikunja"), "vikunja switch advertised");
+  // Toggle off: the brain is told Vikunja is off and no MCP child is spawned.
+  mode = "success";
+  const romanCookie = await login(vikunjaOrigin, "Roman");
+  await auth(vikunjaOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "What are my tasks?", sessionId: "vikunja-off", mcp: { vikunja: false } }),
+  });
+  assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /Vikunja \(the task manager\) is OFF/);
+  // Toggle on: the region comes from the request's public Host header and the
+  // spawned child carries that region's URL plus the signed-in user's OWN
+  // token for that region — nbg-1 entry -> nbg-1 instance, never cross-region.
+  const ask = (host, cookie, session) => postChatWithHost(vikunjaOrigin, host, {
+    prompt: "What are my tasks?", sessionId: session, mcp: { vikunja: true },
+  }, cookie);
+  mode = "vikunja-tools";
+  await ask("jarvis.gw-1-nbg-1-de-netcup.rwnix.net", romanCookie, "vikunja-nbg-roman");
+  let body = JSON.parse(received.toString("utf8"));
+  assert.ok(body.tools.map((tool) => tool.function.name).includes("list_tasks"), "the live vikunja tool list is offered");
+  let toolMessage = body.messages.find((message) => message.role === "tool");
+  assert.match(toolMessage.content, /url=http:\/\/127\.0\.0\.1:34561\/api\/v1 token=tk-nbg-roman/);
+  assert.match(body.messages[0].content, /on the nbg-1 instance/);
+  await ask("jarvis.gw-1-vie-1-at-netcup.rwnix.net", romanCookie, "vikunja-vie-roman");
+  body = JSON.parse(received.toString("utf8"));
+  toolMessage = body.messages.find((message) => message.role === "tool");
+  assert.match(toolMessage.content, /url=http:\/\/127\.0\.0\.1:34562\/api\/v1 token=tk-vie-roman/);
+  // Per-user on the same region: Mila on nbg-1 gets her own token (a second
+  // child, one per (region, user)).
+  const milaCookie = await login(vikunjaOrigin, "Mila");
+  await ask("jarvis.gw-1-nbg-1-de-netcup.rwnix.net", milaCookie, "vikunja-nbg-mila");
+  body = JSON.parse(received.toString("utf8"));
+  toolMessage = body.messages.find((message) => message.role === "tool");
+  assert.match(toolMessage.content, /url=http:\/\/127\.0\.0\.1:34561\/api\/v1 token=tk-nbg-mila/);
+  // A user without a token for the region (admin) gets no Vikunja access.
+  const adminCookie = await login(vikunjaOrigin, "admin");
+  mode = "success";
+  await ask("jarvis.gw-1-nbg-1-de-netcup.rwnix.net", adminCookie, "vikunja-admin");
+  assert.match(JSON.parse(received.toString("utf8")).messages[0].content, /no Vikunja account configured/);
   mode = "success";
 });
 

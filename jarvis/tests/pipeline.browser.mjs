@@ -724,9 +724,12 @@ test("silence makes no Whisper calls and hiding the tab keeps the session armed"
 test("MCP web-search toggle is saved, restored and sent with brain requests", { timeout: 30000 }, async (t) => {
   const { page, calls } = await setup(t, async () => ({ text: "", noSpeech: true }), {
     silent: true,
-    config: { mcpServers: [{ id: "websearch", label: "Web search" }] },
+    // A second advertised server (Vikunja) checks the dynamic switch build:
+    // one switch per entry of /api/config, no code change needed per server.
+    config: { mcpServers: [{ id: "websearch", label: "Web search" }, { id: "vikunja", label: "Vikunja" }] },
   });
   assert.match(await page.textContent("#mcpStatus-websearch"), /web search off/i);
+  assert.ok(await page.$("#mcpSwitch-vikunja"), "a switch is built for every advertised MCP server");
   await page.click("#stopButton");
   await page.click("#mcpSwitch-websearch");
   assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.mcp.websearch")), "true");
@@ -747,7 +750,9 @@ test("MCP web-search toggle is saved, restored and sent with brain requests", { 
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
     null, { timeout: 15000 });
   assert.deepEqual(calls.prompts, ["What time is it?"]);
-  assert.deepEqual(calls.mcp, { websearch: true });
+  // Every advertised flag is sent with the request; the untouched Vikunja
+  // switch rides along as false.
+  assert.deepEqual(calls.mcp, { websearch: true, vikunja: false });
 });
 
 test("chat requests carry the active wake phrase so the brain answers as its name", { timeout: 20000 }, async (t) => {

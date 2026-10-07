@@ -3473,3 +3473,85 @@ and the 24-day history across a reload).
 
 It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
 required for clients to pick it up.
+
+## 2026-10-07 — Vikunja task manager MCP (region-pinned service MCP)
+
+The brain gained a third MCP server, **Vikunja** (`id: "vikunja"`): each
+Jarvis user's brain acts as that user's own Vikunja account (their tasks,
+projects, labels, lists) through the published `@eargollo/vikunja-mcp`
+stdio package, and every service-MCP connection is **region-pinned** by
+binding policy — a request entering through the nbg-1 gateway may only use
+the nbg-1 Vikunja instance, vie-1 only vie-1 (see `AGENTS.md` and the
+repo-root `vikunja-mcp.md` for the policy and the full design/implementation
+record).
+
+- **Gateway hosts** — on each gateway (nbg-1, vie-1): short-name `Roman` and
+  `Mila` Vikunja users created (CLI `vikunja user create` via a pty wrapper;
+  the CLI's TTY password prompt rejects plain pipes), one API token per
+  (region, user) titled `jarvis` minted + verified (`GET /user`) by
+  `/tmp/vk-jarvis-token.sh` (a `mcp-token-owner.sh` variant: no sidecar
+  switch, no revoke). The parked `vikunja-mcp` sidecars stay as-is for now.
+- **vm104 tunnels** — `jarvis-vikunja-tunnel-nbg1.service` /
+  `-vie1.service` (systemd, `Restart=always`): `ssh -N` from vm104 to each
+  gateway over the mesh (10.1.1.1 / 10.2.1.1, `HostKeyAlias` on the public
+  IP) forwarding **`172.17.0.1:34561` → nbg-1 `172.29.0.2:3456`** and
+  **`172.17.0.1:34562` → vie-1 `172.29.0.2:3456`**. The bind address is the
+  host's docker0 gateway, not loopback: the container's own loopback cannot
+  see the host's, and the container's `host.docker.internal` (compose
+  `extra_hosts: host-gateway`) resolves to that docker0 gateway on this
+  host. A loopback bind was tried first and failed with "connection
+  refused" from inside the container (the brain reported it cleanly as
+  "Vikunja is currently unreachable").
+- **`server.js`** — `VIKUNJA_HOST_REGIONS` maps the two public Host names to
+  regions (fallback `VIKUNJA_DEFAULT_REGION`, live `nbg-1`); the `/api/chat`
+  handler passes `req.headers.host` into `chat()`. `VIKUNJA_URLS` /
+  `VIKUNJA_TOKENS` are JSON env maps (region → URL; region → user → token);
+  only a non-empty URL map advertises the switch in `/api/config`. One
+  `McpClient` per (region, user) spawns `node /usr/local/bin/vikunja-mcp`
+  with `VIKUNJA_URL`, `VIKUNJA_API_TOKEN`, `VIKUNJA_MCP_ALLOW_WRITE=1` (no
+  delete tier; `VIKUNJA_MCP_SCRIPT` overrides for tests). New
+  `McpClient.listTools()` feeds the brain the live `tools/list`; `runBrain`
+  offers the Vikunja tools in the shared five-round budget and dispatches by
+  the live tool-name set. The brain prompt line (switch on) tells it it acts
+  as the user themself on that region's instance, no delete tool exists, and
+  to confirm changes in plain language; OFF, no-token-for-region and
+  unreachable each get their own prompt line.
+- **`Dockerfile`** — `npm install -g @eargollo/vikunja-mcp@1.2.3` (pinned).
+  **`.env.example`** — documents `VIKUNJA_URLS`, `VIKUNJA_TOKENS`,
+  `VIKUNJA_DEFAULT_REGION`. **vm104 `.env`** — the two maps plus
+  `VIKUNJA_DEFAULT_REGION=nbg-1` (URLs point at
+  `http://host.docker.internal:34561/api/v1` / `:34562`).
+- **UI** — no client change: the switch row is built from `/api/config`, so
+  the **Vikunja** switch appears automatically (per-browser, like the other
+  MCP switches).
+
+Tests: unit **154/154** (new "vikunja is region-pinned per request and
+scoped to the signed-in user": mock stdio server echoes the spawned
+env so the test pins URL **and** token per (region, user) — Roman on nbg-1
+vs vie-1, Mila on nbg-1 — plus the OFF line, the no-token-for-region line
+(admin) and the config advertisement; the region is driven with a raw
+`http.request` because undici's `fetch` replaces a custom `Host` header).
+Browser **53 pass** (2 skipped: the opt-in live tests), with the MCP-switch
+test now asserting a switch is built per advertised server and the
+untouched Vikunja flag rides along as `false`.
+
+**Rolled out 2026-10-07 ~19:35.**
+
+- Backup first: `jarvis-code.bak-20261007_191340.tgz` under
+  `/home/ubuntu/docker/` (code only; `.env` backed up to
+  `jarvis/.env.bak-20261007_191340` before the `VIKUNJA_*` additions).
+- Synced `server.js`, `Dockerfile` and `.env.example` to
+  `/home/ubuntu/docker/jarvis`, then `docker compose up -d --build` on
+  vm104 (image now carries `/usr/local/bin/vikunja-mcp`,
+  `@eargollo/vikunja-mcp@1.2.3`).
+- Verified: container `healthy`, `/api/health` `ok: true`, served static
+  artifacts unchanged (md5s match the source — the UI is dynamic), and the
+  live end-to-end path: login as Roman, `POST /api/chat` with
+  `mcp: { vikunja: true }` and `Host: jarvis.gw-1-nbg-1-…` → the brain
+  called `create_task` and the task landed on the **nbg-1** instance only
+  (absent on vie-1 for the same user), then deleted again. All four
+  (region, user) token combos return the right username from inside the
+  container via the tunnels.
+
+No static assets changed, so no browser hard refresh is needed (the new
+switch appears on the next page load, as `/api/config` now advertises it).

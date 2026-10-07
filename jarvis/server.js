@@ -190,6 +190,40 @@ const mcpServers = [
   { id: "graph", label: "Knowledge graph" },
 ];
 
+// Vikunja (the task manager) is a REGION-PINNED service MCP (binding policy,
+// see AGENTS.md): each gateway host runs its own Vikunja instance and a
+// request may only use the instance on its own region — the nbg-1 entry never
+// touches vie-1's tasks and vice versa. The region is resolved per request
+// from the public entry (the gateway's Host header); direct internal access
+// falls back to VIKUNJA_DEFAULT_REGION. VIKUNJA_URLS and VIKUNJA_TOKENS are
+// JSON maps keyed by region; the tokens are keyed by the signed-in user, so
+// the backend pins one @eargollo/vikunja-mcp stdio server per (region, user)
+// to that user's own API token — the token IS the scope, the brain acts as
+// the user's own Vikunja account (read plus additive writes, no delete).
+const VIKUNJA_HOST_REGIONS = {
+  "jarvis.gw-1-nbg-1-de-netcup.rwnix.net": "nbg-1",
+  "jarvis.gw-1-vie-1-at-netcup.rwnix.net": "vie-1",
+};
+function parseJsonEnv(name) {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.log(JSON.stringify({ level: "warn", msg: "env_json_invalid", env: name, error: error.message }));
+    return {};
+  }
+}
+const vikunjaUrls = parseJsonEnv("VIKUNJA_URLS");
+const vikunjaTokens = parseJsonEnv("VIKUNJA_TOKENS");
+const vikunjaConfigured = Object.keys(vikunjaUrls).length > 0;
+function vikunjaRegionFor(host) {
+  const name = String(host || "").split(":")[0].toLowerCase();
+  return VIKUNJA_HOST_REGIONS[name] || process.env.VIKUNJA_DEFAULT_REGION || null;
+}
+if (vikunjaConfigured) mcpServers.push({ id: "vikunja", label: "Vikunja" });
+
 function normalizeSelectorId(value) {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -606,7 +640,7 @@ const server = http.createServer(async (req, res) => {
       const profile = aiProfileFor(payload.brainProfile);
       if (!profile) return json(res, 503, { error: "brain_not_configured", requestId });
       const result = await chat(prompt, req.user, normalizeLanguage(payload.language) || "en", profile, requestId, controller.signal, normalizeMcpFlags(payload),
-        String(payload.wakePhrase || "").slice(0, 60));
+        String(payload.wakePhrase || "").slice(0, 60), req.headers.host);
       return json(res, 200, result);
     }
 
@@ -1004,6 +1038,11 @@ class McpClient {
     await this.start();
     return this.request("tools/call", { name, arguments: args }, timeoutMs);
   }
+
+  async listTools(timeoutMs = 20000) {
+    await this.start();
+    return this.request("tools/list", {}, timeoutMs);
+  }
 }
 
 // MCP_SEARCH_SCRIPT lets tests point the client at a mock server; production
@@ -1035,6 +1074,47 @@ const mcpGraph = new McpClient(
   },
 );
 
+// Vikunja MCP servers (@eargollo/vikunja-mcp, stdio): one child per
+// (region, user), each pinned to that user's own API token for that region's
+// instance — there is no per-call user injection to get wrong, the token IS
+// the scope. Writes are allowed (the user manages their own tasks), deletes
+// are not (VIKUNJA_MCP_ALLOW_DELETE stays off). VIKUNJA_MCP_SCRIPT lets tests
+// point the client at a mock server.
+const VIKUNJA_TOOL_TIMEOUT_MS = 15000;
+const vikunjaClients = new Map();
+function vikunjaClientFor(region, user) {
+  const url = vikunjaUrls[region];
+  const token = (vikunjaTokens[region] || {})[user];
+  if (!url || !token) return null;
+  const key = `${region}\u0000${user}`;
+  let client = vikunjaClients.get(key);
+  if (!client) {
+    client = new McpClient(process.execPath, [process.env.VIKUNJA_MCP_SCRIPT || "/usr/local/bin/vikunja-mcp"], {
+      VIKUNJA_URL: url,
+      VIKUNJA_API_TOKEN: token,
+      VIKUNJA_MCP_ALLOW_WRITE: "1",
+    });
+    client.tools = null;
+    vikunjaClients.set(key, client);
+  }
+  return client;
+}
+async function vikunjaToolsFor(client, signal) {
+  if (client.tools) return client.tools;
+  const listed = await withAbort(client.listTools(15000), signal);
+  client.tools = (listed.tools || [])
+    .map((tool) => ({
+      type: "function",
+      function: {
+        name: String(tool.name || ""),
+        description: tool.description || "",
+        parameters: tool.inputSchema || { type: "object", properties: {} },
+      },
+    }))
+    .filter((tool) => tool.function.name);
+  return client.tools;
+}
+
 // Runs the web_search tool of the MCP server and resolves with the result
 // text; the caller treats a failure as "answer without search results".
 async function webSearch(query, requestId, signal) {
@@ -1064,7 +1144,7 @@ function withAbort(promise, signal) {
   });
 }
 
-async function chat(prompt, user, language, brainProfile, requestId, signal, mcpFlags, wakePhrase) {
+async function chat(prompt, user, language, brainProfile, requestId, signal, mcpFlags, wakePhrase, host) {
   if (!brainProfile?.configured || String(brainProfile.apiKey).includes("PUT-YOUR")) {
     throw new Error("Brain endpoint/model is not configured");
   }
@@ -1130,6 +1210,31 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
   } else {
     mcpStates.push("The knowledge graph (MCP graph server) is OFF in the user's browser for this request: no graph context and no graph tools are available for this turn, so answer from the conversation history and your own knowledge. Facts from this conversation are still stored in the graph after the answer; the user can enable the MCP knowledge graph toggle to let you read them in future conversations.");
   }
+  let vikunjaTools = null;
+  let vikunjaClient = null;
+  let vikunjaToolNames = null;
+  if (vikunjaConfigured) {
+    if (mcpFlags.vikunja) {
+      const region = vikunjaRegionFor(host);
+      const client = region ? vikunjaClientFor(region, user) : null;
+      if (!client) {
+        mcpStates.push("Vikunja (the task manager) is ON in the user's browser but this request has no Vikunja account configured for it (unknown region, or no token for this user on this region's instance); do not claim access to their tasks.");
+      } else {
+        try {
+          vikunjaTools = await vikunjaToolsFor(client, signal);
+          vikunjaClient = client;
+          vikunjaToolNames = new Set(vikunjaTools.map((tool) => tool.function.name));
+          mcpStates.push(`Vikunja (the task manager) is ON: you can see and manage this user's OWN tasks, projects, labels and lists in their Vikunja account on the ${region} instance — you act as the user themself, with their own account and data (this region's tasks only; another region's instance is not reachable from here). The offered tools are the live tool list of the MCP server (for example list_projects, list_tasks, get_task, create_task, add_task_comment, assign_user, add_label_to_task). You can create and update tasks; there is NO delete tool in this integration — if asked to delete or remove a task or project, say deleting is not available here. When you create or change anything, confirm exactly what you did in plain language. When asked whether you can see or manage their tasks, say yes.`);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          console.log(JSON.stringify({ level: "warn", requestId, msg: "vikunja_tools_failed", error: error.message }));
+          mcpStates.push("Vikunja (the task manager) is ON, but the task server is currently unreachable; answer from your own knowledge and do not mention tasks you cannot see.");
+        }
+      }
+    } else {
+      mcpStates.push("Vikunja (the task manager) is OFF in the user's browser for this request: you cannot see or change their tasks, projects or lists. If the user asks about their tasks or asks you to manage them, say the MCP Vikunja toggle in the UI is off for now and they can switch it on.");
+    }
+  }
   const messages = [
     {
       role: "system",
@@ -1146,7 +1251,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), admin: isAdmin(user), lang: language === "de" ? "de" : "en", requestId, signal, headers,
+  const { data, webResults } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -1360,13 +1465,13 @@ function graphToolDetail(name, args) {
   return parts.length ? `${name}: ${parts.join(", ")}` : name;
 }
 
-async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, admin = false, lang = "de", requestId, signal, headers, deadlineMs }) {
+async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, vikunjaTools = null, vikunjaClient = null, vikunjaToolNames = null, admin = false, lang = "de", requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
   const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
   // Web tool results collected for post-turn ingestion (the extractor reads
   // the search context the turn actually used), separate from the answer.
   const webResults = [];
-  const hasTools = Boolean(useTools || webToolsOn);
+  const hasTools = Boolean(useTools || webToolsOn || (vikunjaTools && vikunjaTools.length));
   for (let round = 0; ; round += 1) {
     const body = {
       model: brainProfile.model,
@@ -1378,7 +1483,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       // budget at the measured ~150 tok/s while staying inside the timeout.
       max_tokens: 4096,
     };
-    if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : [])];
+    if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : []), ...(vikunjaTools || [])];
     let data;
     try {
       const response = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
@@ -1462,6 +1567,21 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
           console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_tool", tool: name, ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started }));
           local.push({ role: "tool", tool_call_id: call.id, content: `Web lookup failed: ${error.message}. Answer from what you know.` });
         }
+      } else if (vikunjaClient && vikunjaToolNames?.has(name)) {
+        // The (region, user) pinning happens at spawn time (the child was
+        // started with this user's own token for this region's instance), so
+        // the call itself needs no user injection — and no other user's
+        // account is reachable from this child.
+        try {
+          const result = await withAbort(vikunjaClient.call(name, args, VIKUNJA_TOOL_TIMEOUT_MS), totalSignal);
+          const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
+          console.log(JSON.stringify({ level: "info", requestId, msg: "vikunja_tool", tool: name, ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));
+          local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
+        } catch (error) {
+          if (totalSignal.aborted) throw error;
+          console.log(JSON.stringify({ level: "warn", requestId, msg: "vikunja_tool", tool: name, ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started }));
+          local.push({ role: "tool", tool_call_id: call.id, content: `Vikunja lookup failed: ${error.message}. Answer from what you know.` });
+        }
       } else {
         // A write-tool name from a non-admin brain (or a typo) is still an
         // attempted write: audit it as one, even though nothing ran.
@@ -1469,6 +1589,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         const available = [
           ...(useTools ? ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", ...(admin ? ["store-entity", "store-fact", "rename-entity", "delete-entity"] : [])] : []),
           ...(webToolsOn ? ["web_search", "web_news", "web_fetch"] : []),
+          ...(vikunjaToolNames ? [...vikunjaToolNames] : []),
         ];
         local.push({ role: "tool", tool_call_id: call.id, content: `Unknown tool. Use: ${available.join(", ")}.` });
       }
