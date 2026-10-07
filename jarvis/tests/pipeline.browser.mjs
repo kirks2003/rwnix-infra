@@ -1212,6 +1212,32 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     const slider = document.getElementById("historyDays");
     return { min: slider.min, max: slider.max, step: slider.step };
   }), { min: "1", max: "31", step: "1" }, "the day window is a 1..31 slider");
+  // The slider's own row must stay a compact control strip. It used to be
+  // styled by `.transcript > div`, which also matched the two panels and
+  // gave the strip their 560px min-height — a near-empty box that pushed
+  // both panels off the first screen. Pin it short, and pin that the
+  // panels keep the tall styling.
+  const layout = await page.evaluate(() => {
+    const strip = document.querySelector(".transcript-controls");
+    const panel = document.getElementById("promptText").closest(".transcript-panel");
+    const list = document.getElementById("promptText");
+    return {
+      stripHeight: strip.getBoundingClientRect().height,
+      panelHeight: panel.getBoundingClientRect().height,
+      panelTop: panel.getBoundingClientRect().top + window.scrollY,
+      // A scrollbar that takes layout width, not a 0-width overlay bar that
+      // fades out at rest: the bar is how you know you can scroll back.
+      scrollbarGutter: list.offsetWidth - list.clientWidth,
+    };
+  });
+  assert.ok(layout.stripHeight < 150,
+    `the History strip must stay compact, got ${layout.stripHeight}px`);
+  assert.ok(layout.panelHeight >= 400,
+    `the conversation panels stay tall, got ${layout.panelHeight}px`);
+  assert.ok(layout.panelTop < 500,
+    `the panels must start on the first screen, got top ${layout.panelTop}px`);
+  assert.ok(layout.scrollbarGutter > 0,
+    `the history list needs a laid-out scrollbar, got ${layout.scrollbarGutter}px`);
   assert.equal(await page.inputValue("#historyDays"), "24");
   assert.equal(await page.textContent("#historyDaysValue"), "24 days");
   await page.evaluate(() => {

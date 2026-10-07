@@ -621,7 +621,11 @@ progress {
   grid-template-columns: 1fr 1fr;
 }
 
-.transcript > div {
+/* The two conversation panels (Prompt, Answer). Deliberately NOT
+   `.transcript > div`: that also matched the History slider's own
+   `.transcript-controls` div and gave the slider the panels' border and
+   560px min-height, which pushed both panels off the first screen. */
+.transcript-panel {
   display: grid;
   /* h2, the scrollable conversation list, and (in the Prompt panel only)
      the manual prompt form. */
@@ -662,8 +666,16 @@ progress {
   overflow-y: auto;
   overflow-wrap: anywhere;
   padding: 2px;
-  /* Always-visible thin scrollbar: the history can run to days of entries. */
-  scrollbar-width: thin;
+  /* Always-visible scrollbar: the history can run to days of entries, so the
+     bar is the affordance that says "scroll back". Deliberately no
+     `scrollbar-width`: with it, Chromium rendered an overlay bar that took
+     0 layout width and faded out at rest (measured), so there was no
+     scrollbar to see. `scrollbar-color` gives a classic, laid-out bar in
+     both Chromium and Firefox, and `scrollbar-gutter: stable` reserves its
+     track so the text never reflows. The ::-webkit-scrollbar rules below
+     are the fallback for engines without `scrollbar-color` (older Safari);
+     Chromium ignores them once `scrollbar-color` is set. */
+  scrollbar-gutter: stable;
   scrollbar-color: var(--muted) rgba(3, 8, 18, 0.4);
 }
 

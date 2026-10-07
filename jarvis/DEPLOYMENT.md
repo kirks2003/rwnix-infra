@@ -3667,3 +3667,42 @@ should limit the window to **1 to 31 days** instead of 1 to 90.
 
 Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
 where the old UI is cached.
+
+## 2026-10-07: the History slider strip was eating the first screen
+
+Reported twice: "show the history in the Prompt and Answer panels with the
+slider". The data side was already right — both panels render every stored
+turn with its date-time and the slider windows them — but the **layout**
+hid it, so from the browser it looked unimplemented.
+
+Two defects, both found by screenshotting the running UI rather than
+reading the CSS:
+
+- `.transcript > div` (the two conversation panels' styling: border,
+  padding, `min-height: 560px`) **also matched the slider's own
+  `div.transcript-controls`**, because that div is a child of
+  `.transcript` too. The History strip was rendered as a 560px near-empty
+  bordered box with the slider floating in the middle of it, pushing both
+  panels below the fold on a 1000px-tall viewport. Fixed by giving the two
+  panels their own `.transcript-panel` class and styling that instead of
+  the child-of-element selector.
+- `.transcript-list` set `scrollbar-width: thin`, which makes Chromium
+  **ignore the `::-webkit-scrollbar` rules right below it** and fall back
+  to an overlay scrollbar: measured `offsetWidth - clientWidth === 0`, so
+  the bar took no layout space and faded out at rest — there was no
+  scrollbar to grab. Replaced with `scrollbar-gutter: stable` +
+  `scrollbar-color`, which gives a classic laid-out bar (measured 15px
+  gutter) in both Chromium and Firefox. The webkit rules stay as the
+  fallback for older Safari.
+
+- Regression tests in `tests/pipeline.browser.mjs`: the History strip
+  stays under 150px tall, the panels stay at least 400px tall and start
+  within the first 500px of the page, and the history list has a
+  scrollbar that takes layout width. Each assertion was checked against
+  the pre-fix CSS and fails on it (560px strip / 0px gutter).
+- **Verification note:** headless Chromium does not paint scrollbars in
+  screenshots even when they occupy layout. To *see* one, run Playwright
+  with `headless: false` under `Xvfb :99` (`xvfb-run` fails in this
+  container: no `xauth`). The layout measurement works headless either
+  way, which is what the test asserts.
+- Unit suite 155/155, browser suite 53 pass + 2 opt-in skips.
