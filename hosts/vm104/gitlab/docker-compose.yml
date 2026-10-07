@@ -1,0 +1,40 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:17.5.4-ce.0
+    container_name: gitlab
+    restart: unless-stopped
+    hostname: '192.168.54.111'
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://192.168.54.111:8080'
+        gitlab_rails['signup_enabled'] = false
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+        puma['listen'] = '127.0.0.1'
+        puma['port'] = 8081
+        prometheus_monitoring['enable'] = false
+        alertmanager['enable'] = false
+        # --- memory tuning (added 2026-08-13, conservative) ---
+        puma['worker_processes'] = 2
+        puma['per_worker_max_memory_mb'] = 800
+        sidekiq['concurrency'] = 10
+        gitlab_kas['enable'] = false
+        gitlab_exporter['enable'] = false
+        node_exporter['enable'] = false
+        postgres_exporter['enable'] = false
+        redis_exporter['enable'] = false
+        puma['exporter_enabled'] = false
+        sidekiq['metrics_enabled'] = false
+        gitlab_rails['env'] = {
+          'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000'
+        }
+        gitaly['env'] = {
+          'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000'
+        }
+    ports:
+      - '192.168.54.111:8080:8080'
+      - '192.168.54.111:2222:22'
+    volumes:
+      - ./config:/etc/gitlab
+      - ./logs:/var/log/gitlab
+      - ./data:/var/opt/gitlab
+    shm_size: '256m'

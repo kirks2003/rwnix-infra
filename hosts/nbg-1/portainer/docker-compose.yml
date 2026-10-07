@@ -1,0 +1,28 @@
+services:
+  portainer:
+    image: portainer/portainer-ce:2.45.0@sha256:511f3f06c96fe3b993ebeaafde311c1959cae73a7ef825dba6397d51b450dffa
+    container_name: portainer
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+    - 127.0.0.1:9000:9000
+    - 127.0.0.1:9443:9443
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    - portainer_data:/data
+    environment:
+      TZ: Europe/Berlin
+    restart: unless-stopped
+    networks:
+      authelia_shared:
+        ipv4_address: 172.22.0.5
+volumes:
+  portainer_data:
+    name: portainer_data
+    external: true
+networks:
+  authelia_shared:
+    external: true

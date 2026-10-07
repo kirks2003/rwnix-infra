@@ -1,0 +1,27 @@
+services:
+  speaches:
+    # pinned 20260902 (was ghcr.io/speaches-ai/speaches:latest-cpu, build 2025-09-19)
+    image: ghcr.io/speaches-ai/speaches@sha256:21e3df06d842fb7802ab470dd77c25f0e8c0d22950e8d8c6ae886e851af53ef8
+    container_name: speaches
+    restart: always
+    dns:
+      - 192.168.53.1
+    environment:
+      - TZ=Europe/Vienna
+      - CHAT_COMPLETION_BASE_URL=http://ollama:11434/v1
+    volumes:
+      - ./data:/home/ubuntu/.cache/huggingface/hub
+      - ./config:/config
+    ports:
+      - 192.168.53.111:8001:8000
+    networks:
+      - proxy
+    deploy:
+      resources:
+        limits:
+          cpus: 14
+          memory: 16gb
+
+networks:
+  proxy:
+    external: true

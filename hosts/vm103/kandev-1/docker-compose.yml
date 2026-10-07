@@ -1,0 +1,27 @@
+services:
+  kandev:
+    image: kandev:custom
+    container_name: kandev-1
+    restart: always
+    command: ['kandev', 'start', '--backend-port', '38429', '--verbose']
+    hostname: 'kandev-1.docker-1-pve-103-1140b-vie-at-magenta.rwnix.net'
+    ports:
+      - '192.168.53.111:38429:38429'
+      - '192.168.53.111:22022:22'
+    volumes:
+      - ./data:/data
+    environment:
+      - PATH=/data/home/.opencode/bin:/data/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - KANDEV_GITLAB_HOST=http://192.168.54.111:8080
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+    mem_limit: 3g
+    cpus: 8
+    shm_size: '256m'
+
+networks:
+  default:
+    name: kandev1_default
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.73.0.0/16

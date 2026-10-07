@@ -1,0 +1,40 @@
+services:
+  wetty:
+    image: wettyoss/wetty:3.0.0@sha256:12a446f24fa765fd8bb95e61d4dcca2117b9a3abaaf711a964cb33d93e2a46dc
+    container_name: wetty
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    volumes:
+    - /home/ubuntu/.ssh:/etc/wetty/ssh:ro
+    - type: bind
+      source: /home/ubuntu/.ssh/known_hosts
+      target: /root/.ssh/known_hosts
+      read_only: true
+      bind:
+        create_host_path: false
+    command:
+    - node
+    - build/main.js
+    - --ssh-host=172.24.0.1
+    - --ssh-user=ubuntu
+    - --ssh-key=/etc/wetty/ssh/kandev
+    - --ssh-auth=publickey
+    - --force-ssh
+    - --known-hosts=/root/.ssh/known_hosts
+    - --command=ssh -tt -p 2222 -i /home/ubuntu/.ssh/kandev kandev@127.0.0.1
+    - --port=3000
+    - --base=/
+    - --log-level=info
+    environment:
+      TZ: Europe/Vienna
+    restart: unless-stopped
+    networks:
+      wetty_private:
+        ipv4_address: 172.24.0.3
+networks:
+  wetty_private:
+    name: authelia_shared-wetty
+    external: true

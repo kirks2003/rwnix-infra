@@ -1,0 +1,10 @@
+services:
+  fail2ban-exporter:
+    # pinned 20260902 (was registry.gitlab.com/hctrdev/fail2ban-prometheus-exporter:latest, build 2025-04-04)
+    image: registry.gitlab.com/hctrdev/fail2ban-prometheus-exporter@sha256:2b8cd2319c8c9058a8b5a9076752eaedd14cdc07cb4bbb1defae8ffa36d27158
+    container_name: fail2ban-exporter
+    volumes:
+      - /var/run/fail2ban/fail2ban.sock:/var/run/fail2ban/fail2ban.sock:ro
+    ports:
+      - 9191:9191
+    restart: unless-stopped

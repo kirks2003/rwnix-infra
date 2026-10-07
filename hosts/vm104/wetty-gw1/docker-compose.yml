@@ -1,0 +1,21 @@
+services:
+  wetty-gw1:
+    # migrated 20260902 (was butlerx/wetty:latest, build 2019-11-10)
+    image: ghcr.io/butlerx/wetty@sha256:7423b3d40ba25521105bb2796a0de903fd52dee6c20f6983b5ae145e29131aa9
+    container_name: wetty-gw1
+    user: "node"
+    restart: unless-stopped
+    ports:
+      - "192.168.54.111:3004:3000"
+    volumes:
+      - /home/ubuntu/docker/wetty-gw1/id_ed25519:/ssh/id_ed25519:ro
+      - /home/ubuntu/docker/wetty-gw1/known_hosts:/known_hosts:ro
+      - /home/ubuntu/docker/wetty-gw1/ssh_config:/home/node/.ssh/config:ro
+    command: ["--ssh-host", "gw-1-ber-1-de-ionos.rwnix.net", "--ssh-port", "22", "--ssh-user", "root", "--ssh-auth", "publickey", "--ssh-key", "/ssh/id_ed25519", "--force-ssh", "--title", "WeTTY gw-1", "--base", "/"]
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.89.0.0/16

@@ -1,0 +1,31 @@
+services:
+  ollama:
+    # pinned 20260902 (was ollama/ollama:latest, build 2026-08-20)
+    image: ollama/ollama@sha256:57d60e686821ea81a7748a3ec8141308c8b8f95b27105713954abf7a6529e700
+    container_name: ollama
+    restart: always
+    group_add:
+      - 991          # render group -> /dev/dri access
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/card1:/dev/dri/card1
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_KEEP_ALIVE=24h
+      - TZ=Europe/Vienna
+    volumes:
+      - ./models:/root/.ollama
+    ports:
+      - 192.168.53.111:11434:11434
+    networks:
+      - proxy
+    shm_size: 1gb
+    healthcheck:
+      test: [CMD, ollama, list]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  proxy:
+    external: true

@@ -1,0 +1,15 @@
+services:
+  glances:
+    container_name: glances
+    # pinned 20260902 (was nicolargo/glances:latest-full, build 2026-08-01)
+    image: nicolargo/glances@sha256:c47322ae60260f6039302dde576c8250f28e67cea77f5b93a270e6cd90995665
+    restart: always
+    pid: host
+    environment:
+      - TZ=Europe/Vienna
+      - GLANCES_OPT=-w
+    ports:
+      - "61208:61208"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/hostname:/etc/host_hostname:ro

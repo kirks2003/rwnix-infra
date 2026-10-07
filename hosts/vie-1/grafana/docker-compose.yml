@@ -1,0 +1,31 @@
+services:
+  grafana:
+    image: grafana/grafana:13.0.10-ubuntu@sha256:1f36c12afb1496fb675d8c3250905262ed8f2b32ca848dbc588b15856b2142a0
+    container_name: grafana
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    user: 472:472
+    volumes:
+      - ./data:/var/lib/grafana
+      - ./provisioning:/etc/grafana/provisioning:ro
+    environment:
+      TZ: Europe/Vienna
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SERVER_DOMAIN: "grafana.gw-1-vie-1-at-netcup.rwnix.net"
+      GF_SERVER_ROOT_URL: "https://grafana.gw-1-vie-1-at-netcup.rwnix.net"
+      GF_SECURITY_ADMIN_USER: "roman.windpassinger@gmail.com"
+      GF_AUTH_BASIC_AUTH_ENABLED: "true"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_INSTALL_PLUGINS: ""
+    restart: unless-stopped
+    networks:
+      grafana_private:
+        ipv4_address: 172.28.0.2
+
+networks:
+  grafana_private:
+    name: authelia_shared-grafana
+    external: true

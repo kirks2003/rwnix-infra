@@ -1,0 +1,17 @@
+services:
+  nginx-proxy-manager:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    image: jc21/nginx-proxy-manager:2.16.0@sha256:4393e642e233e5efd5adeb7f10918d4aaea71c9ed875b94190273fc8e87f9594
+    container_name: nginx-proxy-manager
+    network_mode: host
+    volumes:
+      - ../authelia/snippets:/snippets:ro
+      - ./data:/data
+      - ./letsencrypt:/etc/letsencrypt
+    environment:
+      TZ: Europe/Vienna
+    restart: unless-stopped

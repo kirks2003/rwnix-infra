@@ -1,0 +1,22 @@
+services:
+  glance:
+    container_name: glance
+    image: nginx:1.27-alpine
+    restart: always
+    environment:
+      - TZ=Europe/Vienna
+    ports:
+      - "192.168.53.111:8082:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - glance_default
+
+networks:
+  glance_default:
+    name: glance_default
+    ipam:
+      config:
+        - subnet: 10.90.0.0/16
+          gateway: 10.90.0.1

@@ -1,0 +1,26 @@
+services:
+  authelia:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    image: authelia/authelia:4.39.24@sha256:8f428b06bb07bb978c10477527634f19ef3b049c9c87321fda14e24d8fc4c535
+    container_name: authelia
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Vienna
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /secrets/storage_encryption_key
+      AUTHELIA_SESSION_SECRET_FILE: /secrets/session_secret
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /secrets/jwt_secret
+    volumes:
+    - ./config:/config
+    - ./secrets:/secrets:ro
+    networks:
+      proxy_net:
+        ipv4_address: 172.20.0.7
+    user: 1000:1000
+networks:
+  proxy_net:
+    name: proxy
+    external: true

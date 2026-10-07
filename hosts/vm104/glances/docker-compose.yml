@@ -1,0 +1,28 @@
+services:
+  glances:
+    container_name: glances
+    # pinned 20260902 (was nicolargo/glances:latest, build 2026-08-01)
+    image: nicolargo/glances@sha256:7bdd499825a9044ad495714421ea2049b73696d64f1fe6697e1ae07bfe164e2c
+    restart: unless-stopped
+    pid: host
+    privileged: true
+    environment:
+      - TZ=Europe/Vienna
+      - GLANCES_OPT=-w
+    ports:
+      - "192.168.54.111:61208:61208"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/hostname:/etc/hostname:ro
+      - /run/user/1000:/run/user/1000:ro
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.88.0.0/16

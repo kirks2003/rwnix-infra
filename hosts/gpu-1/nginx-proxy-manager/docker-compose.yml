@@ -1,0 +1,9 @@
+services:
+  npm-app:
+    image: 'jc21/nginx-proxy-manager:2.15.1'
+    container_name: npm-ui
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./npm/data:/data
+      - ./npm/letsencrypt:/etc/letsencrypt

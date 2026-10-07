@@ -1,0 +1,28 @@
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:v1.153.0@sha256:5eff7af5341e401471002f58d106d399e614a62f3d240f2dbc21901e49eed5dd
+    container_name: victoria-metrics
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - vmdata:/victoria-metrics-data
+      - ./scrape.yml:/etc/scrape.yml:ro
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      - -retentionPeriod=3
+      - -promscrape.config=/etc/scrape.yml
+    restart: unless-stopped
+    networks:
+      grafana_private:
+        ipv4_address: 172.28.0.6
+
+volumes:
+  vmdata:
+
+networks:
+  grafana_private:
+    name: authelia_shared-grafana
+    external: true

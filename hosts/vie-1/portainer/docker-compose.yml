@@ -1,0 +1,28 @@
+services:
+  portainer:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    image: portainer/portainer-ce:2.45.0@sha256:511f3f06c96fe3b993ebeaafde311c1959cae73a7ef825dba6397d51b450dffa
+    container_name: portainer
+    restart: unless-stopped
+    ports:
+    - 127.0.0.1:9000:9000
+    - 127.0.0.1:9443:9443
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    - portainer_data:/data
+    environment:
+      TZ: Europe/Vienna
+    networks:
+      proxy_net:
+        ipv4_address: 172.20.0.3
+networks:
+  proxy_net:
+    name: proxy
+    external: true
+volumes:
+  portainer_data:
+    external: true

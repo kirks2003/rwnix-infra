@@ -1,0 +1,28 @@
+services:
+  glances:
+    image: nicolargo/glances:4.5.7@sha256:28e4038aa2f2d635f4e6e1e3c7667ce4a808326cb918bba99b0041548b6e7425
+    container_name: glances
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      TZ: Europe/Berlin
+      GLANCES_OPT: -w -t 1
+      GLANCES_WEBSERVER_BIND_ADDRESS: 0.0.0.0
+    pid: host
+    hostname: wg-nbg-1
+    volumes:
+    - /etc/os-release:/etc/os-release:ro
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    security_opt:
+    - label=disable
+    networks:
+      glances_private:
+        ipv4_address: 172.25.0.2
+networks:
+  glances_private:
+    name: authelia_shared-glances
+    external: true

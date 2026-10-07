@@ -1,0 +1,16 @@
+services:
+  glances:
+    # pinned 20260902 (was nicolargo/glances:latest-full, build 2026-04-19)
+    image: nicolargo/glances@sha256:60872a1af0e40a3150975617c7e811ad7ad48f95bc45d033fb0c1737a037e4d2
+    container_name: glances
+    restart: unless-stopped
+    pid: host
+    network_mode: host
+    privileged: true
+    environment:
+      - GLANCES_OPT=-w
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/os-release:/etc/os-release:ro
+      - ./config/glances.conf:/etc/glances/glances.conf:ro
+

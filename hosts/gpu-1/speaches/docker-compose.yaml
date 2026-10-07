@@ -1,0 +1,35 @@
+services:
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    container_name: speaches
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./hf-cache:/hf
+    environment:
+      - HF_HUB_CACHE=/hf/hub
+      - API_KEY=${API_KEY}
+      - ENABLE_UI=false
+      - LOG_LEVEL=info
+      - WHISPER__MODEL=Systran/faster-whisper-large-v3
+      - WHISPER__INFERENCE_DEVICE=cuda
+      - WHISPER__COMPUTE_TYPE=float16
+      # Keep the model resident; the default 300 s TTL costs a ~27 s reload on the
+      # first wake probe after an idle period.
+      - WHISPER__TTL=-1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      # /health is behind API_KEY, so the probe authenticates with the same key.
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$API_KEY\" http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -1,0 +1,41 @@
+services:
+  qwen38-27b-mtp-llamacpp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: havenoammo/llama:cuda13-server
+    container_name: qwen38-27b-mtp-llamacpp
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "8082:8080"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    command: >
+      -m /models/Qwen3.8-27B-UD-Q8_K_XL.gguf
+      --mmproj /models/mmproj-Qwen3.8-F16.gguf
+      -md /models/MTP/mtp-Qwen3.8-27B-Q4_0.gguf
+      --spec-type draft-mtp
+      --spec-draft-n-max 3
+      --host 0.0.0.0
+      --port 8080
+      --n-gpu-layers 999
+      --n-gpu-layers-draft 999
+      --ctx-size 786432
+      --parallel 3
+      -ub 1024
+      --flash-attn on
+      --cache-type-k q8_0
+      --cache-type-v q8_0
+      --api-key ${LLAMACPP_API_KEY}
+      --no-mmap
+      --jinja
+    restart: unless-stopped

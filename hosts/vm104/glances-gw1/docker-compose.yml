@@ -1,0 +1,15 @@
+services:
+  glances-gw1:
+    container_name: glances-gw1
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "192.168.54.111:61210:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.99.1.0/28

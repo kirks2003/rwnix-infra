@@ -1,0 +1,9 @@
+services:
+  tftp:
+    # pinned 20260902 (was 3x3cut0r/tftpd-hpa:latest, build 2026-08-05)
+    image: 3x3cut0r/tftpd-hpa@sha256:b66801ec960ac9a027514dc66e38532497271b24b5693ccd40459ad8a88873ae
+    container_name: tftp-1
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data:/tftpboot

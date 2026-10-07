@@ -1,0 +1,11 @@
+services:
+  portainer:
+    build: .
+    container_name: portainer
+    restart: always
+    ports:
+      - "127.0.0.1:9443:9443"
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data

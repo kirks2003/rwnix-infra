@@ -1,0 +1,14 @@
+services:
+  mariadb-slave:
+    image: mariadb:11.5
+    container_name: ${CONTAINER_NAME}
+    restart: unless-stopped
+    environment:
+      - MARIADB_ROOT_PASSWORD=${ROOT_PASSWORD}
+      - MARIADB_DATABASE=${DB_NAME}
+      - MARIADB_USER=${DB_USER}
+      - MARIADB_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - ${DATA_DIR}:/var/lib/mysql
+    ports:
+      - "${HOST_IP}:${HOST_PORT}:3306"

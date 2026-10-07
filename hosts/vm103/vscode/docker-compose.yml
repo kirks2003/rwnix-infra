@@ -1,0 +1,36 @@
+services:
+  vscode:
+    # pinned 20260902 (was lscr.io/linuxserver/vscode:latest, build 2026-07-28)
+    image: lscr.io/linuxserver/vscode@sha256:00925ddd9a2f65a653dfd5177be419d32e84b06d6e29cc76e968a43f6668eef9
+    container_name: vscode
+    restart: always
+    
+    cap_add:
+      - IPC_LOCK
+      
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Vienna
+      
+    volumes:
+      - ~/docker/vscode/config:/config
+      - ~/docker/vscode/workspace:/workspace
+      - ~/.ssh:/home/ubuntu/.ssh:ro
+      
+    ports:
+      - 192.168.53.111:3001:3001
+      
+    networks:
+      - proxy
+      
+    shm_size: "1gb"
+    
+    deploy:
+      resources:
+        limits:
+          memory: 4gb
+
+networks:
+  proxy:
+    external: true

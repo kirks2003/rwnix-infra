@@ -1,0 +1,5 @@
+# Per-service secrets live in host-local .env files next to each compose
+# file (see hosts/README.md). They must never be committed.
+.env
+hosts/**/.env
+*.env

@@ -1,0 +1,15 @@
+services:
+  wetty:
+    # pinned 20260902 (was butlerx/wetty:latest, build 2019-11-10)
+    # migrated 20260902 (was butlerx/wetty:latest, build 2019-11-10)
+    image: ghcr.io/butlerx/wetty@sha256:7423b3d40ba25521105bb2796a0de903fd52dee6c20f6983b5ae145e29131aa9
+    container_name: wetty
+    user: "node"
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - /home/ubuntu/.ssh/id_ed25519:/ssh/id_ed25519:ro
+      - /home/ubuntu/docker/wetty/known_hosts:/ssh/known_hosts:ro
+      - /home/ubuntu/docker/wetty/ssh_config:/home/node/.ssh/config:ro
+    command: ["--sshhost", "192.168.53.111", "--sshport", "22", "--sshuser", "ubuntu", "--sshauth", "publickey", "--sshkey", "/ssh/id_ed25519", "--force-ssh", "--title", "WeTTY-1", "--base", "/"]

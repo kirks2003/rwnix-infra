@@ -1,0 +1,70 @@
+services:
+  kandev:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    image: kandev:v0.94.0-ssh
+    build:
+      context: /home/ubuntu/docker/kandev/image-build
+      dockerfile: Dockerfile
+    container_name: kandev
+    ports:
+    - 127.0.0.1:38429:38429
+    - 0.0.0.0:2222:22
+    volumes:
+    - ./data:/data
+    environment:
+      TZ: Europe/Vienna
+    restart: unless-stopped
+    extra_hosts:
+    - wg_vie-1:10.1.1.17
+    - wg_nbg-1:10.2.1.17
+    - nbg:152.53.118.212
+    - nbg-1:152.53.118.212
+    - vie-1:152.53.35.177
+    - owrt001:10.2.1.3
+    - owrt002:10.2.1.2
+    - owrt003:10.2.1.4
+    - owrt011:10.2.1.5
+    - owrt018:10.2.1.6
+    - owrt031:10.2.1.7
+    - owrt032:10.2.1.8
+    - owrt033:10.2.1.9
+    - pve103:192.168.15.7
+    - pve104:192.168.15.6
+    - vm103:192.168.53.111
+    - vm104:192.168.54.111
+    - gpu-1:194.182.188.115
+    - gpu-2:92.39.59.7
+    - ber-1:217.154.145.10
+    - ber-2:85.215.213.123
+    - vie-2:138.124.211.32
+    - fsn-1:144.76.14.155
+    - hel-1:65.109.122.228
+    - gra-1:5.196.93.234
+    - lim-1:51.75.145.232
+    - eri-1:51.89.192.92
+    - waw-1:51.83.220.93
+    - pve1070:192.168.141.1
+    - pve101:192.168.101.2
+    - pve102:192.168.102.2
+    - owrt-pve101:192.168.51.1
+    - owrt-pve102:192.168.52.1
+    - owrt-fsn-1:10.2.1.12
+    - owrt-hel-1:10.2.1.11
+    - owrt-gra-1:10.2.1.13
+    - owrt-eri-1:10.2.1.10
+    - owrt-lim-1:10.2.1.14
+    - owrt-waw-1:10.2.1.15
+    - owrt-pve103:192.168.15.53
+    - owrt-pve104:192.168.15.54
+    networks:
+      kandev_private:
+        ipv4_address: 172.26.0.2
+    pull_policy: build
+networks:
+  kandev_private:
+    name: kandev
+    external: true

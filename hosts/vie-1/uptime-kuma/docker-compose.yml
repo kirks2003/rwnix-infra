@@ -1,0 +1,31 @@
+# Rewritten 2026-09-28 to mirror the running container exactly (the previous
+# file described a pre-2026-09-16 layout: Berlin TZ, no healthcheck). Image
+# pinned by version tag + digest — tag 2.5.4-rootless verified equal to the
+# running digest on 2026-09-28. Re-pin only after a deliberate upgrade.
+services:
+  uptime-kuma:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    image: louislam/uptime-kuma:2.5.4-rootless@sha256:049d372d2774022ddf6b261f9394372e1ffbe95cc741fb02a540bde69d5b71b7
+    container_name: uptime-kuma
+    # Host network namespace by operator decision (2026-09-14): monitors
+    # probe with the host's own view — the WireGuard peer and the LAN behind
+    # it are reached as host-originated traffic, and every bridge/loopback
+    # backend is reachable directly.
+    network_mode: host
+    # Rootless image, deploy user; ping works through the image's cap_net_raw
+    # file capability on /usr/bin/ping.
+    user: node
+    volumes:
+      - ./data:/app/data
+    environment:
+      TZ: Europe/Vienna
+      UPTIME_KUMA_DB_TYPE: sqlite
+      # Host namespace: bind the UI to host loopback only, never 0.0.0.0.
+      # NPM reaches it through uptime-kuma-ui-relay on 172.20.0.1:51833.
+      UPTIME_KUMA_HOST: "127.0.0.1"
+      UPTIME_KUMA_PORT: "3001"
+    restart: unless-stopped

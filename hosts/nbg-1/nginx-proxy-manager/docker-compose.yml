@@ -1,0 +1,23 @@
+# 2026-09-15: switched to network_mode: host so the host ufw policy (block-http-inbound,
+# 443 whitelist, block-all-ipv6) actually applies to the NPM-facing ports. Docker
+# port-publishing (docker-proxy + DNAT) bypassed the ufw INPUT chain entirely.
+# Proxy hosts in the NPM DB were converted from container names to stable bridge IPs
+# (host mode has no Docker DNS). Backup: docker-compose.yml.bak-hostnet-20260915_123602
+# (bridge-mode compose, same DB works in both modes).
+services:
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:2.16.0@sha256:4393e642e233e5efd5adeb7f10918d4aaea71c9ed875b94190273fc8e87f9594
+    container_name: nginx-proxy-manager
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    network_mode: host
+    volumes:
+      - ../authelia/snippets:/snippets:ro
+      - ./data:/data
+      - ./letsencrypt:/etc/letsencrypt
+    environment:
+      TZ: Europe/Berlin
+    restart: unless-stopped

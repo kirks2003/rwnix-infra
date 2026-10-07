@@ -1,0 +1,37 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408
+    container_name: mosquitto
+    restart: unless-stopped
+    networks:
+      tasmota-mesh:
+        ipv4_address: 172.18.0.2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
+  telegraf:
+    image: telegraf@sha256:b5b8291d62bf7ccc222bdacfd7229b6cc7227f1d07574ca4eb0a872e5a8f83cd
+    container_name: telegraf
+    restart: unless-stopped
+    networks:
+      - tasmota-mesh
+      - authelia_shared-grafana
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf:ro
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+
+networks:
+  tasmota-mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+  authelia_shared-grafana:
+    external: true

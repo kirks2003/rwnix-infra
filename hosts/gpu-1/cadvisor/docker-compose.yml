@@ -1,0 +1,19 @@
+services:
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.54.1
+    container_name: cadvisor
+    ports:
+      # Exposes port 8080 to the host so your central Prometheus server can scrape it
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+      # Required for Ubuntu 26 cgroups v2 compatibility
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+    command:
+      - '--docker_only=true'
+    privileged: true
+    restart: unless-stopped

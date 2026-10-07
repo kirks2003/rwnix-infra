@@ -1,0 +1,28 @@
+services:
+  wg-easy-mcp:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    image: ghcr.io/ni-c/wg-easy-mcp:sha-37613f0@sha256:09af30c3e73367e0bd0581a767fed580334df41def24ff9747f3babb64a853d2
+    container_name: wg-easy-mcp
+    user: node
+    environment:
+      WG_EASY_URL: https://wg.gw-1-vie-1-at-netcup.rwnix.net:51832
+      WG_EASY_USERNAME: admin
+      WG_EASY_PASSWORD: ${WG_EASY_PASSWORD:?set WG_EASY_PASSWORD in .env}
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    # Without this mapping the FQDN resolves to the public IP and ufw drops
+    # the 51832 attempt; re-apply on every container recreation.
+    extra_hosts:
+      wg.gw-1-vie-1-at-netcup.rwnix.net: 172.20.0.1
+    networks:
+      proxy:
+        ipv4_address: 172.20.0.8
+
+networks:
+  proxy:
+    external: true
