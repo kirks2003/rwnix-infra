@@ -4211,3 +4211,50 @@ Practical rules that came out of it, for whoever works on this next:
   default path.
 - Calibrate thresholds on the inputs the system really receives, not on the
   ones that are convenient to type.
+
+## 2026-10-07: cleaning my test entities out of Roman's knowledge graph
+
+Reported by the user: the Knowledge graph panel showed `cat`, `new food`,
+`Jarvis MCP smoke test`, `Inbox`, `Tesla`, `underground garage level 2` and
+`business terms` — all artefacts of testing, not real knowledge.
+
+**Root cause worth knowing: every answered `/api/chat` turn is ingested
+into the graph.** Probing the live assistant therefore writes entities into
+the signed-in user's own graph. The conversation turns I cleaned up earlier
+were only half the mess; the graph kept its own copy.
+
+- Backed up every Roman node and relationship first (names, types,
+  relations, negation flags) to
+  `/home/ubuntu/docker/jarvis-graph-roman.bak-20261007_225322.txt` — a
+  plain text dump that can be replayed as `store-entity` / `store-fact`
+  calls.
+- Checked the blast radius before deleting: the seven formed four
+  self-contained clusters (`cat`↔`new food`, `Tesla`↔`underground garage
+  level 2`, `Jarvis MCP smoke test`↔`Inbox`, and `business terms` alone),
+  each attached only to the Roman user node. Nothing legitimate hung off
+  them.
+- `DETACH DELETE` for exactly those seven, pinned to `owner: "Roman"`.
+- Verified after: **12 entities and 26 relationships** remain, zero
+  orphans (no Roman entity without a path to the `:User {name:"Roman"}`
+  node), no dangling reference to any deleted name anywhere in the
+  database, `REFUSES_TO_EAT` gone from the schema's relation types, and
+  Mila's single entity (`Lego`, stored 2026-10-04) untouched. The app's own
+  `/api/graph/subgraph` returns the same 13 nodes / 26 edges as Cypher.
+- `housekeeping` ↔ `kandev` (a Roman-owned pair, linked only to each other
+  and to Roman) was **left alone** — it was not in the reported list and
+  may be real. Say the word if it is test residue too.
+
+**How to probe the live assistant without polluting a user's graph:** sign
+in as **`admin`** (it is in `USERS` on vm104 and is the default
+`ADMIN_USERS`). Admin turns are deliberately not auto-ingested — the
+service account would otherwise mint `owner=admin` copies of everything it
+touches — so an admin probe exercises the brain, the tools and the logs
+while writing nothing into the graph. `tests/graph.test.mjs` pins that
+behaviour ("admin turns are not auto-ingested").
+
+Two verification queries of mine were wrong before they were right, both
+worth remembering: the `:User` node keys its name as **`name`**, not
+`user` (an orphan check written as `{user:"Roman"}` silently matches
+nothing and reports every entity as an orphan), and `/api/graph/subgraph`
+returns **`edges`**, not `links` (so a naive probe reports 0
+relationships). Both looked like data loss and were neither.
