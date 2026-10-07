@@ -30,6 +30,8 @@ Both routes point to `http://192.168.54.111:8094` and are protected by the exist
 | vie-1 | `https://jarvis.gw-1-vie-1-at-netcup.rwnix.net/` | `proxy_host.id=56` | `npm-24` | `/data/access/8` |
 | nbg-1 | `https://jarvis.gw-1-nbg-1-de-netcup.rwnix.net/` | `proxy_host.id=44` | `npm-6` | `/data/access/1` |
 
+**Region policy (binding, 2026-10-07):** because both routes front the same backend, the backend resolves the region per request from the entry's `Host` header and pins that region for every **service MCP** connection — Jarvis on nbg-1 uses only services on the nbg-1 host, Jarvis on vie-1 only services on the vie-1 host, never cross-region (user service data is per region by design). First application: the Vikunja MCP integration (per-user Vikunja accounts, one per region) — see `vikunja-mcp.md` at the repository root.
+
 The proxy files were rendered directly because NPM did not generate config files from direct SQLite inserts on restart:
 
 - vie-1: `/home/ubuntu/docker/nginx-proxy-manager/data/nginx/proxy_host/56.conf`

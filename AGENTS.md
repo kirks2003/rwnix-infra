@@ -13,6 +13,10 @@ Recurring mistake (user-reported repeatedly, 2026-10-04): a fix verified in the 
 
 Never report a fix as done based on worktree tests alone.
 
+### Jarvis region policy — service MCP connections are region-pinned (2026-10-07)
+
+**Jarvis on nbg-1 must use only service MCP connections to services on the nbg-1 host; Jarvis on vie-1 only to services on the vie-1 host.** No service MCP connection may cross regions (Vikunja today, any future service MCP included). Today one Jarvis backend (vm104) sits behind both public gateways, so the region is resolved **per request** from the public entry (gateway `Host` header) and the backend pins that region's service endpoints for the request; a user's service data is per region by design. Any new service MCP must ship with a per-region endpoint table from day one — never one global URL. Full context (Vikunja topology, per-user token design, rollout steps): `vikunja-mcp.md`.
+
 See `kandev-opencode-dsv4f-setup.md` for the Kandev opencode setup details.
 See `kandev-opencode-qwen-setup.md` for the Kandev opencode a1-qwen38-27b setup details.
 See `kandev-credential-setup.md` for the Kandev GitHub PAT credential setup.
@@ -22,3 +26,4 @@ See `scripts/host/mesh-password-rotate.py` for the emergency password rotation t
 See `jarvis/README.md` for the browser voice assistant (wake word, Whisper STT, brain, HAL 9000 answer voice, MCP web-search toggle) and `jarvis/DEPLOYMENT.md` for its live deployment, the gpu-1 Whisper/TTS service, the MCP web-search server and the measured voice-pipeline findings.
 See `ovhcloud-exporter.md` for the nbg-1 OVHcloud billing/AI-endpoint-cost exporter, the "Cloud & AI Credits" Grafana dashboard (provisioned-file workflow), the OVH in-arrears billing finding, and the live `usage/current` integration.
 See `vie1-grafana-ip-conflict.md` for the vie-1 Grafana stack, the `authelia_shared-grafana` network IP allocation, and the 2026-10-06 static-IP-conflict finding (telegraf stole grafana's pinned IP after a reboot).
+See `vikunja-mcp.md` for the Vikunja MCP design (per-user Vikunja accounts/tokens, the `@eargollo/vikunja-mcp` sidecars on both gateways) and the binding Jarvis region policy for service MCP connections.
