@@ -28,6 +28,10 @@ services:
       - .env
     ports:
       - "192.168.54.111:8094:8094"
+    volumes:
+      # The SQLite conversation database (CONVERSATION_DB_PATH points here):
+      # the Prompt/Answer panels' history must survive container rebuilds.
+      - jarvis_data:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -41,3 +45,4 @@ services:
 
 volumes:
   neo4j_data:
+  jarvis_data:

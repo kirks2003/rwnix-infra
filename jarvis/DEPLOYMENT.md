@@ -3555,3 +3555,61 @@ untouched Vikunja flag rides along as `false`.
 
 No static assets changed, so no browser hard refresh is needed (the new
 switch appears on the next page load, as `/api/config` now advertises it).
+
+## 2026-10-07: conversation history in a SQLite database, day-window slider, visible scrollbar
+
+Requested: the Prompt/Answer panels should have a visible scrollbar over
+their text, show the past **X days** of conversation, a **slider to pick
+X**, and the backend should store **all** conversations and answers in a
+database (previously an in-memory map, lost on every restart).
+
+- Every finished turn (prompt + answer + server timestamp) is now stored
+  per user in SQLite (`better-sqlite3@12`, WAL mode, table
+  `conversations(id, user, ts, prompt, answer)` indexed by
+  `(user, ts)`), in the file `CONVERSATION_DB_PATH` (default: a per-PID
+  file in the temp dir, so `node server.js` and the tests never share
+  state). `GET /api/conversation?days=N` serves the window (integer
+  1..365, default 24, anything else → 400 `invalid_days`); older turns
+  stay stored, out of the panel's view.
+- A **History** slider (1–90 days, 24 default, saved per browser in
+  `jarvis.historyDays`, the same label/slider/status pattern as the other
+  settings sliders) spans both panels and re-fetches the window on change.
+  `.transcript-list` now shows a visible thin scrollbar
+  (`scrollbar-width: thin` + `::-webkit-scrollbar*`).
+- The deployment persists it: `docker-compose.yml` mounts
+  `jarvis_data:/data`, `.env.example` documents
+  `CONVERSATION_DB_PATH=/data/conversations.db`.
+- **Build note (measured):** `better-sqlite3@12.11.1` ships **no prebuilt
+  binary for node 20** (the release assets start at ABI 127/node 22), and
+  `node:20-slim` has no Python, so the fallback `node-gyp rebuild` failed
+  the first build. The Dockerfile now installs `python3 make g++` for the
+  `npm install` step only and purges them again afterwards; the image is
+  otherwise unchanged.
+- Unit suite 155/155 (new: `?days=` windowing, `invalid_days`, and a
+  restart-persistence test that kills the backend and starts a second one
+  on the same db file). Browser suite 53 pass + 2 opt-in skips (the
+  hero/panels test now drives the slider and checks the `?days=5`
+  re-fetch).
+
+**Rolled out 2026-10-07 ~20:20.**
+
+- Backup first: `jarvis-code.bak-20261007_201421.tgz` under
+  `/home/ubuntu/docker/` (code only; `.env` backed up to
+  `jarvis/.env.bak-20261007_201421` before the `CONVERSATION_DB_PATH`
+  addition).
+- Synced `server.js`, `public/app.js`, `public/index.html`,
+  `public/style.css`, `package.json`, `package-lock.json`,
+  `docker-compose.yml`, `.env.example` and `Dockerfile` to
+  `/home/ubuntu/docker/jarvis`, appended
+  `CONVERSATION_DB_PATH=/data/conversations.db` to the live `.env`, then
+  `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served
+  `app.js`/`index.html`/`style.css`/`server.js` md5s all match the source,
+  the served HTML carries the `historyDays` slider, `?days=0` → 400
+  `invalid_days`, and a live login → `POST /api/conversation` →
+  `GET /api/conversation?days=1` round trip returned the stored entry;
+  after `docker compose restart jarvis` (sessions are in-memory and died)
+  a fresh login still got the entry back from `/data/conversations.db`.
+
+Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
+where the old UI is cached.

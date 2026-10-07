@@ -1,7 +1,9 @@
 const http = require("node:http");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const Database = require("better-sqlite3");
 const graphdb = require("./graphdb");
 
 const root = __dirname;
@@ -61,15 +63,50 @@ let ttsCursor = 0;
 // Per-user prompt history: authenticated username -> last 10 messages. Each
 // user's cache is fully isolated from every other user's.
 const conversations = new Map();
-// Per-user conversation log (the Prompt/Answer panels' scrollback):
-// authenticated username -> [{ ts, prompt, answer }]. The browser posts every
-// finished turn (brain answers and butler closings alike). The store keeps
-// everything; /api/conversation only serves the last 24 days — older entries
-// stay stored, just out of the panel's window. Capped per user so a chatty
-// account cannot grow the in-memory store without bound.
-const conversationLogs = new Map();
-const CONVERSATION_WINDOW_MS = 24 * 60 * 60 * 1000;
-const CONVERSATION_MAX_ENTRIES = 500;
+// Per-user conversation log (the Prompt/Answer panels' scrollback), in
+// SQLite so the history survives restarts and container rebuilds: the browser
+// posts every finished turn (brain answers and butler closings alike), and
+// GET /api/conversation serves the user's entries windowed to the last
+// ?days=N days (default 24, clamped 1..365) — older entries stay stored, just
+// out of the window. The db file path is CONVERSATION_DB_PATH (the deployment
+// points it at a Docker volume); the default keeps a per-process file in the
+// temp dir so a bare `node server.js` and the test backends (separate
+// processes) never share state.
+const CONVERSATION_DB_PATH = process.env.CONVERSATION_DB_PATH
+  || path.join(os.tmpdir(), `jarvis-conversations-${process.pid}.db`);
+const CONVERSATION_DEFAULT_DAYS = 24;
+const CONVERSATION_MIN_DAYS = 1;
+const CONVERSATION_MAX_DAYS = 365;
+
+function openConversationDb(dbPath) {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user TEXT NOT NULL,
+      ts TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      answer TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversations_user_ts ON conversations (user, ts);
+  `);
+  return {
+    db,
+    insert: db.prepare("INSERT INTO conversations (user, ts, prompt, answer) VALUES (@user, @ts, @prompt, @answer)"),
+    selectWindow: db.prepare("SELECT ts, prompt, answer FROM conversations WHERE user = @user AND ts >= @floor ORDER BY ts ASC, id ASC"),
+  };
+}
+const conversationStore = openConversationDb(CONVERSATION_DB_PATH);
+
+function conversationDaysFromUrl(reqUrl) {
+  const raw = new URL(reqUrl, "http://localhost").searchParams.get("days");
+  if (raw === null) return CONVERSATION_DEFAULT_DAYS;
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < CONVERSATION_MIN_DAYS || days > CONVERSATION_MAX_DAYS) return null;
+  return days;
+}
 
 // --- Login sessions ---------------------------------------------------------
 // In-memory sessions: token -> { user, createdAt }. The token travels as an
@@ -517,13 +554,16 @@ const server = http.createServer(async (req, res) => {
     }
 
     // The Prompt/Answer panels' scrollback: this user's stored conversation,
-    // newest last, windowed to the last 24 days (the store keeps older
-    // entries; the panels only show the window). Same per-user isolation as
-    // the prompt history — a foreign user's conversation is unreachable.
+    // oldest first, windowed to the last ?days=N days (default 24; the store
+    // keeps everything, the panels only show the window). Same per-user
+    // isolation as the prompt history — a foreign user's conversation is
+    // unreachable.
     if (req.method === "GET" && pathname === "/api/conversation") {
-      const log = conversationLogs.get(req.user) || [];
-      const floor = Date.now() - CONVERSATION_WINDOW_MS;
-      return json(res, 200, { requestId, entries: log.filter((entry) => Date.parse(entry.ts) >= floor) });
+      const days = conversationDaysFromUrl(req.url);
+      if (days === null) return json(res, 400, { error: "invalid_days", requestId });
+      const floor = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      const entries = conversationStore.selectWindow.all({ user: req.user, floor });
+      return json(res, 200, { requestId, entries });
     }
 
     if (req.method === "POST" && pathname === "/api/conversation") {
@@ -531,11 +571,8 @@ const server = http.createServer(async (req, res) => {
       const prompt = String(payload.prompt || "").trim().slice(0, 4000);
       const answer = String(payload.answer || "").trim().slice(0, 8000);
       if (!prompt || !answer) return json(res, 400, { error: "prompt_and_answer_required", requestId });
-      const log = conversationLogs.get(req.user) || [];
       const entry = { ts: new Date().toISOString(), prompt, answer };
-      log.push(entry);
-      if (log.length > CONVERSATION_MAX_ENTRIES) log.splice(0, log.length - CONVERSATION_MAX_ENTRIES);
-      conversationLogs.set(req.user, log);
+      conversationStore.insert.run({ user: req.user, ...entry });
       return json(res, 200, { requestId, entry });
     }
 

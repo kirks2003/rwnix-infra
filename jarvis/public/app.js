@@ -13,6 +13,7 @@ const el = Object.fromEntries([
   "silenceDelay", "silenceDelayValue", "silenceDelayStatus",
   "commandWait", "commandWaitValue", "commandWaitStatus",
   "promptText", "answerText",
+  "historyDays", "historyDaysValue", "historyDaysStatus",
   "log", "steps", "pipelineStatus", "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
@@ -38,6 +39,7 @@ const panelsStorageKey = "jarvis.panelsVisible";
 const graphSizesStorageKey = "jarvis.graphSizes";
 const silenceStorageKey = "jarvis.silenceMs";
 const commandWaitStorageKey = "jarvis.commandWaitMs";
+const historyDaysStorageKey = "jarvis.historyDays";
 const aiProfileStorageKey = "jarvis.aiProfile";
 const whisperProfileStorageKey = "jarvis.whisperProfile";
 let config;
@@ -93,6 +95,13 @@ const STOP_AFTER_SPEECH_MS = 10000;
 // per browser.
 const COMMAND_WAIT_SILENCE_MS = 3000;
 let commandWaitMs = COMMAND_WAIT_SILENCE_MS;
+// How many days of the stored conversation the Prompt/Answer panels show. The
+// backend keeps everything; the History slider (1..90) picks the window the
+// panels render, per browser.
+const HISTORY_DAYS_MIN = 1;
+const HISTORY_DAYS_MAX = 90;
+const HISTORY_DAYS_DEFAULT = 24;
+let historyDays = HISTORY_DAYS_DEFAULT;
 
 const visualizer = new CoreVisualizer(el.waveform, el.core);
 visualizer.pickAnalyser = () => {
@@ -299,6 +308,43 @@ el.commandWait.addEventListener("input", () => {
   el.commandWaitValue.textContent = silenceStopLabel(commandWaitMs);
 });
 el.commandWait.addEventListener("change", () => applyCommandWait(el.commandWait.value, true));
+
+// History days slider: how far back the Prompt/Answer panels reach into the
+// stored conversation. The backend keeps every turn; the slider picks the
+// window (1..90 days) the panels render, saved per browser. Moving it
+// re-fetches the window and re-renders both panels.
+function normalizeHistoryDays(value) {
+  const days = Number(value);
+  return Number.isInteger(days) ? Math.min(HISTORY_DAYS_MAX, Math.max(HISTORY_DAYS_MIN, days)) : HISTORY_DAYS_DEFAULT;
+}
+
+function historyDaysLabel(days) {
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function applyHistoryDays(value, persist) {
+  historyDays = normalizeHistoryDays(value);
+  el.historyDays.value = String(historyDays);
+  el.historyDaysValue.textContent = historyDaysLabel(historyDays);
+  if (persist) {
+    try {
+      localStorage.setItem(historyDaysStorageKey, String(historyDays));
+      el.historyDaysStatus.textContent = `Saved: the panels show the last ${historyDaysLabel(historyDays)} of conversation.`;
+    } catch (error) {
+      el.historyDaysStatus.textContent = `History ${historyDaysLabel(historyDays)} for this tab only; browser storage is unavailable.`;
+      log("settings", "Could not save history days", { message: error.message });
+    }
+  } else {
+    el.historyDaysStatus.textContent = `Active: the panels show the last ${historyDaysLabel(historyDays)} of conversation.`;
+  }
+  log("settings", `History ${historyDaysLabel(historyDays)}`);
+  loadConversationHistory();
+}
+el.historyDays.addEventListener("input", () => {
+  historyDays = normalizeHistoryDays(el.historyDays.value);
+  el.historyDaysValue.textContent = historyDaysLabel(historyDays);
+});
+el.historyDays.addEventListener("change", () => applyHistoryDays(el.historyDays.value, true));
 
 // One switch per MCP server (the backend advertises the list in /api/config).
 // Each flag is sent with every /api/chat request as `mcp: { id: bool }` and is
@@ -1244,9 +1290,10 @@ async function listen(session) {
 // The Prompt/Answer panels hold the conversation history, not just the
 // latest turn: every finished turn (brain answer, butler closing, manual
 // prompt) appends one entry per panel with a timestamp. The backend stores
-// the whole conversation under the signed-in user and serves the last 24
-// days (see /api/conversation in server.js); the panels are the scrollable
-// view over that. A turn in flight shows a pending answer entry until it
+// the whole conversation in SQLite under the signed-in user and serves it
+// windowed to ?days=N (see /api/conversation in server.js); the History
+// slider picks N per browser and the panels are the scrollable view over
+// the window. A turn in flight shows a pending answer entry until it
 // completes or fails.
 function formatTranscriptTime(ts) {
   return new Date(ts).toLocaleString(language === "de" ? "de-DE" : "en-GB", { dateStyle: "medium", timeStyle: "short" });
@@ -1312,7 +1359,7 @@ function recordTurn(prompt, answer) {
 
 async function loadConversationHistory() {
   try {
-    const response = await fetch("/api/conversation", { cache: "no-store", signal: AbortSignal.timeout(10000) });
+    const response = await fetch(`/api/conversation?days=${historyDays}`, { cache: "no-store", signal: AbortSignal.timeout(10000) });
     if (!response.ok) return;
     const data = await response.json();
     el.promptText.replaceChildren();
@@ -1950,6 +1997,16 @@ async function loadConfig(userFromLogin) {
     // No server default: the saved per-browser value wins over the 3 s built-in.
     applyCommandWait(savedCommandWait ?? commandWaitMs, false);
     el.commandWait.disabled = false;
+    let savedHistoryDays = null;
+    try {
+      savedHistoryDays = localStorage.getItem(historyDaysStorageKey);
+    } catch (error) {
+      log("settings", "Could not load history days");
+    }
+    // The saved per-browser value wins over the 24-day default; applying it
+    // also fetches the window and renders both panels.
+    applyHistoryDays(savedHistoryDays ?? historyDays, false);
+    el.historyDays.disabled = false;
     let savedSpeakEnabled = null;
     try {
       savedSpeakEnabled = localStorage.getItem(speakEnabledStorageKey);
@@ -2000,9 +2057,9 @@ async function loadConfig(userFromLogin) {
     setGraphView("3d"); // the live 3D view is the default panel view
     loadGraph();
     setInterval(() => { if (!document.hidden) loadGraph(); }, 15000);
-    // The conversation history the Prompt/Answer panels scroll over (the
-    // backend's 24-day view of this user's stored conversation).
-    loadConversationHistory();
+    // The conversation history the Prompt/Answer panels scroll over is loaded
+    // by applyHistoryDays above (the saved window wins over the 24-day
+    // default); the History slider re-fetches on every change.
     let savedPanels = null;
     try {
       savedPanels = localStorage.getItem(panelsStorageKey);

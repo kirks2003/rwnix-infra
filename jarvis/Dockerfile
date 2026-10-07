@@ -10,7 +10,15 @@ COPY package.json ./
 # Skip the browser download during npm install (it would land in a separate
 # cache and lack the system libraries); it is installed explicitly below.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN npm install --omit=dev
+# better-sqlite3 (the conversation history database) ships no prebuilt
+# binary for node 20 (node:20-slim), so its native module compiles at build
+# time; python3/make/g++ exist only for that compile step and are removed
+# again afterwards to keep the image small.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && npm install --omit=dev \
+    && apt-get purge -y --auto-remove python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 # The Vikunja MCP server (@eargollo/vikunja-mcp, stdio) is a published
 # package: server.js spawns /usr/local/bin/vikunja-mcp, one child per
 # (region, user), pinned to that user's own API token for that region's

@@ -637,8 +637,21 @@ progress {
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
 }
 
-/* The conversation history: every finished turn of this browser session's
-   user, newest last, scrollable inside the panel. */
+/* The History days slider: spans both panel columns above the transcript;
+   the same label/slider/status pattern as the other settings sliders. */
+.transcript-controls {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+}
+
+.transcript-controls .wake-word-controls {
+  margin-top: 0;
+}
+
+/* The conversation history: every finished turn of this user, oldest
+   first, scrollable inside the panel with a visible scrollbar (the window
+   is the History slider's day count, see /api/conversation in server.js). */
 .transcript-list {
   /* 250% taller than before (46px / 182px); the font size is unchanged. */
   min-height: 161px;
@@ -649,6 +662,27 @@ progress {
   overflow-y: auto;
   overflow-wrap: anywhere;
   padding: 2px;
+  /* Always-visible thin scrollbar: the history can run to days of entries. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) rgba(3, 8, 18, 0.4);
+}
+
+.transcript-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.transcript-list::-webkit-scrollbar-track {
+  background: rgba(3, 8, 18, 0.4);
+  border-radius: 8px;
+}
+
+.transcript-list::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 8px;
+}
+
+.transcript-list::-webkit-scrollbar-thumb:hover {
+  background: var(--cyan);
 }
 
 .transcript-entry {

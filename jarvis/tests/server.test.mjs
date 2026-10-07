@@ -1017,3 +1017,46 @@ test("the conversation log stores finished turns per user, windowed to 24 days",
   assert.ok(Date.now() - Date.parse(entry.ts) < 24 * 60 * 60 * 1000, "a fresh turn is inside the window");
   assert.equal(milaLog.entries.length, 1, JSON.stringify(milaLog.entries));
 });
+
+test("the conversation store is a database: ?days= windows it and it survives a restart", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-conversation-db-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "conversations.db");
+  const { process: first, origin: firstOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  // The test body kills `first` mid-test (the restart check), so the exit
+  // promise is shared: awaiting an already-emitted 'exit' event would hang.
+  const firstExit = new Promise((resolve) => first.once("exit", resolve));
+  t.after(async () => { first.kill(); await firstExit; });
+  const mila = await login(firstOrigin, "Mila");
+  const post = (origin_, cookie, prompt, answer) => auth(origin_, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, answer }),
+  }, cookie);
+  await post(firstOrigin, mila, "first question", "first answer");
+  await post(firstOrigin, mila, "second question", "second answer");
+  // The History slider's ?days= parameter: a fresh entry is inside any
+  // window, and invalid values are rejected (the slider is 1..90, the
+  // backend clamps 1..365).
+  const days = (daysParam) => auth(firstOrigin, `/api/conversation${daysParam}`, {}, mila);
+  const oneDay = await (await days("?days=1")).json();
+  assert.equal(oneDay.entries.length, 2, JSON.stringify(oneDay.entries));
+  const badDays = await days("?days=0");
+  assert.equal(badDays.status, 400);
+  assert.equal((await badDays.json()).error, "invalid_days");
+  const notDays = await days("?days=abc");
+  assert.equal(notDays.status, 400);
+  // Restart with the SAME db file: the stored turns come back (the panels'
+  // history must survive container rebuilds, which is the whole point of the
+  // database).
+  first.kill();
+  await firstExit;
+  const { process: second, origin: secondOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  t.after(async () => { second.kill(); await once(second, "exit"); });
+  const milaAgain = await login(secondOrigin, "Mila");
+  const survived = await (await auth(secondOrigin, "/api/conversation?days=90", {}, milaAgain)).json();
+  assert.deepEqual(
+    survived.entries.map((candidate) => candidate.prompt),
+    ["first question", "second question"],
+    JSON.stringify(survived.entries),
+  );
+});

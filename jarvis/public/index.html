@@ -58,6 +58,14 @@
       </section>
 
       <section class="transcript app-ui">
+        <div class="transcript-controls">
+          <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>
+          <div class="wake-word-controls">
+            <input id="historyDays" type="range" min="1" max="90" step="1" value="24"
+                   aria-describedby="historyDaysStatus" disabled>
+          </div>
+          <p id="historyDaysStatus" role="status">Loading history settings.</p>
+        </div>
         <div>
           <h2>Prompt</h2>
           <div id="promptText" class="transcript-list" aria-live="polite"></div>

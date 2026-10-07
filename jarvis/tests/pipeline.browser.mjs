@@ -1140,14 +1140,18 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   // Back to disarmed for the manual prompt below.
   await page.click("#enableSwitch");
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
-  // The conversation store: POSTs append, GETs serve what was stored.
+  // The conversation store: POSTs append, GETs serve what was stored. The
+  // GET urls are recorded so the History slider's ?days= parameter is
+  // checkable.
   const stored = [];
-  await page.route("**/api/conversation", (route) => {
+  const gets = [];
+  await page.route("**/api/conversation*", (route) => {
     if (route.request().method() === "POST") {
       const entry = route.request().postDataJSON();
       stored.push(entry);
       return route.fulfill({ json: { entry: { ts: new Date().toISOString(), ...entry } } });
     }
+    gets.push(route.request().url());
     return route.fulfill({ json: { entries: stored.map((entry) => ({ ts: new Date().toISOString(), ...entry })) } });
   });
   // A finished manual prompt (voice on) lands in BOTH panels with a
@@ -1200,6 +1204,24 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   assert.deepEqual(await page.evaluate(() =>
     [...document.querySelectorAll("#promptText .transcript-entry")].map((entry) => entry.textContent).length),
     2, "the prompt history survives the reload");
+  // The History slider: the panels' day window is per browser (24 default),
+  // and moving it re-fetches the window with ?days=N and re-renders both
+  // panels (the windowing itself is server-side, over the stored db).
+  assert.equal(await page.inputValue("#historyDays"), "24");
+  assert.equal(await page.textContent("#historyDaysValue"), "24 days");
+  await page.evaluate(() => {
+    const slider = document.getElementById("historyDays");
+    slider.value = "5";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  assert.equal(await page.textContent("#historyDaysValue"), "5 days");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.historyDays")), "5");
+  await page.waitForTimeout(400);
+  assert.ok(gets.some((url) => url.includes("days=5")), JSON.stringify(gets));
+  assert.equal(await page.evaluate(() =>
+    document.querySelectorAll("#promptText .transcript-entry").length),
+    2, "the re-rendered window keeps the stored entries");
 });
 
 test("the silence slider adjusts the live stop delay and persists per browser", { timeout: 75000 }, async (t) => {
