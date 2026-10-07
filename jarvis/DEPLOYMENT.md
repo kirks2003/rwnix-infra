@@ -3764,3 +3764,22 @@ the brain**. The panels read SQLite; the brain read a separate in-memory
   `tests/server.test.mjs` now filter or include `search_history` — it joins
   every offered tool list.
 - Unit suite 158/158, browser suite 53 pass + 2 opt-in skips.
+
+**Rolled out 2026-10-07 ~21:45.**
+
+- Backup first: `jarvis-code.bak-20261007_214411.tgz` under
+  `/home/ubuntu/docker/`.
+- Synced `server.js`, then `docker compose up -d --build jarvis`.
+- Verified: container `healthy`, `/api/health` `ok: true`, the container's
+  `server.js` md5 `4d4c980a…` matches the committed source, and the stored
+  conversation is intact (21 turns in Roman's 31-day window).
+- **End-to-end against the live brain**, which is the check that matters:
+  asked "What did I ask you about todos earlier?" and Jarvis answered from
+  the stored turn — quoting the earlier "actual todos?" prompt and its own
+  reply about Todo Actual, then saying that was all it found. The backend
+  log shows the matching tool call:
+  `{"msg":"history_tool","tool":"search_history","query":"todos","ms":1,"chars":499}`.
+  Same question before this change produced "this is the first question
+  you've asked me".
+
+Backend change only: no browser refresh needed.
