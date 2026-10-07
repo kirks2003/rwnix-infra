@@ -2818,7 +2818,22 @@ minimized Windows Chrome window has not been exercised in CI — worth one manua
 check after deploy (arm, minimize for >5 min to cross into intensive throttling,
 speak the wake word).
 
-**Deploy:** static assets only (`public/app.js`, `public/audio.js`,
-`public/index.html`) plus tests and docs — no image rebuild needed, but it is a
-static-asset change, so a **browser hard refresh** is required for clients to
-pick it up.
+**Rolled out 2026-10-07 ~11:30.** The change is static-asset-only
+(`public/app.js`, `public/audio.js`, `public/index.html`) plus tests and docs,
+but `public/` is baked into the image (`Dockerfile` `COPY`, no volume mount),
+so the rollout needed the standard rebuild:
+
+- Backup first: `jarvis-code.bak-20261007_112953.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js`, `public/audio.js`, `public/index.html`,
+  `tests/audio.test.mjs`, `tests/pipeline.browser.mjs` and `README.md` to
+  `/home/ubuntu/docker/jarvis`, then `docker compose up -d --build` on vm104.
+- Verified: container `healthy` (recreated, not just re-run), `/api/health`
+  returns `ok: true` with `whisperEndpoints: 3`, `brainConfigured: true`,
+  `aiProfiles: 4`, `ttsEndpoints: 1`, and the served `app.js`, `audio.js` and
+  `index.html` md5sums match the committed source byte-for-byte.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up. The manual minimized-window check above
+(arm, minimize for >5 min, speak the wake word) is still open for the user on
+Windows.
