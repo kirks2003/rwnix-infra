@@ -276,6 +276,76 @@ export function isPostSpeechStop(command, lastSpeechEndedAt, now, windowMs, { us
   return userBurst && Boolean(stopCommandIn(command, { trailing: true }));
 }
 
+// Acknowledgments ("ok", "thank you", …): the whole command is nothing the
+// brain should answer, so the pipeline ends the turn with a polite
+// butler-style closing instead of a brain round trip. Only the complete
+// command (trimmed, case- and trailing-punctuation-insensitive) counts —
+// "ok, and now check the weather" is a real command, never an acknowledgment.
+export const ACKNOWLEDGMENTS = {
+  thanks: [
+    "thank you", "thanks", "thank you very much", "thank you so much", "thanks a lot",
+    "thank you jarvis", "thank you rocky",
+    "danke", "danke schön", "danke schoen", "danke dir", "vielen dank",
+  ],
+  general: [
+    "ok", "okay", "yes", "yeah", "yep", "sure", "alright", "all right", "cool",
+    "nice", "nice one", "great", "good", "good job", "well done", "excellent",
+    "perfect", "awesome", "amazing", "brilliant", "cheers", "roger", "roger that",
+    "copy that", "understood", "got it", "no problem", "fine", "sounds good",
+    "deal", "done", "affirmative",
+    "gut", "gut so", "super", "perfekt", "genau", "klar", "alles klar", "toll",
+    "top", "ja", "ja genau", "sehr gut", "gut gemacht", "fein",
+  ],
+};
+
+// "thanks" or "general" when the whole command is an acknowledgment, else
+// null.
+export function acknowledgmentKind(command) {
+  const normalized = String(command || "").trim().toLowerCase().replace(/[.!?,;:…]+$/g, "").trim();
+  if (!normalized) return null;
+  if (ACKNOWLEDGMENTS.thanks.includes(normalized)) return "thanks";
+  if (ACKNOWLEDGMENTS.general.includes(normalized)) return "general";
+  return null;
+}
+
+// Butler-style closings for acknowledgment turns, spoken in the active
+// answer language. The closing is picked per turn and goes through the
+// normal TTS path, so a stop word can cut it like any other speech.
+export const CLOSING_LINES = {
+  en: {
+    thanks: [
+      "You are most welcome. Standing by.",
+      "It is my pleasure. Standing by.",
+      "At your service, always.",
+    ],
+    general: [
+      "Very good. Standing by.",
+      "As you wish. Standing by.",
+      "Certainly. Standing by.",
+      "Right you are. Standing by.",
+      "Most excellent. Standing by.",
+    ],
+  },
+  de: {
+    thanks: [
+      "Sehr gern geschehen. Ich stehe bereit.",
+      "Es ist mir eine Freude. Ich stehe bereit.",
+      "Zu Ihren Diensten, jederzeit.",
+    ],
+    general: [
+      "Sehr gut. Ich stehe bereit.",
+      "Wie Sie wünschen. Ich stehe bereit.",
+      "Natürlich. Ich stehe bereit.",
+      "Gerne. Ich stehe bereit.",
+    ],
+  },
+};
+
+export function pickClosing(language, kind, random = Math.random) {
+  const lines = CLOSING_LINES[language === "de" ? "de" : "en"][kind];
+  return lines[Math.floor(random() * lines.length)];
+}
+
 export const voiceSpeedRange = { min: 0.6, max: 1.6, step: 0.05, default: 1 };
 
 // The slider is a multiplier on the profile's own speed, so "1.00" always means

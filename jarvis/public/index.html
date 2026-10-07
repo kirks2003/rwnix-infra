@@ -121,7 +121,14 @@
           </div>
           <p id="silenceDelayHelp">How long the microphone must stay quiet before a recorded command is sent to Whisper. Adjusts live, even mid-recording. Saved in this browser only.</p>
           <p id="silenceDelayStatus" role="status">Loading silence settings.</p>
-          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it. The green silence bar shows time since the last voice: while wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the configured silence stop point.</p>
+          <label for="commandWait">Command wait <output id="commandWaitValue">3 s</output></label>
+          <div class="wake-word-controls">
+            <input id="commandWait" type="range" min="500" max="15000" step="500" value="3000"
+                   aria-describedby="commandWaitHelp commandWaitStatus" disabled>
+          </div>
+          <p id="commandWaitHelp">How long Jarvis waits for a command after the spoken greeting before returning to wake listening. Applies from the next greeting on. Saved in this browser only.</p>
+          <p id="commandWaitStatus" role="status">Loading command wait settings.</p>
+          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it. The green silence bar shows time since the last voice: while wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the configured silence stop point; while waiting for a command after the greeting it fills to the command-wait point.</p>
         </section>
 
         <section class="panel pipeline-panel">

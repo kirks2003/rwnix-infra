@@ -226,7 +226,7 @@ body:not(.authenticated) .app-ui {
   font-variant-numeric: tabular-nums;
 }
 
-.core.prompting, .core.recording { --stage-color: var(--green); }
+.core.prompting, .core.command, .core.recording { --stage-color: var(--green); }
 .core.transcribing { --stage-color: var(--blue); }
 .core.thinking { --stage-color: var(--amber); }
 .core.speaking { --stage-color: var(--purple); }
@@ -244,6 +244,12 @@ body:not(.authenticated) .app-ui {
   border-color: var(--green);
   box-shadow: 0 0 48px rgba(45, 255, 191, 0.75), inset 0 0 26px rgba(45, 255, 191, 0.25);
   animation: pulse 0.45s ease-in-out infinite;
+}
+
+.command .ring-a {
+  border-color: var(--green);
+  box-shadow: 0 0 40px rgba(45, 255, 191, 0.6), inset 0 0 22px rgba(45, 255, 191, 0.2);
+  animation: spin 2.6s linear infinite;
 }
 
 .recording .ring-a {

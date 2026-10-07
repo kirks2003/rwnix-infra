@@ -170,15 +170,18 @@ async function setup(t, transcribe, options = {}, pageBrowser = browser) {
   return { page, calls };
 }
 
-test("real Chromium capture completes three wake cycles with fresh valid audio", { timeout: 45000 }, async (t) => {
+test("real Chromium capture completes three answered turns with fresh valid audio", { timeout: 45000 }, async (t) => {
+  // The first turn comes through the wake word; after each spoken answer the
+  // follow-up command window opens, so the next turns chain without the wake
+  // word: one probe + completed utterance, then two command transcriptions.
   const { page, calls } = await setup(t, async () => ({ text: "Rocky! What time is it?" }));
   await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 35000 });
   await page.click("#stopButton");
   assert.equal(calls.prompts.length, 3);
   assert.deepEqual(calls.prompts, Array(3).fill("What time is it?"));
-  assert.equal(calls.audio.length, 6);
+  assert.equal(calls.audio.length, 4);
   assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "ended")));
-  assert.match(await page.textContent("#log"), /stt-6/);
+  assert.match(await page.textContent("#log"), /stt-4/);
 });
 
 test("Stop ignores late Whisper responses and allows a clean re-arm", { timeout: 30000 }, async (t) => {
@@ -261,7 +264,8 @@ test("wake word plus stop cuts a speaking answer before it finishes", { timeout:
   assert.deepEqual(calls.prompts, ["What time is it?"]);
   // The hung utterance was cancelled by the cut, not left to the TTS watchdog.
   assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
-  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Wake listening",
+  // After a stop the follow-up command window opens, not wake listening.
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command",
     null, { timeout: 10000 });
   await page.click("#stopButton");
 });
@@ -279,7 +283,8 @@ test("a bare stop word without the wake phrase cuts a speaking answer", { timeou
   assert.deepEqual(calls.prompts, ["What time is it?"]);
   // The hung utterance was cancelled by the cut, not left to the TTS watchdog.
   assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
-  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Wake listening",
+  // After a stop the follow-up command window opens, not wake listening.
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command",
     null, { timeout: 10000 });
   await page.click("#stopButton");
 });
@@ -327,44 +332,305 @@ test("a stop word inside the echoed window cuts a speaking answer on a loud user
 });
 
 test("a stop command right after the spoken answer is not sent to the brain", { timeout: 30000 }, async (t) => {
-  // The answer speaks and finishes on its own (25 ms mock). The next wake
-  // cycle then hears "Rocky stop"; inside the post-speech window it must be
-  // treated as a speech stop, not as a prompt for the brain.
+  // The answer speaks and finishes on its own (25 ms mock), then the
+  // follow-up command window opens. The next burst is transcribed as
+  // "Rocky stop": inside the post-speech window it must be treated as a
+  // speech stop (acknowledged, window stays open), not as a prompt for the
+  // brain.
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : "Rocky stop",
   }));
   await page.waitForFunction(() => document.getElementById("log").textContent.includes("after the spoken answer"),
     null, { timeout: 20000 });
   assert.deepEqual(calls.prompts, ["What time is it?"]);
-  assert.equal(await page.textContent("#stageTitle"), "Wake listening");
+  // The acknowledged stop keeps the command window open, not wake listening.
+  assert.equal(await page.textContent("#stageTitle"), "Waiting for command");
   await page.click("#stopButton");
 });
 
-test("wake-only response waits for new speech, then transcribes the command", { timeout: 30000 }, async (t) => {
-  const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky." : "What time is it?" }));
-  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Speak after the beep");
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 18000 });
+test("wake-only response greets with the user's name, then transcribes the command", { timeout: 30000 }, async (t) => {
+  const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky." : "What time is it?" }), {
+    config: { user: "Mila" },
+  });
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command");
+  // Utterance 1 is the spoken greeting naming the signed-in user, utterance
+  // 2 is the answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 18000 });
   await page.click("#stopButton");
+  assert.equal(await page.evaluate(() => savedUtterances[0].text), "Yes, Mila.");
   assert.deepEqual(calls.prompts, ["What time is it?"]);
   assert.equal(calls.audio.length, 3);
+});
+
+test("three seconds of silence after the greeting returns to wake listening", { timeout: 40000 }, async (t) => {
+  // The fixture tone plays 1 s per 6 s loop, so the wake probe fires once and
+  // the command window then sees only silence: the 3 s silence rule must
+  // close the window (and must not wait out the old 10 s).
+  const rate = 48000;
+  const fixturePath = join(temp, "quiet-after-wake-microphone.wav");
+  const loop = new AudioBufferWindow(rate, 6);
+  const samples = new Float32Array(rate * 6);
+  for (let i = 0; i < samples.length; i++) {
+    if (i / rate < 1) samples[i] = 0.3 * Math.sin(i * Math.PI * 2 * 440 / rate);
+  }
+  loop.push(samples);
+  await writeFile(fixturePath, Buffer.from(await loop.wav(0).arrayBuffer()));
+  const instance = await launchWithFixture(t, fixturePath);
+  const { page, calls } = await setup(t, async (n) => ({ text: n === 1 ? "Rocky" : "" }), {
+    config: { user: "Roman" },
+  }, instance);
+  await page.waitForFunction(() => {
+    const title = document.getElementById("stageTitle").textContent;
+    if (title !== "Waiting for command") return false;
+    window.commandWaitStartedAt = performance.now();
+    return true;
+  });
+  await page.waitForFunction(() => {
+    const title = document.getElementById("stageTitle").textContent;
+    if (title !== "Wake listening") return false;
+    window.commandWaitMs = performance.now() - (window.commandWaitStartedAt || 0);
+    return true;
+  }, null, { timeout: 15000 });
+  const waitMs = await page.evaluate(() => window.commandWaitMs);
+  assert.ok(waitMs < 8000, `greeting + 3 s silence took ${waitMs} ms`);
+  assert.equal(await page.evaluate(() => savedUtterances[0]?.text), "Yes, Roman.");
+  assert.match(await page.textContent("#log"), /No command after 3 s of silence/);
+  assert.deepEqual(calls.prompts, []);
+  await page.click("#stopButton");
+});
+
+test("the command wait slider sets the abort delay and persists per browser", { timeout: 60000 }, async (t) => {
+  // One tone per 6 s loop, so every wake cycle ends in the command window's
+  // abort: cycle 1 at the 3 s default, cycle 2 after the slider drops to
+  // 0.5 s mid-page. The abort clock runs from the greeting's end, so the
+  // wait is the greeting plus the slider value either way.
+  const rate = 48000;
+  const fixturePath = join(temp, "command-wait-slider-microphone.wav");
+  const loop = new AudioBufferWindow(rate, 6);
+  const samples = new Float32Array(rate * 6);
+  for (let i = 0; i < samples.length; i++) {
+    if (i / rate < 1) samples[i] = 0.3 * Math.sin(i * Math.PI * 2 * 440 / rate);
+  }
+  loop.push(samples);
+  await writeFile(fixturePath, Buffer.from(await loop.wav(0).arrayBuffer()));
+  const instance = await launchWithFixture(t, fixturePath);
+  const { page, calls } = await setup(t, async (n) => ({ text: n % 2 === 1 ? "Rocky" : "" }), {
+    config: { user: "Roman" },
+  }, instance);
+  assert.equal(await page.inputValue("#commandWait"), "3000");
+  assert.equal(await page.textContent("#commandWaitValue"), "3 s");
+  // Edge-detect each entry into the command stage: cycle 1 runs the 3 s
+  // default, and entering cycle 2 drops the slider to 0.5 s.
+  await page.waitForFunction(() => {
+    const title = document.getElementById("stageTitle").textContent;
+    if (title === "Waiting for command" && window.lastStage !== "Waiting for command") {
+      window.lastStage = "Waiting for command";
+      window.commandWaitCycles = (window.commandWaitCycles || 0) + 1;
+      window[`wait${window.commandWaitCycles}Start`] = performance.now();
+      if (window.commandWaitCycles === 2) {
+        const slider = document.getElementById("commandWait");
+        slider.value = "500";
+        slider.dispatchEvent(new Event("input", { bubbles: true }));
+        slider.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    } else {
+      window.lastStage = title;
+    }
+    return (window.commandWaitCycles || 0) >= 2;
+  }, null, { timeout: 30000 });
+  await page.waitForFunction(() => {
+    const title = document.getElementById("stageTitle").textContent;
+    window.lastStage = title;
+    if (title === "Wake listening" && (window.commandWaitCycles || 0) >= 2) {
+      window.wait2Ms = performance.now() - window.wait2Start;
+      return true;
+    }
+    return false;
+  }, null, { timeout: 15000 });
+  const wait2Ms = await page.evaluate(() => window.wait2Ms);
+  await page.click("#stopButton");
+  // The 0.5 s wait is greeting plus half a second; the 3 s default would take
+  // roughly six times as long.
+  assert.ok(wait2Ms < 2000, `0.5 s command wait took ${wait2Ms} ms`);
+  assert.match(await page.textContent("#log"), /No command after 500 ms of silence/);
+  assert.match(await page.textContent("#log"), /No command after 3 s of silence/);
+  assert.equal(await page.textContent("#commandWaitValue"), "500 ms");
+  assert.match(await page.textContent("#commandWaitStatus"), /Saved/);
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.commandWaitMs")), "500");
+  assert.deepEqual(calls.prompts, []);
+
+  // The saved value survives a reload (per browser, like the wake word). The
+  // reloaded page is in standby (the session was stopped above), so there is
+  // nothing left to stop.
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.inputValue("#commandWait"), "500");
+  assert.equal(await page.textContent("#commandWaitValue"), "500 ms");
+});
+
+test("a command spoken right after the greeting over the echo is captured, not lost", { timeout: 30000 }, async (t) => {
+  // The user's first command attempt rides the recording window and the
+  // completed-utterance transcription drops it (the VAD filter), so the
+  // greeting plays; the user then repeats the command as soon as the greeting
+  // ends, over its echo tail. The old code armed the window only after the
+  // echo's quiet, so a command like that landed before the transcript start
+  // and the window closed on the 3 s rule with nothing captured.
+  const rate = 48000;
+  const fixturePath = join(temp, "fast-command-microphone.wav");
+  const loop = new AudioBufferWindow(rate, 12);
+  const samples = new Float32Array(rate * 12);
+  for (let i = 0; i < samples.length; i++) {
+    const pos = i / rate;
+    if (pos < 1.2) samples[i] = 0.3 * Math.sin(i * Math.PI * 2 * 440 / rate);
+    else if (pos >= 1.65 && pos < 2.85) samples[i] = 0.3 * Math.sin(i * Math.PI * 2 * 880 / rate);
+    else if (pos >= 3.6 && pos < 4.8) samples[i] = 0.3 * Math.sin(i * Math.PI * 2 * 880 / rate);
+  }
+  loop.push(samples);
+  await writeFile(fixturePath, Buffer.from(await loop.wav(0).arrayBuffer()));
+  const instance = await launchWithFixture(t, fixturePath);
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n === 1 ? "Rocky" : n === 2 ? "" : "What time is it?",
+  }), { config: { user: "Roman" } }, instance);
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command");
+  // Utterance 1 is the spoken greeting, utterance 2 the answer to the repeated
+  // command.
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
+  await page.click("#stopButton");
+  assert.equal(await page.evaluate(() => savedUtterances[0].text), "Yes, Roman.");
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  assert.equal(calls.audio.length, 3);
+  // The command window's audio starts at the greeting's end and carries the
+  // user's 880 Hz command tone — and not the 440 Hz wake tone.
+  const wav = calls.audio[2];
+  const sampleRate = wav.readUInt32LE(24);
+  const pcm = new Int16Array(wav.buffer, wav.byteOffset + 44, (wav.length - 44) / 2);
+  const goertzel = (freq) => {
+    const k = Math.floor(0.5 + (pcm.length * freq) / sampleRate);
+    const w = (2 * Math.PI * k) / pcm.length;
+    const c = 2 * Math.cos(w);
+    let s1 = 0, s2 = 0;
+    for (let i = 0; i < pcm.length; i++) {
+      const s0 = pcm[i] + c * s1 - s2;
+      s2 = s1;
+      s1 = s0;
+    }
+    return Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - c * s1 * s2)) / pcm.length;
+  };
+  assert.ok(goertzel(880) > 1000, `command window lacks the user's 880 Hz tone (got ${goertzel(880).toFixed(1)})`);
+  assert.ok(goertzel(440) < 1000, `command window carries the 440 Hz wake tone (got ${goertzel(440).toFixed(1)})`);
+});
+
+test("a follow-up command right after the answer is captured without the wake word", { timeout: 40000 }, async (t) => {
+  // The fixture tone repeats every 4 s: the first burst wakes Jarvis, the
+  // second becomes the command after the greeting, the answer speaks, and the
+  // third burst — with no wake word in between — must be captured by the
+  // follow-up command window that opens where the answer ends.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky." : n === 3 ? "What time is it?" : "What was the second option?",
+  }), { config: { user: "Roman" } });
+  // Utterance 1 is the spoken greeting, utterances 2 and 3 the two answers.
+  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
+  await page.click("#stopButton");
+  assert.equal(await page.evaluate(() => savedUtterances[0].text), "Yes, Roman.");
+  assert.deepEqual(calls.prompts, ["What time is it?", "What was the second option?"]);
+  assert.equal(calls.audio.length, 4);
+});
+
+test("silence after the answer waits the full command wait before returning to wake listening", { timeout: 40000 }, async (t) => {
+  // One tone per 6 s loop: the wake cycle gets its command from the completed
+  // utterance, the answer speaks, and the follow-up command window then sees
+  // only silence: it must hold for the full 3 s command wait (not return
+  // immediately, and not wait out the 6 s loop) before wake listening.
+  const rate = 48000;
+  const fixturePath = join(temp, "quiet-after-answer-microphone.wav");
+  const loop = new AudioBufferWindow(rate, 6);
+  const samples = new Float32Array(rate * 6);
+  for (let i = 0; i < samples.length; i++) {
+    if (i / rate < 1) samples[i] = 0.3 * Math.sin(i * Math.PI * 2 * 440 / rate);
+  }
+  loop.push(samples);
+  await writeFile(fixturePath, Buffer.from(await loop.wav(0).arrayBuffer()));
+  const instance = await launchWithFixture(t, fixturePath);
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n === 1 ? "Rocky" : n === 2 ? "Rocky, what time is it?" : "",
+  }), { config: { user: "Roman" } }, instance);
+  await page.waitForFunction(() => {
+    const title = document.getElementById("stageTitle").textContent;
+    if (title !== "Waiting for command") return false;
+    window.commandWaitStartedAt = performance.now();
+    return true;
+  });
+  await page.waitForFunction(() => {
+    const title = document.getElementById("stageTitle").textContent;
+    if (title !== "Wake listening") return false;
+    window.commandWaitMs = performance.now() - (window.commandWaitStartedAt || 0);
+    return true;
+  }, null, { timeout: 15000 });
+  const waitMs = await page.evaluate(() => window.commandWaitMs);
+  assert.ok(waitMs < 8000, `follow-up wait took ${waitMs} ms`);
+  assert.ok(waitMs >= 2500, `follow-up wait returned before the 3 s wait elapsed (${waitMs} ms)`);
+  assert.deepEqual(calls.prompts, ["what time is it?"]);
+  assert.match(await page.textContent("#log"), /No command after 3 s of silence/);
+  await page.click("#stopButton");
+});
+
+test("a thank-you after the answer gets a butler closing instead of a brain round trip", { timeout: 40000 }, async (t) => {
+  // The 4 s loop fixture: burst 1 wakes and carries the command in one
+  // breath, the answer speaks, and burst 2 is "Thank you" in the follow-up
+  // command window — an acknowledgment with nothing to answer. Jarvis must
+  // speak the butler closing instead of round-tripping it to the brain.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : n === 3 ? "Thank you" : "",
+  }));
+  // Deterministic closing: the fixed random source picks the first line.
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Utterance 1 is the answer; the closing is spoken as its clauses
+  // ("You are most welcome." + "Standing by."), so the full closing is the
+  // join of everything after the answer.
+  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  assert.equal(await page.evaluate(() => savedUtterances.slice(1).map((u) => u.text).join(" ")),
+    "You are most welcome. Standing by.");
+  assert.match(await page.textContent("#log"), /Acknowledgment "Thank you"/);
+});
+
+test("an ok after the greeting gets a butler closing without any brain round trip", { timeout: 40000 }, async (t) => {
+  // The wake word comes alone, so the greeting plays; the user then says
+  // just "Ok" in the command window — a polite closing, and no brain call
+  // at all.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky." : n === 3 ? "Ok" : "",
+  }), { config: { user: "Roman" } });
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Utterance 1 is the spoken greeting; the closing is spoken as its
+  // clauses, so the full closing is the join of everything after it.
+  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
+  await page.click("#stopButton");
+  assert.equal(await page.evaluate(() => savedUtterances[0].text), "Yes, Roman.");
+  assert.equal(await page.evaluate(() => savedUtterances.slice(1).map((u) => u.text).join(" ")),
+    "Very good. Standing by.");
+  assert.deepEqual(calls.prompts, []);
+  assert.match(await page.textContent("#log"), /Acknowledgment "Ok"/);
 });
 
 test("an empty completed utterance after a wake probe asks for the command instead of erroring", { timeout: 30000 }, async (t) => {
   // The probe heard the wake word but the completed-utterance transcription
   // came back empty (the VAD filter drops short bursts). The pipeline must
-  // treat that as wake-only and take the command after the beep, not fail.
+  // treat that as wake-only and take the command after the greeting, not fail.
   const { page, calls } = await setup(t, async (n) => ({
     text: n === 1 ? "Rocky" : n === 2 ? "" : "What time is it?",
   }));
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 25000 });
+  // Utterance 1 is the spoken greeting, utterance 2 the answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 25000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["What time is it?"]);
 });
 
-test("an empty command window after the beep returns to wake listening without an error", { timeout: 30000 }, async (t) => {
+test("an empty command window after the greeting returns to wake listening without an error", { timeout: 30000 }, async (t) => {
   // The user spoke the command with the wake word and transcription lost it;
-  // nothing comes after the beep. The old behaviour was a dead-end red error
-  // ("Whisper returned no command"); now the pipeline returns to wake
+  // nothing comes after the greeting. The old behaviour was a dead-end red
+  // error ("Whisper returned no command"); now the pipeline returns to wake
   // listening and the next attempt retries.
   const { page, calls } = await setup(t, async (n) => ({
     text: n === 1 ? "Rocky" : n === 2 ? "Rocky." : "",

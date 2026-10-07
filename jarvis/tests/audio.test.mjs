@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AudioBufferWindow, Microphone, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst } from "../public/audio.js";
+import { AudioBufferWindow, Microphone, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst, heldVoiceAfterEcho } from "../public/audio.js";
 
 test("Whisper punctuation and case do not prevent wake detection", () => {
   assert.equal(wakeCommand("Hey, Jarvis! What's the time?", "hey jarvis"), "What's the time?");
@@ -108,6 +108,46 @@ test("a loud user burst is found against a quieter echo, uniform windows are not
   assert.equal(hasLoudBurst(noise.samples, 0, noise.end, rate), false);
   // A window too short to judge is rejected, not a false positive.
   assert.equal(hasLoudBurst(mixed.samples, 0, rate * 0.3, rate), false);
+});
+
+// The greeting's echo as the command window sees it: a short full-level head
+// (speaker-to-mic latency) plus a reverb decay with a 1 s RT60.
+function echoTail(rate, seconds) {
+  const length = Math.round(rate * seconds);
+  const block = new Float32Array(length);
+  for (let i = 0; i < length; i++) {
+    block[i] = 0.1 * Math.pow(10, -3 * i / rate) * Math.sin(i * Math.PI * 2 * 440 / rate);
+  }
+  return block;
+}
+
+test("a user voice merged into the greeting's echo holds its opening level, a pure decay does not", () => {
+  const rate = 16000;
+  const pure = new AudioBufferWindow(rate, 10);
+  pure.push(tone(rate, 0.1, 0.1));
+  pure.push(echoTail(rate, 0.9));
+  assert.equal(heldVoiceAfterEcho(pure.samples, 0, pure.end, rate), false);
+  // The same echo plus the user talking from 0.3 s on: the level holds past
+  // the 250 ms mark, so the whole window is command audio.
+  const merged = new AudioBufferWindow(rate, 10);
+  merged.push(tone(rate, 0.1, 0.1));
+  merged.push(echoTail(rate, 0.2));
+  merged.push(tone(rate, 0.7, 0.15));
+  assert.equal(heldVoiceAfterEcho(merged.samples, 0, merged.end, rate), true);
+  // A quiet user under the echo's decay floor is not detected; the window
+  // then waits out the 3 s silence rule like an echo-only window.
+  const quiet = new AudioBufferWindow(rate, 10);
+  quiet.push(tone(rate, 0.1, 0.1));
+  quiet.push(echoTail(rate, 0.2));
+  quiet.push(tone(rate, 0.7, 0.03));
+  assert.equal(heldVoiceAfterEcho(quiet.samples, 0, quiet.end, rate), false);
+  // No voice at the opening (the echo was already cancelled) has no peak to
+  // hold against.
+  const silent = new AudioBufferWindow(rate, 10);
+  silent.push(tone(rate, 1, 0.005));
+  assert.equal(heldVoiceAfterEcho(silent.samples, 0, silent.end, rate), false);
+  // A window too short to judge is rejected, not a false positive.
+  assert.equal(heldVoiceAfterEcho(merged.samples, 0, rate * 0.2, rate), false);
 });
 
 // The pipeline loop is paced by Microphone.tick, and the whole point of it is

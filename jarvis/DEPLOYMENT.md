@@ -2837,3 +2837,368 @@ It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
 required for clients to pick it up. The manual minimized-window check above
 (arm, minimize for >5 min, speak the wake word) is still open for the user on
 Windows.
+
+## 2026-10-07: spoken command-window greeting + 3 s silence abort
+
+User request: when the app waits for the command after a wake word alone, it
+should say **"Yes, <username>"** to the user, and if there is silence for
+3 s it should abort back to wake-word listening instead of waiting out the
+old 10 s.
+
+Changes (all in `public/app.js` unless noted):
+
+- New `COMMAND_WAIT_SILENCE_MS = 3000`. `waitForCommandEnd(session, start,
+  true)` (the wake-word-alone command window) no longer plays the bare beep
+  and no longer waits 10 s wall time for initial speech:
+  - the window opens with a **spoken greeting** — `Yes, <username>.`
+    (`Ja, <username>.` in German mode), where `<username>` is the signed-in
+    account — in the selected answer voice (same pipeline as answers, via the
+    new `speakText()` extracted from `speak()`; the greeting has no speech
+    wake-watch and does not touch `lastSpeechEndedAt`),
+  - the greeting's **speaker echo is let die down** (`waitForQuiet` 2 s max,
+    300 ms quiet) and the window arms at that echo-free point, so the
+    greeting itself is never transcribed as the command: the function now
+    returns the armed sample offset, and `listen()` transcribes the command
+    from there (the beep window used to start at the wake-utterance end and
+    would have included the greeting),
+  - **3 s of silence** without a command closes the window (log line
+    `No command after 3 s of silence; returning to wake listening.`) and the
+    pipeline returns to wake listening; once speech has started, the silence
+    stop slider ends the command exactly as before. The 15 s cap stays as
+    the safety net for a never-quiet microphone.
+- The beep is kept as the **fallback cue** when the voice output is switched
+  off (Text only mode) or the TTS fails (logged), and unchanged for the
+  one-breath flow ("Rocky, what time is it?").
+- New `command` pipeline stage (green, slow ring spin, hero caption
+  "Waiting for your command. Three seconds of silence returns to wake
+  listening."): `stageCaptions.command` in `app.js`, `stageMode.command =
+  "mic"` in `public/visualizer.js`, `.core.command` / `.command .ring-a` in
+  `public/style.css`; the silence bar fills in it like in `recording` once
+  command speech is heard. The old "Speak after the beep" stage is gone.
+
+Tests (`tests/pipeline.browser.mjs`):
+
+- `wake-only response greets with the user's name, then transcribes the
+  command` — with `user: "Mila"` in the config mock, the first utterance is
+  exactly `Yes, Mila.`, the command is transcribed and prompted as before
+  (3 transcribe calls).
+- `three seconds of silence after the greeting returns to wake listening` —
+  a dedicated fixture (1 s tone per 6 s loop) fires the wake probe once and
+  leaves the command window in silence; the stage must return to **Wake
+  listening** within 8 s of the greeting stage (the old 10 s wait fails
+  this), the log carries the abort line, and no brain prompt is sent.
+- The two empty-window tests updated for the greeting utterance (the answer
+  is now the second utterance, not the first).
+
+Unit **148/148**, browser **44/44** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~12:07.**
+
+- Backup first: `jarvis-code.bak-20261007_120650.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js`, `public/visualizer.js`, `public/style.css`,
+  `public/audio.js`, `tests/pipeline.browser.mjs` and `README.md` to
+  `/home/ubuntu/docker/jarvis`, then `docker compose up -d --build` on vm104.
+- Verified: container `healthy` (recreated), `/api/health` returns
+  `ok: true` with `whisperEndpoints: 3`, `brainConfigured: true`,
+  `aiProfiles: 4`, `ttsEndpoints: 1`, and the served `app.js`, `style.css`,
+  `visualizer.js` and `audio.js` md5sums match the source byte-for-byte
+  (`f73a9e83…`, `f2be27b6…`, `22708cb4…`, `d51d8849…`), with the new
+  greeting/abort strings present in the served `app.js`.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
+
+## 2026-10-07: command window no longer drops commands spoken right after the greeting
+
+User report (against the ~12:07 greeting rollout): after "Yes, Roman." the app
+jumped straight back to wake listening instead of waiting for the command.
+Live logs showed the greeting's `/api/speak` followed by no command
+transcription and no brain prompt.
+
+Root cause: the window armed only after the greeting's speaker echo settled
+(`waitForQuiet` 2 s max / 300 ms quiet, then `speechAfter = buffer.end`). A
+command spoken as soon as the greeting ends — over the echo tail, before that
+arming point — landed entirely before the transcript start, so the window
+closed on the 3 s silence rule with nothing captured.
+
+Fix (`public/audio.js`, `public/app.js`):
+
+- The command window now **arms where the greeting ends**: the transcript
+  starts at `buffer.end` the moment `speakText()` resolves, so the user's
+  command is in the window whenever it comes.
+- `waitForCommandEnd(session, start, true)` tracks the first voice event
+  (the echo tail, or a command merged into it) and a separate later event:
+  - when the first event ends, `heldVoiceAfterEcho()` (new, in `audio.js`
+    next to `hasLoudBurst`) decides what it was: a pure reverb decay never
+    holds 40 % of the window's opening peak 250 ms past the opening, while a
+    user voice talked over the echo does — the merged window is then command
+    audio and closes on that event's silence,
+  - a voice event that starts separately after the echo settled is the
+    command by construction (transcribed from its onset minus 400 ms
+    pre-roll, so no echo in the audio),
+  - 3 s of silence with neither closes the window as before (`No command
+    after 3 s of silence; returning to wake listening.`), and the 15 s cap
+    stays the safety net.
+- `stripGreetingEcho()` in `app.js` drops a leading "yes"/"ja" + the
+  user's name from a merged-window transcript, so the brain gets the command,
+  not the greeting's echoed tail.
+- The pipeline status line now shows a live countdown to the 3 s abort, and
+  the silence bar fills toward the 3 s abort while the window waits for the
+  user (flat before, once the echo settled).
+
+Tests:
+
+- Unit: `heldVoiceAfterEcho` coverage in `tests/audio.test.mjs` — merged user
+  voice detected, pure decay not, quiet user not, silent opening not, too
+  short not. Unit **149/149**.
+- Browser (`tests/pipeline.browser.mjs`): new regression
+  `a command spoken right after the greeting over the echo is captured, not
+  lost` — fixture plays the wake tone, a first command attempt the
+  completed-utterance transcription drops (VAD), then the repeated command
+  tone starting 0.35 s after the wake tone ends, across the greeting window.
+  The test fails on the old code (30 s timeout: the command is lost, no
+  answer is produced) and passes on the fix; it also asserts the command
+  window's audio carries the 880 Hz command tone and not the 440 Hz wake
+  tone (Goertzel). All four pre-existing two-step-flow tests still pass.
+  Browser **45/45** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~13:07.**
+
+- Backup first: `jarvis-code.bak-20261007_130643.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js`, `public/audio.js`, `tests/pipeline.browser.mjs`,
+  `tests/audio.test.mjs` and `README.md` to `/home/ubuntu/docker/jarvis`,
+  then `docker compose up -d --build` on vm104.
+- Verified: container `healthy` (recreated), `/api/health` returns
+  `ok: true` with `whisperEndpoints: 3`, `brainConfigured: true`,
+  `aiProfiles: 4`, `ttsEndpoints: 1`, and the served `app.js`
+  (`660ef8f6d7ba9b5c64587f0cffb65007`) and `audio.js`
+  (`cbe82b73636dd4afb6b95ac9a5a4dbde`) md5sums match the source
+  byte-for-byte, with the new `heldVoiceAfterEcho` / `stripGreetingEcho`
+  strings present in the served files.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
+
+## 2026-10-07: command wait slider (0.5-15 s) + abort clock anchored to the greeting
+
+User report (against the ~13:07 echo fix): the command stage still returned to
+wake listening immediately after "Yes, Roman." instead of waiting 3 s. Request:
+a slider, 0.5 s-15 s, for that delay.
+
+Root cause of the immediate return: the abort clock was `silentMs` — time
+since the last mic voice. The capture uses `echoCancellation: true`, so the
+spoken greeting is largely kept out of the microphone; the last voice was then
+the user's wake word itself, several seconds old. By the time the window
+armed (probe settle + completed-utterance transcription + greeting TTS),
+`silentMs` was already at or past 3 s, so the first loop tick closed the
+window on the 3 s rule.
+
+Fix (`public/app.js`, `public/index.html`):
+
+- The abort clock now runs from the **greeting's end**:
+  `session.commandWaitStartedAt` is stamped where the transcript window arms,
+  and the abort fires on `performance.now() - commandWaitStartedAt >=
+  commandWaitMs`. The status line counts the remaining seconds down and the
+  silence bar fills toward the abort (its scale follows the active cap).
+- **Command wait slider** in the Mic level panel: 0.5 s-15 s in 0.5 s steps,
+  3 s default, per browser (`jarvis.commandWaitMs` in local storage, like the
+  silence stop). The value applies from the next greeting on (the window
+  counts it down live). The 15 s command limit becomes a safety net that
+  follows the wait (`max(15 s, command wait) + 5 s`) so a 15 s wait is not
+  cut short by the old fixed cap.
+- `No command after <value> of silence; returning to wake listening.` uses
+  the slider value (e.g. `No command after 500 ms of silence`).
+
+Tests (`tests/pipeline.browser.mjs`):
+
+- New `the command wait slider sets the abort delay and persists per
+  browser` — one tone per 6 s loop fixture; cycle 1 aborts on the 3 s
+  default, the slider drops to 0.5 s when cycle 2's command stage opens, and
+  the second abort must land well under 2 s (greeting + 0.5 s). Asserts both
+  log lines, the `Saved` status, `localStorage` persistence and restoration
+  after `page.reload()` (per browser, like the wake word).
+- All pre-existing two-step-flow tests pass unchanged (default 3 s):
+  `three seconds of silence after the greeting returns to wake listening`,
+  the fast-command regression, and the two empty-window tests.
+
+Unit **149/149**, browser **46/46** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~13:41.**
+
+- Backup first: `jarvis-code.bak-20261007_134055.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js`, `public/index.html`, `README.md` and
+  `tests/pipeline.browser.mjs` to `/home/ubuntu/docker/jarvis`, then
+  `docker compose up -d --build` on vm104.
+- Verified: container `healthy` (recreated), `/api/health` returns
+  `ok: true` with `whisperEndpoints: 3`, `brainConfigured: true`,
+  `aiProfiles: 4`, `ttsEndpoints: 1`, and the served `app.js`
+  (`3a7f1c5305805c822d4e31ea31cbd4dd`) and `index.html`
+  (`e25b9baf00f083ac028671360061aa8b`) md5sums match the source
+  byte-for-byte, with the `commandWait` slider markup in the served HTML.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
+
+## 2026-10-07: record-command mode and abort timer start together, after the greeting
+
+User follow-up on the slider: the timer for returning to "wake word" should
+run **after** being in "record command" mode, not before. Previously the
+"Waiting for command" stage appeared *before* the greeting (while "Yes,
+Roman." was still playing) and the status-line counter showed elapsed time
+that included the greeting, so the wait looked like it had already started
+counting down before the app was ready to record.
+
+Fix (`public/app.js`):
+
+- While the greeting speaks, the pipeline now shows the **Speaking** stage
+  ("Saying the greeting.", TTS step active — the hero caption for `speaking`
+  is now the neutral "Speaking." so it covers both the greeting and answers).
+  No command-wait UI is visible while "Yes, <name>." plays.
+- The "Waiting for command" stage, its hero caption, the silence bar and the
+  abort clock (`session.commandWaitStartedAt`) all start at the **same
+  instant** — when the greeting ends. The full Command wait (slider value,
+  default 3 s) is spent inside the record-command mode.
+- The status-line counter measures from `commandWaitStartedAt` in the
+  post-greeting window, so its elapsed seconds never include the greeting.
+- The hero caption follows the slider: `Waiting for your command. <value> of
+  silence returns to wake listening.` (was the hardcoded "Three seconds");
+  `applyCommandWait` keeps `stageCaptions.command` in sync.
+
+Tests: all six two-step-flow browser tests pass unchanged (their
+"Waiting for command" edge now fires after the greeting; timing margins still
+hold). Unit **149/149**, browser **46/46** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~14:07.**
+
+- Backup first: `jarvis-code.bak-20261007_140701.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js` to `/home/ubuntu/docker/jarvis`, then
+  `docker compose up -d --build` on vm104.
+- Verified: container `healthy` (recreated), `/api/health` returns
+  `ok: true` with `whisperEndpoints: 3`, `brainConfigured: true`,
+  `aiProfiles: 4`, `ttsEndpoints: 1`, and the served `app.js`
+  (`d82af5c27162cca7089a58da76a39f2b`) md5sum matches the source
+  byte-for-byte, with the new "Saying the greeting." string in the served
+  asset.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
+
+## 2026-10-07: follow-up command window after a spoken answer or stop
+
+User request: after the answer speaking is finished — or the stop word cuts
+it — the assistant should jump to the record-command mode, not to wake
+listening, and wait the set Command wait for silence before returning to wake
+word.
+
+Implementation (`public/app.js`):
+
+- `waitForCommandEnd(session, start, mode)` — the third argument is now a
+  mode: `"greeting"` (as before, spoken greeting opens the window),
+  `"inline"` (command came with the wake word; only its end is awaited) and
+  the new `"post-speech"` (the window opens right where the last speech
+  ended, record stage and abort clock start at once, no greeting). The
+  echo/open/speaking phase logic and the level-hold echo test are shared by
+  both post-speech windows, so a follow-up command spoken over the answer's
+  speaker tail is captured exactly like one over the greeting's.
+- `listen()`: a turn that ends in spoken output (answered command, or a stop
+  word acknowledged via the speech watch, the wake-pipeline fallback or the
+  window itself) sets `turnEndedWithSpeech`; the probe loop then opens the
+  follow-up command window in a loop — command → answer → window — and only
+  a full Command wait of silence (or an empty window) closes it and returns
+  to wake listening. A stop word inside the follow-up window is acknowledged
+  (beep, window stays open) instead of being sent to the brain; the
+  post-speech 10 s stop window stays fresh across chained windows.
+- The abort now also requires the microphone actually quiet
+  (`silentMs >= silenceMs`) in addition to the elapsed Command wait, so a
+  command that starts in the last moment of the wait is not cut off at the
+  deadline — it just ends on the silence stop like any other command.
+- The old post-answer settle (`waitForQuiet` + 300 ms delay before the next
+  wake cycle) is gone — the window's echo phase provides the settle.
+  `VOICE_THRESHOLD` and `waitForQuiet` were removed with it.
+
+Tests (`tests/pipeline.browser.mjs`):
+
+- New `a follow-up command right after the answer is captured without the
+  wake word` — shared 4 s loop fixture: burst 1 wakes, burst 2 is the command
+  after the greeting, burst 3 (no wake word) must be captured by the
+  follow-up window; asserts two brain prompts and 4 transcriptions.
+- New `silence after the answer waits the full command wait before returning
+  to wake listening` — one tone per 6 s loop: after the answer the window
+  must hold the full 3 s (measured ≥ 2.5 s and < 8 s, so neither immediate
+  return nor waiting out the loop) before "Wake listening".
+- Updated: `real Chromium capture completes three answered turns with fresh
+  valid audio` (turns now chain through follow-up windows: 4 transcriptions
+  instead of 6), and the three stop tests now expect "Waiting for command"
+  after an acknowledged stop instead of "Wake listening".
+
+Unit **149/149**, browser **48/48** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~14:45.**
+
+- Backup first: `jarvis-code.bak-20261007_144515.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js`, `tests/pipeline.browser.mjs` and `README.md` to
+  `/home/ubuntu/docker/jarvis`, then `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served `app.js`
+  md5 matches the source.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
+
+## 2026-10-07: butler closings for acknowledgment commands
+
+User request: when the record-command window ends on a bare acknowledgment —
+"ok", "thank you", … — there is nothing to answer, so instead of
+round-tripping it to the brain Jarvis should end the turn politely, "like an
+English butler".
+
+Implementation:
+
+- `public/voice.js`: `ACKNOWLEDGMENTS` (thanks + general, English and
+  German), `acknowledgmentKind(text)` — whole-utterance match, case- and
+  trailing-punctuation-insensitive ("ok, and now check the weather" is a
+  real command, never an acknowledgment) — and `CLOSING_LINES` /
+  `pickClosing(language, kind)`: butler-style closings per turn and per
+  answer language ("Very good. Standing by.", "You are most welcome.
+  Standing by.", "Sehr gut. Ich stehe bereit.", …), injected `random`
+  parameter for testability.
+- `public/app.js`: the spoken part of `answer()` is extracted into
+  `speakAnswer(session, text)` (TTS stage, stop/interruption watch,
+  retryable speech output — unchanged behaviour); new
+  `acknowledge(session, prompt)` picks the closing, marks the brain step
+  skipped (no brain request, no graph ingestion), and speaks the closing on
+  the normal TTS path (a stop word cuts it, an interrupting command starts a
+  new brain round trip). Wired into both command paths — the probe loop
+  (wake-only / one-breath / post-greeting) and the follow-up command window —
+  after the post-speech-stop check. The closing is spoken output, so the
+  follow-up command window opens after it like after any answer.
+
+Tests:
+
+- `tests/voice.test.mjs`: whole-utterance acknowledgments recognized (ok/
+  okay/punctuation/german), real commands and stops not, `pickClosing`
+  language/kind/list invariants.
+- `tests/pipeline.browser.mjs`: `a thank-you after the answer gets a butler
+  closing instead of a brain round trip` (one brain prompt total, closing
+  clauses spoken, log line) and `an ok after the greeting gets a butler
+  closing without any brain round trip` (greeting + closing, zero brain
+  prompts). The deterministic closing comes from a stubbed `Math.random`.
+
+Unit **151/151**, browser **50/50** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~15:07.**
+
+- Backup first: `jarvis-code.bak-20261007_150659.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js`, `public/voice.js`, `tests/voice.test.mjs`,
+  `tests/pipeline.browser.mjs` and `README.md` to `/home/ubuntu/docker/jarvis`,
+  then `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served `app.js`
+  md5 matches the source.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.

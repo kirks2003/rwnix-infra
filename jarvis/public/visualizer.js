@@ -79,6 +79,7 @@ const stageMode = {
   prompting: "mic",
   listening: "mic",
   wake: "mic",
+  command: "mic",
   recording: "mic",
   transcribing: "shimmer",
   thinking: "shimmer",

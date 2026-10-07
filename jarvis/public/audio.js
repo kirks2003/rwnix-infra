@@ -183,7 +183,9 @@ export class Microphone {
   }
 
   // Audible pipeline feedback, each a distinct tone:
-  //  - beep():       880->1320 Hz sweep, "I heard the wake word" (or: speak now)
+  //  - beep():       880->1320 Hz sweep, "I heard the wake word"; for the
+  //                  command window it is the fallback cue when the spoken
+  //                  greeting is unavailable (voice output off, TTS failure)
   //  - probeBeep():  soft 660 Hz tick, a wake-probe window was just sent to Whisper
   //  - sentBeep():   higher 1760 Hz ping, the command audio was sent, transcription starts
   beep() {
@@ -285,6 +287,43 @@ export function hasLoudBurst(samples, start, end, sampleRate, options = {}) {
     } else {
       run = 0;
     }
+  }
+  return false;
+}
+
+// The command window after a spoken greeting starts where the greeting ends,
+// so its opening holds the greeting's speaker echo: a short full-level head
+// (speaker-to-mic latency) and a reverb decay that never holds its level. The
+// user's own voice, talked over that echo before it settles, does hold: true
+// when the window opens with at least 300 ms of voice and a block from 250 ms
+// past the opening reaches holdRatio of that opening peak (and the voice
+// threshold), so the whole window is command audio rather than echo to
+// discard. A pure decay is below the floor by 250 ms in any room a laptop
+// echo is audible in; a reverberant false positive costs one throwaway
+// transcription, never a missed command.
+export function heldVoiceAfterEcho(samples, start, end, sampleRate, options = {}) {
+  const { voiceThreshold = 0.012, holdRatio = 0.4, peakWindowS = 0.3, holdOffsetS = 0.25 } = options;
+  const wrap = samples.length;
+  const block = Math.max(1, Math.floor(sampleRate * 0.1));
+  start = Math.max(0, Math.floor(start));
+  end = Math.floor(end);
+  const rms = (from) => {
+    let energy = 0;
+    for (let i = 0; i < block; i++) {
+      const sample = samples[(from + i) % wrap];
+      energy += sample * sample;
+    }
+    return Math.sqrt(energy / block);
+  };
+  const peakTo = Math.min(end, start + Math.floor(sampleRate * peakWindowS));
+  if (peakTo - start < block * 3) return false;
+  let peak = 0;
+  for (let from = start; from + block <= peakTo; from += block) peak = Math.max(peak, rms(from));
+  if (peak < voiceThreshold) return false;
+  const floor = Math.max(voiceThreshold, peak * holdRatio);
+  const holdFrom = Math.min(end, start + Math.floor(sampleRate * holdOffsetS));
+  for (let from = holdFrom; from + block <= end; from += block) {
+    if (rms(from) >= floor) return true;
   }
   return false;
 }

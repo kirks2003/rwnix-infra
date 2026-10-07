@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop, STOP_COMMANDS } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop, STOP_COMMANDS, acknowledgmentKind, pickClosing, CLOSING_LINES } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -261,4 +261,48 @@ test("the speaker gets plain language without markdown or special signs", () => 
   assert.equal(textForSpeech("a * b | c > d"), "a b c d");
   assert.equal(textForSpeech(""), "");
   assert.equal(textForSpeech(null), "");
+});
+
+test("whole-utterance acknowledgments are recognized, real commands are not", () => {
+  assert.equal(acknowledgmentKind("ok"), "general");
+  assert.equal(acknowledgmentKind("OK."), "general");
+  assert.equal(acknowledgmentKind("okay?!"), "general");
+  assert.equal(acknowledgmentKind("Thank you"), "thanks");
+  assert.equal(acknowledgmentKind("thank you very much."), "thanks");
+  assert.equal(acknowledgmentKind("Danke schön"), "thanks");
+  assert.equal(acknowledgmentKind("danke!"), "thanks");
+  assert.equal(acknowledgmentKind("great"), "general");
+  assert.equal(acknowledgmentKind("Sehr gut"), "general");
+  // A real command is never an acknowledgment, even when it starts with one.
+  assert.equal(acknowledgmentKind("ok, and now check the weather"), null);
+  assert.equal(acknowledgmentKind("thank you, then set a timer"), null);
+  assert.equal(acknowledgmentKind("what is the time"), null);
+  assert.equal(acknowledgmentKind("stop"), null, "stops are handled by the stop path");
+  assert.equal(acknowledgmentKind(""), null);
+  assert.equal(acknowledgmentKind("   "), null);
+  assert.equal(acknowledgmentKind(null), null);
+});
+
+test("the butler closing matches the language and kind and stays in its list", () => {
+  // Deterministic: a fixed random source picks the first line of each list.
+  assert.equal(pickClosing("en", "thanks", () => 0), CLOSING_LINES.en.thanks[0]);
+  assert.equal(pickClosing("en", "general", () => 0), CLOSING_LINES.en.general[0]);
+  assert.equal(pickClosing("de", "thanks", () => 0), CLOSING_LINES.de.thanks[0]);
+  assert.equal(pickClosing("de", "general", () => 0), CLOSING_LINES.de.general[0]);
+  // Unknown languages fall back to English.
+  assert.ok(CLOSING_LINES.en.thanks.includes(pickClosing("fr", "thanks", () => 0)));
+  // The full range of the random source stays inside the list.
+  for (const value of [0, 0.49, 0.5, 0.99, 0.999999]) {
+    assert.ok(CLOSING_LINES.en.general.includes(pickClosing("en", "general", () => value)));
+    assert.ok(CLOSING_LINES.de.thanks.includes(pickClosing("de", "thanks", () => value)));
+  }
+  // Every closing is speakable plain language in its own language's script.
+  for (const lines of Object.values(CLOSING_LINES)) {
+    for (const kind of Object.values(lines)) {
+      for (const line of kind) {
+        assert.ok(line.length > 5, "closing is a full sentence");
+        assert.ok(!line.includes("*") && !line.includes("`"), "no markdown in closings");
+      }
+    }
+  }
 });

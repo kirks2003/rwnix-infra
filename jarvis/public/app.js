@@ -1,7 +1,8 @@
-import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst } from "./audio.js";
+import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst, heldVoiceAfterEcho } from "./audio.js";
 import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
   pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError,
-  textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop } from "./voice.js";
+  textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop,
+  acknowledgmentKind, pickClosing } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
 import { createGraph3D } from "./graph3d.js";
 import { renderGraph2d } from "./graph2d.js";
@@ -9,7 +10,9 @@ import { renderGraph2d } from "./graph2d.js";
 const el = Object.fromEntries([
   "core", "waveform", "levelReadout", "stageTitle", "stageDetail", "armButton", "stopButton",
   "clearLogButton", "micLevel", "micLevelValue", "silenceLevel", "silenceValue",
-  "silenceDelay", "silenceDelayValue", "silenceDelayStatus", "promptText", "answerText",
+  "silenceDelay", "silenceDelayValue", "silenceDelayStatus",
+  "commandWait", "commandWaitValue", "commandWaitStatus",
+  "promptText", "answerText",
   "log", "steps", "pipelineStatus", "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
@@ -34,6 +37,7 @@ const speakEnabledStorageKey = "jarvis.speakEnabled";
 const panelsStorageKey = "jarvis.panelsVisible";
 const graphSizesStorageKey = "jarvis.graphSizes";
 const silenceStorageKey = "jarvis.silenceMs";
+const commandWaitStorageKey = "jarvis.commandWaitMs";
 const aiProfileStorageKey = "jarvis.aiProfile";
 const whisperProfileStorageKey = "jarvis.whisperProfile";
 let config;
@@ -63,17 +67,15 @@ const stageCaptions = {
   standby: "Arm Jarvis to unlock audio and start wake listening. It keeps listening if you minimize the window.",
   prompting: "Opening the microphone.",
   wake: "Listening for the wake word.",
+  // applyCommandWait keeps this in sync with the Command wait slider.
+  command: "Waiting for your command. 3 s of silence returns to wake listening.",
   recording: "Recording your command.",
   transcribing: "Transcribing your words.",
   thinking: "The brain is working on an answer.",
-  speaking: "Speaking the answer.",
+  speaking: "Speaking.",
   error: "Something went wrong. See the Live log for details.",
 };
 
-// The capture voice threshold in audio.js: below it, sound is not tracked
-// as voice. Used for the post-answer settle so the assistant's own voice
-// (speaker echo) dies down before the next wake window starts.
-const VOICE_THRESHOLD = 0.012;
 // While an answer is being spoken, a parallel watch listens for the wake
 // phrase; saying wake word + "stop" (or another command) cuts the speech.
 // Like the wake probes it fires on the trailing edge of mic voice (350 ms
@@ -84,6 +86,13 @@ const speechStopped = Symbol("speech stopped by voice");
 // still counts as a speech stop: the wake pipeline is the fallback for the
 // cut the speech wake-watch could not make while the audio was playing.
 const STOP_AFTER_SPEECH_MS = 10000;
+// The command window after a wake word alone opens with a spoken greeting
+// ("Yes, <name>."); this much silence without a command closes it again and
+// returns to wake listening instead of waiting out the old 10 s. The
+// Command wait slider (COMMAND_WAIT_MIN_MS-COMMAND_WAIT_MAX_MS) overrides it
+// per browser.
+const COMMAND_WAIT_SILENCE_MS = 3000;
+let commandWaitMs = COMMAND_WAIT_SILENCE_MS;
 
 const visualizer = new CoreVisualizer(el.waveform, el.core);
 visualizer.pickAnalyser = () => {
@@ -251,6 +260,45 @@ el.silenceDelay.addEventListener("input", () => {
   el.silenceLevel.max = silenceMs;
 });
 el.silenceDelay.addEventListener("change", () => applySilenceDelay(el.silenceDelay.value, true));
+
+// Command wait slider: how long the post-greeting command window stays open
+// before returning to wake listening when no command came. The 3 s default is
+// the built-in abort; the per-browser value wins, applies from the next
+// greeting on (the window counts it down live) and persists per browser.
+const COMMAND_WAIT_MIN_MS = 500;
+const COMMAND_WAIT_MAX_MS = 15000;
+
+function normalizeCommandWaitMs(value) {
+  const ms = Number(value);
+  return Number.isFinite(ms)
+    ? Math.round(Math.min(COMMAND_WAIT_MAX_MS, Math.max(COMMAND_WAIT_MIN_MS, ms)))
+    : COMMAND_WAIT_SILENCE_MS;
+}
+
+function applyCommandWait(value, persist) {
+  commandWaitMs = normalizeCommandWaitMs(value);
+  el.commandWait.value = String(commandWaitMs);
+  el.commandWaitValue.textContent = silenceStopLabel(commandWaitMs);
+  // The hero caption carries the current wait, so it follows the slider.
+  stageCaptions.command = `Waiting for your command. ${silenceStopLabel(commandWaitMs)} of silence returns to wake listening.`;
+  if (persist) {
+    try {
+      localStorage.setItem(commandWaitStorageKey, String(commandWaitMs));
+      el.commandWaitStatus.textContent = `Saved: wake listening returns after ${silenceStopLabel(commandWaitMs)} without a command.`;
+    } catch (error) {
+      el.commandWaitStatus.textContent = `Command wait ${silenceStopLabel(commandWaitMs)} for this tab only; browser storage is unavailable.`;
+      log("settings", "Could not save command wait", { message: error.message });
+    }
+  } else {
+    el.commandWaitStatus.textContent = `Active: wake listening returns after ${silenceStopLabel(commandWaitMs)} without a command.`;
+  }
+  log("settings", `Command wait ${silenceStopLabel(commandWaitMs)}`);
+}
+el.commandWait.addEventListener("input", () => {
+  commandWaitMs = normalizeCommandWaitMs(el.commandWait.value);
+  el.commandWaitValue.textContent = silenceStopLabel(commandWaitMs);
+});
+el.commandWait.addEventListener("change", () => applyCommandWait(el.commandWait.value, true));
 
 // One switch per MCP server (the backend advertises the list in /api/config).
 // Each flag is sent with every /api/chat request as `mcp: { id: bool }` and is
@@ -786,74 +834,207 @@ function updateMeters() {
   el.micLevelValue.textContent = `${Math.round(el.micLevel.value)}%`;
   const silentMs = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000;
   // Trailing silence while wake listening and while recording a command once
-  // voice has been heard; flat while waiting for a separate command after a
-  // wake word alone, and while the answer speaks or the pipeline is idle.
+  // voice has been heard; while the command window waits for the user after a
+  // wake word alone the bar fills toward the command-wait abort (counted
+  // from the greeting's end) instead of sitting flat, and it stays flat while
+  // the answer speaks or the pipeline is idle.
   const kind = visualizer.stage;
   let silence = 0;
   if (kind === "wake" || kind === "transcribing" || kind === "thinking"
     || ((kind === "recording" || kind === "prompting") && session.commandHeard)) {
     silence = Math.min(silenceMs, silentMs);
+  } else if (kind === "command") {
+    silence = session.commandHeard
+      ? Math.min(silenceMs, silentMs)
+      : (session.commandWaitStartedAt ? Math.min(commandWaitMs, performance.now() - session.commandWaitStartedAt) : 0);
   }
+  // The bar's scale follows the active cap so both fills reach 100% at their
+  // own trigger point.
+  const barMax = kind === "command" && !session.commandHeard ? commandWaitMs : silenceMs;
+  if (Number(el.silenceLevel.max) !== barMax) el.silenceLevel.max = barMax;
   el.silenceLevel.value = silence;
   el.silenceValue.textContent = `${Math.round(silence)} ms`;
   const status = pipelineStatus();
   if (status !== el.pipelineStatus.textContent) el.pipelineStatus.textContent = status;
 }
 
-async function waitForCommandEnd(session, start, needsSpeech) {
+// The signed-in account's name, so the command window opens with "Yes, Mila."
+// rather than a bare beep.
+function greetingText() {
+  const name = authedUser || "there";
+  return language === "de" ? `Ja, ${name}.` : `Yes, ${name}.`;
+}
+
+// When the user's command merged into the greeting's echo event, the command
+// window's audio starts at the greeting's end and its transcript can open
+// with the echoed name (or a "yes"/"ja" plus the name). Drop that prefix so
+// the brain gets the command, not the greeting's tail.
+function stripGreetingEcho(text) {
+  const name = (authedUser || "").trim().toLowerCase();
+  const words = text.trim().split(/\s+/);
+  const plain = (word) => word.toLowerCase().replace(/[^a-zäöüß0-9]/g, "");
+  let drop = 0;
+  if (name) {
+    if (["yes", "yeah", "yep", "ja"].includes(plain(words[0] || "")) && plain(words[1] || "") === name) drop = 2;
+    else if (plain(words[0] || "") === name) drop = 1;
+  }
+  return words.slice(drop).join(" ");
+}
+
+// The command window opens with the spoken greeting, so the user hears that
+// the assistant is listening. The beep keeps that cue when the voice output
+// is switched off or the TTS fails.
+async function announceCommandWindow(session) {
+  if (!speakEnabled) {
+    session.mic.beep();
+    log("tts", "Voice output is off; the command window opens with a beep.");
+    return;
+  }
+  try {
+    await speakText(session, greetingText(), session.signal);
+  } catch (error) {
+    if (session.signal.aborted) throw error;
+    log("tts", `Greeting failed (${error.message}); falling back to the beep.`);
+    session.mic.beep();
+  }
+}
+
+// Waits for the command to end and returns the sample offset its audio starts
+// at (false closes the window instead). The mode decides how the window
+// opens:
+//
+// "greeting" — the wake word was spoken alone: the window opens with the
+// spoken greeting and its transcript starts where the greeting ends, so the
+// user's command is captured whenever it comes — even over the greeting's
+// echo tail. That first voice event is the echo, or the user's command merged
+// into it: when it ends, a level hold past the echo's decay
+// (heldVoiceAfterEcho) marks it as command audio, and a voice event that
+// starts separately afterwards is the command by construction.
+// "post-speech" — the window opens right where a spoken answer (or a
+// stop-acknowledged turn) ended: the record stage and its abort clock start
+// at once, so the user can chain the next command without the wake word. The
+// echo phase sorts out the answer's speaker tail exactly like the greeting's.
+// "inline" — the command was already spoken with the wake word; only its end
+// is awaited (no abort clock).
+//
+// For the two post-speech modes, commandWaitMs (the Command wait slider,
+// 3 s default) without a command closes the window and returns to wake
+// listening. The clock runs from the window's opening, not from the last mic
+// voice, because browser echo cancellation can keep the spoken audio out of
+// the capture entirely — then the last voice is the wake word or some older
+// event and the silence clock would already be spent when the window opens.
+// Once speech has started, the silence stop ends it like any other command.
+async function waitForCommandEnd(session, start, mode) {
   const buffer = session.mic.buffer;
   const started = performance.now();
-  stage(needsSpeech ? "prompting" : "recording", needsSpeech ? "Speak after the beep" : "Listening for command",
-    `Stops after ${silenceStopLabel(silenceMs)} of silence.`, "record");
-  if (needsSpeech) session.mic.beep();
-  const speechAfter = start + (needsSpeech ? buffer.sampleRate * 0.3 : 0);
-  session.commandHeard = !needsSpeech;
+  let speechAfter = start;
+  let eventStart = 0;
+  let openAt = 0;
+  let phase = "";
+  const postSpeech = mode !== "inline";
+  // Safety net for a never-quiet microphone; a long command wait must stay
+  // open past the old 15 s, so the cap follows the wait.
+  const capMs = postSpeech ? Math.max(15000, commandWaitMs) + 5000 : 15000;
+  if (mode === "greeting") {
+    // The greeting is spoken before the command window opens: the record
+    // stage, its silence bar and its abort clock all start when the greeting
+    // ends, so the full command wait runs after the user has heard it —
+    // nothing counts down while "Yes, <name>." is still playing.
+    session.commandHeard = false;
+    stage("speaking", "Speaking", "Saying the greeting.", "tts");
+    await announceCommandWindow(session);
+    check(session);
+    // The transcript starts where the spoken greeting ends: everything the
+    // user says from here on is in the window. The greeting's echo tail
+    // shares that opening with a fast command, so it is sorted out below
+    // instead of waiting it out (which used to exclude commands spoken right
+    // after the greeting).
+    speechAfter = buffer.end;
+  }
+  if (postSpeech) {
+    // The window opens where the last speech ended (greeting or answer);
+    // everything from there is command audio.
+    session.commandHeard = false;
+    session.commandWaitStartedAt = performance.now();
+    stage("command", "Waiting for command",
+      `Say your command now. ${silenceStopLabel(commandWaitMs)} of silence returns to wake listening.`, "record");
+    phase = "echo";
+  } else {
+    stage("recording", "Listening for command", `Stops after ${silenceStopLabel(silenceMs)} of silence.`, "record");
+    session.commandHeard = true;
+  }
   let shown = 0;
-  while (performance.now() - started < 15000) {
+  while (performance.now() - started < capMs) {
     await tick(session);
-    if (buffer.lastVoice > speechAfter) session.commandHeard = true;
     const silentMs = (buffer.end - buffer.lastVoice) / buffer.sampleRate * 1000;
-    // This stage can hold for up to 15 s on a noisy microphone that never goes
-    // quiet, so count down in the pipeline status line rather than looking
-    // frozen. Updated without stage() so the live log is not flooded.
-    const elapsed = performance.now() - started;
+    if (postSpeech) {
+      if (phase === "echo" && silentMs >= silenceMs) {
+        // The first voice event (echo tail, or a command merged into it) has
+        // ended; the window is open for a separate command.
+        phase = "open";
+        openAt = buffer.end;
+        const source = mode === "greeting" ? "greeting's" : "answer's";
+        if (heldVoiceAfterEcho(buffer.samples, speechAfter, buffer.end, buffer.sampleRate)) {
+          // The user talked over the echo: the whole window is command audio
+          // and closes on this event's silence, transcribed from where the
+          // opening speech ended.
+          session.commandHeard = true;
+          log("vad", `Command heard over the ${source} echo`);
+        }
+      } else if (phase === "open" && !session.commandHeard && buffer.lastVoice > openAt) {
+        // A voice event that started after the echo settled is the command.
+        phase = "speaking";
+        eventStart = Math.max(speechAfter, buffer.lastVoice - buffer.sampleRate * 0.4);
+        session.commandHeard = true;
+        log("vad", mode === "greeting" ? "Command heard after the greeting" : "Command heard after the answer");
+      }
+      if (session.commandHeard) {
+        mark("vad", "active");
+        if (silentMs >= silenceMs) {
+          mark("record", "done");
+          mark("vad", "done");
+          return eventStart || speechAfter;
+        }
+      } else if (silentMs >= silenceMs && performance.now() - session.commandWaitStartedAt >= commandWaitMs) {
+        // No command after the opening speech: let the caller return to wake
+        // listening instead of surfacing a dead-end pipeline error. The wait
+        // also needs the mic actually quiet, so a command that starts in the
+        // last moment of the wait is not cut off at the deadline — it just
+        // ends on the silence stop like any other command.
+        log("record", `No command after ${silenceStopLabel(commandWaitMs)} of silence; returning to wake listening.`);
+        return false;
+      }
+    } else {
+      if (buffer.lastVoice > speechAfter) session.commandHeard = true;
+      if (session.commandHeard) {
+        mark("vad", "active");
+        if (silentMs >= silenceMs) {
+          mark("record", "done");
+          mark("vad", "done");
+          return speechAfter;
+        }
+      }
+    }
+    // This stage can hold for up to the command limit on a noisy microphone
+    // that never goes quiet, so count down in the pipeline status line
+    // rather than looking frozen. Updated without stage() so the live log is
+    // not flooded. The post-speech windows count from their own start, so
+    // the elapsed seconds never include the opening speech.
+    const elapsed = postSpeech
+      ? performance.now() - session.commandWaitStartedAt
+      : performance.now() - started;
     if (elapsed - shown >= 500) {
       shown = elapsed;
       pipelineStatusOverride = session.commandHeard
-        ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(silenceMs - silentMs))} ms more silence, or at the 15 s limit.`
-        : `Waiting for speech: ${(elapsed / 1000).toFixed(1)} s of 10 s. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
+        ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(silenceMs - silentMs))} ms more silence, or at the limit.`
+        : `Waiting for command: ${(elapsed / 1000).toFixed(1)} s. ${Math.max(1, Math.ceil((commandWaitMs - (performance.now() - session.commandWaitStartedAt)) / 1000))} s of silence returns to wake listening. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
       el.pipelineStatus.textContent = pipelineStatus();
     }
-    if (session.commandHeard) {
-      mark("vad", "active");
-      if (silentMs >= silenceMs) {
-        mark("record", "done");
-        mark("vad", "done");
-        return true;
-      }
-    } else if (performance.now() - started > 10000) {
-      // No voice after the beep: let the caller return to wake listening
-      // instead of surfacing a dead-end pipeline error.
-      return false;
-    }
   }
-  log("record", "15-second command limit reached; transcribing captured speech");
+  log("record", "Command limit reached; transcribing captured speech");
   mark("record", "done");
   mark("vad", "done");
-  return true;
-}
-
-// After an answer, let the assistant's own voice (speaker echo) die down
-// before the next wake window, so the first probe of the new cycle is not
-// contaminated. Bounded, so a never-quiet microphone only delays the cycle.
-async function waitForQuiet(session, maxMs, quietMs) {
-  const deadline = performance.now() + maxMs;
-  let quietFor = 0;
-  while (performance.now() < deadline) {
-    quietFor = session.mic.buffer.level < VOICE_THRESHOLD ? quietFor + 100 : 0;
-    if (quietFor >= quietMs) return;
-    await session.mic.tick(100, session.signal);
-  }
+  return eventStart || speechAfter;
 }
 
 async function listen(session) {
@@ -867,6 +1048,10 @@ async function listen(session) {
     let speechFrom = null;
     stage("wake", "Wake listening", `Say "${config.wakePhrase}".`, "wake");
     try {
+      // True once a turn ended in spoken output (an answered command or an
+      // acknowledged stop word): the follow-up command window then opens
+      // instead of returning straight to wake listening.
+      let turnEndedWithSpeech = false;
       for (;;) {
         await tick(session);
         if (buffer.lastVoice <= probedThrough) continue;
@@ -898,15 +1083,15 @@ async function listen(session) {
         mark("wake", "done");
         log("wake", "Detected; completing the buffered utterance");
         // Capture continues during the Whisper request, including command tails.
-        await waitForCommandEnd(session, start, false);
+        await waitForCommandEnd(session, start, "inline");
         const fullText = await withStepRetries(session, "command transcription", () => transcribe(session, start, "command"));
         let prompt = wakeCommand(fullText, config.wakePhrase);
         // The probe heard the wake phrase but the completed-utterance
         // transcription came back empty (the VAD filter drops short bursts):
         // treat it as a wake-only utterance and ask for the command after the
-        // beep instead of failing the pipeline.
+        // greeting instead of failing the pipeline.
         if (prompt === null && !fullText.trim()) {
-          log("wake", "Completed utterance came back empty; waiting for the command after the beep.");
+          log("wake", "Completed utterance came back empty; waiting for the command after the greeting.");
           prompt = "";
         }
         if (prompt === null) {
@@ -915,20 +1100,23 @@ async function listen(session) {
           // and stay in wake listening instead of erroring. With speaker echo
           // the window's transcript is the answer's own words plus the stop
           // word, so the match needs a loud user burst in the window's audio.
-          if (isPostSpeechStop(fullText, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS,
-              { userBurst: hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate) })) {
-            log("tts", `Stop word ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer without a wake phrase; staying in wake listening.`);
+      if (isPostSpeechStop(fullText, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS,
+               { userBurst: hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate) })) {
+            log("tts", `Stop word ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer without a wake phrase; opening the follow-up command window.`);
             session.mic.beep();
-            session.lastSpeechEndedAt = 0;
+            turnEndedWithSpeech = true;
             break;
           }
           throw new Error("Whisper did not confirm the wake phrase in the completed utterance.");
         }
         if (!prompt) {
-          const commandStart = buffer.end;
-          const commandCaptured = await waitForCommandEnd(session, commandStart, true);
-          if (commandCaptured) {
-            const commandText = await withStepRetries(session, "command transcription", () => transcribe(session, commandStart, "command"));
+          // The window starts where the spoken greeting ends; a command that
+          // merged into the greeting's echo is transcribed with it, so the
+          // echoed name is stripped from the front of the result.
+          const commandWindow = await waitForCommandEnd(session, buffer.end, "greeting");
+          if (commandWindow) {
+            const rawCommand = await withStepRetries(session, "command transcription", () => transcribe(session, commandWindow, "command"));
+            const commandText = stripGreetingEcho(rawCommand);
             prompt = wakeCommand(commandText, config.wakePhrase) ?? commandText.trim();
           }
         } else {
@@ -936,8 +1124,9 @@ async function listen(session) {
         }
         if (!prompt) {
           // The command was spoken with the wake word and transcription lost
-          // it, or nothing came after the beep: a red error here is a dead
-          // end, so return to wake listening and let the next attempt retry.
+          // it, or nothing came after the greeting: a red error here is a
+          // dead end, so return to wake listening and let the next attempt
+          // retry.
           log("wake", "No command captured with or after the wake word; returning to wake listening.");
           break;
         }
@@ -945,19 +1134,61 @@ async function listen(session) {
         // A stop command heard shortly after a spoken answer is not a prompt
         // for the brain; it just confirms the speech is over. The burst-gated
         // match covers the echoed window, exactly like the wake pipeline above.
-        if (isPostSpeechStop(prompt, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS,
-            { userBurst: hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate) })) {
-          log("tts", `Stop command ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer; staying in wake listening.`);
+     if (isPostSpeechStop(prompt, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS,
+             { userBurst: hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate) })) {
+          log("tts", `Stop command ${Math.round((performance.now() - session.lastSpeechEndedAt) / 100) / 10}s after the spoken answer; opening the follow-up command window.`);
           session.mic.beep();
-          session.lastSpeechEndedAt = 0;
+          turnEndedWithSpeech = true;
+          break;
+        }
+        if (acknowledgmentKind(prompt)) {
+          // Nothing for the brain to answer: end the turn politely. The
+          // closing is spoken output, so the follow-up command window opens
+          // after it like after any answer.
+          await acknowledge(session, prompt);
+          turnEndedWithSpeech = true;
           break;
         }
         await answer(session, prompt);
-        // Let the spoken answer die down, then exclude confirmation sounds from
-        // the next wake window.
-        await waitForQuiet(session, 1000, 200);
-        await delay(300, session.signal);
+        turnEndedWithSpeech = true;
         break;
+      }
+      // After an answered or stop-acknowledged turn the next command can come
+      // without the wake word: the record-command window opens where the
+      // speech ended (its echo phase sorts out the speaker tail) and only a
+      // full command wait of silence returns to wake listening.
+      if (turnEndedWithSpeech) {
+        for (;;) {
+          check(session);
+          const commandWindow = await waitForCommandEnd(session, buffer.end, "post-speech");
+          if (!commandWindow) break;
+          const rawCommand = await withStepRetries(session, "command transcription", () => transcribe(session, commandWindow, "command"));
+          const followUp = wakeCommand(rawCommand, config.wakePhrase) ?? rawCommand.trim();
+          if (!followUp) {
+            log("wake", "No command after the answer; returning to wake listening.");
+            break;
+          }
+          mark("whisper", "done");
+          // A stop word inside the follow-up window is the same escape hatch
+          // (the user cut the answer and then says "stop" again, or the
+          // window's audio carries the stop over the answer's echo):
+          // acknowledge it and keep the window open instead of prompting the
+          // brain. lastSpeechEndedAt stays fresh, so the 10 s post-speech
+          // window still applies.
+          if (isPostSpeechStop(followUp, session.lastSpeechEndedAt, performance.now(), STOP_AFTER_SPEECH_MS,
+              { userBurst: hasLoudBurst(buffer.samples, commandWindow, buffer.end, buffer.sampleRate) })) {
+            log("tts", "Stop word after the spoken answer; keeping the command window open.");
+            session.mic.beep();
+            continue;
+          }
+          if (acknowledgmentKind(followUp)) {
+            // Polite closing instead of a brain round trip; the closing is
+            // spoken output, so the window re-opens after it.
+            await acknowledge(session, followUp);
+            continue;
+          }
+          await answer(session, followUp);
+        }
       }
     } catch (error) {
       check(session);
@@ -995,6 +1226,13 @@ async function answer(session, prompt) {
   // Ingestion of this turn runs server-side after the response; give it a
   // moment, then refresh the graph panel so the new facts show up.
   if (mcpFlags.graph) setTimeout(() => loadGraph(), 4000);
+  await speakAnswer(session, result.answer);
+}
+
+// The spoken part of a turn, shared by brain answers and the butler
+// closings: the TTS stage, the stop/interruption watch and the retryable
+// speech output, all on the normal TTS path.
+async function speakAnswer(session, text) {
   if (!speakEnabled) {
     mark("tts", "skipped");
     log("tts", "Voice output is switched off; the answer stays text only.");
@@ -1006,7 +1244,7 @@ async function answer(session, prompt) {
   const speech = new AbortController();
   session.speech = speech;
   try {
-    const followUp = await withStepRetries(session, "speech output", () => speak(session, result.answer, speech));
+    const followUp = await withStepRetries(session, "speech output", () => speak(session, text, speech));
     check(session);
     if (followUp === null) {
       mark("tts", "done");
@@ -1028,13 +1266,43 @@ async function answer(session, prompt) {
   }
 }
 
+// An acknowledgment ("ok", "thank you", …) has nothing for the brain to
+// answer: pick a polite butler closing in the active language and speak it
+// on the normal TTS path (stop and interruption included). The brain step is
+// marked skipped and no brain request or graph ingestion happens.
+async function acknowledge(session, prompt) {
+  check(session);
+  el.promptText.textContent = prompt;
+  const kind = acknowledgmentKind(prompt);
+  const closing = pickClosing(language, kind);
+  log("brain", `Acknowledgment "${prompt}"; the brain is skipped — a polite closing is spoken instead.`);
+  mark("brain", "skipped");
+  el.answerText.textContent = closing;
+  await speakAnswer(session, closing);
+}
+
 async function speak(session, text, speech) {
+  const signal = AbortSignal.any([session.signal, speech.signal]);
+  const watch = watchForVoiceCommand(session, signal, speech);
+  try {
+    return await speakText(session, text, signal, watch);
+  } finally {
+    watch.stop();
+    // Timestamps the end of the spoken answer (natural or cut) so the wake
+    // pipeline can still treat a following "stop" command as a speech stop.
+    session.lastSpeechEndedAt = performance.now();
+  }
+}
+
+// The voice playback itself, shared by answers (speak) and the command
+// window's spoken greeting (announceCommandWindow, without a speech watch).
+// Returns the interrupting command when the speech was cut by voice, else
+// null.
+async function speakText(session, text, signal, watch = null) {
   const profile = voiceProfiles[voiceId];
   // The printed answer stays verbatim; only the speaker gets plain language
   // without special signs.
   const spoken = textForSpeech(text);
-  const signal = AbortSignal.any([session.signal, speech.signal]);
-  const watch = watchForVoiceCommand(session, signal, speech);
   try {
     if (language === "de") {
       // The self-hosted engine (Kokoro) has no German voices, so German is
@@ -1067,13 +1335,8 @@ async function speak(session, text, speech) {
     await speakWithSynthesis(session, splitForSpeech(spoken, profile.chunkChars), profile, signal);
     return null;
   } catch (error) {
-    if (error === speechStopped) return watch.command;
+    if (error === speechStopped) return watch?.command ?? null;
     throw error;
-  } finally {
-    watch.stop();
-    // Timestamps the end of the spoken answer (natural or cut) so the wake
-    // pipeline can still treat a following "stop" command as a speech stop.
-    session.lastSpeechEndedAt = performance.now();
   }
 }
 
@@ -1523,6 +1786,15 @@ async function loadConfig(userFromLogin) {
     // applySilenceDelay also sets the vad step name and the silence bar scale.
     applySilenceDelay(savedSilence ?? config.silenceMs, false);
     el.silenceDelay.disabled = false;
+    let savedCommandWait = null;
+    try {
+      savedCommandWait = localStorage.getItem(commandWaitStorageKey);
+    } catch (error) {
+      log("settings", "Could not load command wait", { message: error.message });
+    }
+    // No server default: the saved per-browser value wins over the 3 s built-in.
+    applyCommandWait(savedCommandWait ?? commandWaitMs, false);
+    el.commandWait.disabled = false;
     let savedSpeakEnabled = null;
     try {
       savedSpeakEnabled = localStorage.getItem(speakEnabledStorageKey);
