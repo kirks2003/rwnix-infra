@@ -2,7 +2,7 @@ import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase, hasLou
 import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
   pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError,
   textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop,
-  acknowledgmentKind, pickClosing } from "./voice.js";
+  acknowledgmentKind, acknowledgmentIn, pickClosing } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
 import { createGraph3D } from "./graph3d.js";
 import { renderGraph2d } from "./graph2d.js";
@@ -1077,6 +1077,23 @@ async function listen(session) {
         const text = await withStepRetries(session, "wake probe", () => transcribe(session, start, "wake"));
         failures = 0;
         if (wakeCommand(text, config.wakePhrase) === null) {
+          // A bare acknowledgment ("ok", "thank you") right after a spoken
+          // turn — the follow-up window already closed — is the same polite
+          // ending as inside the window: full match anywhere, or a trailing
+          // match over the answer's echo gated by a loud user burst, exactly
+          // like the post-speech stop fallback (same 10 s window).
+          const ackKind = session.lastSpeechEndedAt > 0 &&
+              performance.now() - session.lastSpeechEndedAt < STOP_AFTER_SPEECH_MS
+            ? acknowledgmentIn(text) ??
+              (hasLoudBurst(buffer.samples, start, buffer.end, buffer.sampleRate) &&
+               acknowledgmentIn(text, { trailing: true }))
+            : null;
+          if (ackKind) {
+            log("wake", `Acknowledgment ${JSON.stringify(text.trim())} after the spoken turn; a polite closing is spoken instead of the brain.`);
+            await acknowledge(session, text.trim());
+            turnEndedWithSpeech = true;
+            break;
+          }
           stage("wake", "Wake listening", `No wake phrase heard. Say "${config.wakePhrase}".`, "wake");
           continue;
         }
@@ -1181,7 +1198,13 @@ async function listen(session) {
             session.mic.beep();
             continue;
           }
-          if (acknowledgmentKind(followUp)) {
+          // The trailing match (burst-gated, like the stop fallback) covers
+          // the echo-merged window: the answer's own last words plus the
+          // user's "Ok" transcribe as one utterance.
+          const ackKind = acknowledgmentIn(followUp) ??
+            (hasLoudBurst(buffer.samples, commandWindow, buffer.end, buffer.sampleRate) &&
+             acknowledgmentIn(followUp, { trailing: true }));
+          if (ackKind) {
             // Polite closing instead of a brain round trip; the closing is
             // spoken output, so the window re-opens after it.
             await acknowledge(session, followUp);
@@ -1273,7 +1296,10 @@ async function speakAnswer(session, text) {
 async function acknowledge(session, prompt) {
   check(session);
   el.promptText.textContent = prompt;
-  const kind = acknowledgmentKind(prompt);
+  // The prompt may be a full transcript whose last phrase is the
+  // acknowledgment (echo-merged window), so the trailing match resolves the
+  // kind when the full command is not one on its own.
+  const kind = acknowledgmentKind(prompt) ?? acknowledgmentIn(prompt, { trailing: true }) ?? "general";
   const closing = pickClosing(language, kind);
   log("brain", `Acknowledgment "${prompt}"; the brain is skipped — a polite closing is spoken instead.`);
   mark("brain", "skipped");

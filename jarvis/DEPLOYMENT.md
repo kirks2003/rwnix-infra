@@ -3202,3 +3202,65 @@ Unit **151/151**, browser **50/50** (2 skipped: the opt-in live tests).
 
 It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
 required for clients to pick it up.
+
+## 2026-10-07: butler closing for acknowledgments after the follow-up window closed
+
+User report: after the answer finished, saying "ok" or "thank you" produced no
+closing at all — the pipeline jumped straight to "Wake listening".
+
+Root cause: the closing only fired for acknowledgments captured *inside* the
+follow-up command window (Command wait, 3 s default). An acknowledgment spoken
+after the window had already closed on silence hit the wake probe's
+"no wake phrase heard" branch and was silently dropped. Secondary gap: an
+echo-merged window (the answer's own last words in front of the user's "Ok")
+transcribed as one utterance and failed the whole-utterance match, so it went
+to the brain instead.
+
+Implementation:
+
+- `public/voice.js`: `acknowledgmentKind` is now a wrapper around
+  `acknowledgmentIn(command, { trailing })` — whole-utterance match as before,
+  or, with `trailing`, the last phrase of a longer transcript may be the
+  acknowledgment ("Done. Ok.", "It is 12:00. Thank you.", "Es ist 12 Uhr.
+  Danke."); callers gate the looser match with a loud user burst, exactly like
+  the post-speech stop fallback.
+- `public/app.js`:
+  - wake probe, no-wake-phrase branch: when a spoken turn ended within the
+    same 10 s post-speech window (`STOP_AFTER_SPEECH_MS`) as the stop
+    fallback, a transcript that is a bare acknowledgment (full match, or
+    trailing match + `hasLoudBurst` in the probe window) now ends the turn via
+    `acknowledge()` — polite closing, brain skipped — and opens the follow-up
+    command window after the closing, instead of "No wake phrase heard".
+  - in-window path: the trailing match (burst-gated) is added next to the
+    whole-utterance match, so an echo-merged "…answer words… Ok" gets the
+    closing instead of a brain round trip.
+  - `acknowledge()` resolves the closing kind through the same full-then-
+    trailing match (defaulting to "general"), so an echo-merged transcript
+    still picks the right closing line.
+
+Tests:
+
+- `tests/voice.test.mjs`: `a trailing acknowledgment inside an echoed
+  transcript is recognized, commands are not` (EN + DE trailing matches,
+  non-trailing stays strict, mid-command acknowledgments never match).
+- `tests/pipeline.browser.mjs`: `an ok after the follow-up window closed still
+  gets a butler closing in wake listening` — quiet 6 s loop fixture: wake +
+  command, answer, the follow-up window aborts on 3 s of silence, then the
+  next tone ("Ok", after the window closed) must still get the closing:
+  exactly one brain prompt total, closing clauses spoken, no "No wake phrase
+  heard" line in the log.
+
+Unit **152/152**, browser **51 pass** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~15:37.**
+
+- Backup first: `jarvis-code.bak-20261007_153735.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/app.js`, `public/voice.js`, `tests/voice.test.mjs`,
+  `tests/pipeline.browser.mjs` and `README.md` to `/home/ubuntu/docker/jarvis`,
+  then `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served `app.js`
+  md5 matches the source.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.

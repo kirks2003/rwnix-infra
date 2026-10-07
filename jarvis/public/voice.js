@@ -298,14 +298,35 @@ export const ACKNOWLEDGMENTS = {
   ],
 };
 
-// "thanks" or "general" when the whole command is an acknowledgment, else
-// null.
-export function acknowledgmentKind(command) {
+// "thanks" or "general" when the command is an acknowledgment, else null.
+// Without trailing, the whole command (trimmed, case- and
+// trailing-punctuation-insensitive) must be an acknowledgment —
+// "ok, and now check the weather" is a real command, never an
+// acknowledgment. With trailing, the last phrase of a longer transcript may
+// be the acknowledgment: the speaker's echo puts the answer's own words in
+// front of the user's "ok" / "thank you", and the caller gates that looser
+// match with a loud user burst in the window's audio.
+export function acknowledgmentIn(command, { trailing = false } = {}) {
   const normalized = String(command || "").trim().toLowerCase().replace(/[.!?,;:…]+$/g, "").trim();
   if (!normalized) return null;
   if (ACKNOWLEDGMENTS.thanks.includes(normalized)) return "thanks";
   if (ACKNOWLEDGMENTS.general.includes(normalized)) return "general";
+  if (trailing) {
+    for (const list of [ACKNOWLEDGMENTS.thanks, ACKNOWLEDGMENTS.general]) {
+      for (const phrase of list) {
+        if (normalized.endsWith(` ${phrase}`)) {
+          return list === ACKNOWLEDGMENTS.thanks ? "thanks" : "general";
+        }
+      }
+    }
+  }
   return null;
+}
+
+// "thanks" or "general" when the whole command is an acknowledgment, else
+// null.
+export function acknowledgmentKind(command) {
+  return acknowledgmentIn(command);
 }
 
 // Butler-style closings for acknowledgment turns, spoken in the active

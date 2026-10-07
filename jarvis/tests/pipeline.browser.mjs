@@ -595,6 +595,41 @@ test("a thank-you after the answer gets a butler closing instead of a brain roun
   assert.match(await page.textContent("#log"), /Acknowledgment "Thank you"/);
 });
 
+test("an ok after the follow-up window closed still gets a butler closing in wake listening", { timeout: 40000 }, async (t) => {
+  // One tone per 6 s loop: the wake cycle gets its command, the answer
+  // speaks, the follow-up command window sees only silence and aborts after
+  // the 3 s command wait — back in wake listening. The next tone (the user's
+  // "Ok", said after the window already closed) must still end the turn with
+  // the polite butler closing: not a brain round trip, and not dropped as
+  // "no wake phrase heard".
+  const rate = 48000;
+  const fixturePath = join(temp, "ok-after-window-closed-microphone.wav");
+  const loop = new AudioBufferWindow(rate, 6);
+  const samples = new Float32Array(rate * 6);
+  for (let i = 0; i < samples.length; i++) {
+    if (i / rate < 1) samples[i] = 0.3 * Math.sin(i * Math.PI * 2 * 440 / rate);
+  }
+  loop.push(samples);
+  await writeFile(fixturePath, Buffer.from(await loop.wav(0).arrayBuffer()));
+  const instance = await launchWithFixture(t, fixturePath);
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n === 1 ? "Rocky" : n === 2 ? "Rocky, what time is it?" : n === 3 ? "Ok" : "",
+  }), { config: { user: "Roman" } }, instance);
+  // Deterministic closing: the fixed random source picks the first line.
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Utterance 1 is the answer; the closing is spoken as its clauses
+  // ("Very good." + "Standing by."), so the full closing is the join of
+  // everything after the answer.
+  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["what time is it?"]);
+  assert.equal(await page.evaluate(() => savedUtterances.slice(1).map((u) => u.text).join(" ")),
+    "Very good. Standing by.");
+  const logText = await page.textContent("#log");
+  assert.match(logText, /Acknowledgment "Ok" after the spoken turn/);
+  assert.doesNotMatch(logText, /No wake phrase heard/);
+});
+
 test("an ok after the greeting gets a butler closing without any brain round trip", { timeout: 40000 }, async (t) => {
   // The wake word comes alone, so the greeting plays; the user then says
   // just "Ok" in the command window — a polite closing, and no brain call

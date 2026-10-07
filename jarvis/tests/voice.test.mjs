@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop, STOP_COMMANDS, acknowledgmentKind, pickClosing, CLOSING_LINES } from "../public/voice.js";
+import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech, pickSynthesisVoice, pickGermanSynthesisVoice, NeuralVoice, textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop, STOP_COMMANDS, acknowledgmentKind, acknowledgmentIn, pickClosing, CLOSING_LINES } from "../public/voice.js";
 
 test("answers are split into speakable clauses without losing text", () => {
   assert.deepEqual(splitForSpeech("It is 14:05. Shall I continue?"), ["It is 14:05.", "Shall I continue?"]);
@@ -281,6 +281,26 @@ test("whole-utterance acknowledgments are recognized, real commands are not", ()
   assert.equal(acknowledgmentKind(""), null);
   assert.equal(acknowledgmentKind("   "), null);
   assert.equal(acknowledgmentKind(null), null);
+});
+
+test("a trailing acknowledgment inside an echoed transcript is recognized, commands are not", () => {
+  // The speaker's echo puts the answer's own last words in front of the
+  // user's "ok" / "thank you"; only the last phrase may be the
+  // acknowledgment (the caller gates this with a loud user burst).
+  assert.equal(acknowledgmentIn("Ok"), "general");
+  assert.equal(acknowledgmentIn("Thank you."), "thanks");
+  assert.equal(acknowledgmentIn("Done. Ok.", { trailing: true }), "general");
+  assert.equal(acknowledgmentIn("It is 12:00. Thank you.", { trailing: true }), "thanks");
+  assert.equal(acknowledgmentIn("Es ist 12 Uhr. Danke.", { trailing: true }), "thanks");
+  assert.equal(acknowledgmentIn("Wetter ist schön. Gut.", { trailing: true }), "general");
+  // Without trailing the echoed transcript is a real (merged) command, not
+  // an acknowledgment.
+  assert.equal(acknowledgmentIn("Done. Ok."), null);
+  // The acknowledgment in the middle of a command is never a trailing match.
+  assert.equal(acknowledgmentIn("ok, and now check the weather", { trailing: true }), null);
+  assert.equal(acknowledgmentIn("thank you, then set a timer", { trailing: true }), null);
+  assert.equal(acknowledgmentIn("what is the time", { trailing: true }), null);
+  assert.equal(acknowledgmentIn("", { trailing: true }), null);
 });
 
 test("the butler closing matches the language and kind and stays in its list", () => {
