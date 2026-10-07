@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,10 @@ let mode = "success";
 const historyToolOffers = [];
 const historyToolResults = [];
 const historySeedMessages = [];
+// The fake embedding endpoint above: "down" makes it fail, so the degraded
+// keyword-only path is testable.
+let embeddingMode = "up";
+const embeddingCalls = [];
 let receivedAuth;
 let disconnected;
 let received;
@@ -78,6 +83,30 @@ before(async () => {
     if (req.url.endsWith("audio/speech") && mode !== "failure") {
       res.writeHead(200, { "content-type": "audio/wav" }).end(await wavBuffer(0.2));
       return;
+    }
+    if (req.url.endsWith("/embeddings")) {
+      // A deterministic stand-in for the embedding model: each text maps to
+      // counts over three concept groups, so words that MEAN the same thing
+      // (car / Tesla / Wagen) share a dimension and unrelated texts are
+      // orthogonal. That is enough to exercise ranking, the score floor and
+      // the keyword/semantic union without a real model in the test.
+      res.setHeader("content-type", "application/json");
+      if (embeddingMode === "down") return res.writeHead(503).end('{"error":"embeddings unavailable"}');
+      const groups = [
+        ["car", "cars", "tesla", "wagen", "park", "parked", "parkt", "garage", "tiefgarage"],
+        ["vikunja", "token", "env"],
+        ["weather", "sunny", "wetter"],
+      ];
+      const body = JSON.parse(received.toString("utf8") || "{}");
+      const inputs = Array.isArray(body.input) ? body.input : [body.input];
+      embeddingCalls.push(inputs);
+      return res.writeHead(200).end(JSON.stringify({
+        object: "list",
+        data: inputs.map((input, index) => {
+          const words = String(input).toLowerCase().match(/[a-zäöüß]+/g) || [];
+          return { object: "embedding", index, embedding: groups.map((group) => words.filter((word) => group.includes(word)).length) };
+        }),
+      }));
     }
     res.setHeader("content-type", "application/json");
     if (mode === "failure") {
@@ -157,12 +186,15 @@ before(async () => {
         const toolResult = (body.messages || []).find((message) => message.role === "tool");
         if (body.tools && !toolResult) {
           historyToolOffers.push((body.tools || []).map((tool) => tool.function?.name));
+          // Search what the user actually asked, the way a real brain would,
+          // so each test picks its own query through the prompt it sends.
+          const lastUser = [...(body.messages || [])].reverse().find((message) => message.role === "user");
           return res.end(JSON.stringify({
             choices: [{
               message: {
                 role: "assistant",
                 content: null,
-                tool_calls: [{ id: "call_history", type: "function", function: { name: "search_history", arguments: JSON.stringify({ query: "Vikunja token", days: 90 }) } }],
+                tool_calls: [{ id: "call_history", type: "function", function: { name: "search_history", arguments: JSON.stringify({ query: String(lastUser?.content || ""), days: 90 }) } }],
               },
             }],
           }));
@@ -1099,6 +1131,137 @@ test("the brain can search the user's stored conversation, scoped to that user",
   mode = "success";
 });
 
+test("history search is semantic: it finds the turn that means the same thing", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-semantic-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { process: child, origin: backendOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: join(dir, "conversations.db"),
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+  const mila = await login(backendOrigin, "Mila");
+  const post = (cookie, prompt, answer) => auth(backendOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, answer }),
+  }, cookie);
+  // Not one word of the query appears in this turn — keyword search cannot
+  // find it, which is the whole point of the feature.
+  await post(roman, "my Tesla is in the garage", "Noted, Roman.");
+  await post(roman, "what is the weather", "Sunny.");
+  // The same meaning, in German: a multilingual embedding finds it too.
+  await post(roman, "wo parkt der Wagen", "In der Tiefgarage.");
+  // Mila's turn means the same thing: it must still never cross over.
+  await post(mila, "my car is parked in the garage", "Noted, Mila.");
+  // The POSTs embed in the background; give the fire-and-forget calls a beat.
+  await setTimeoutPromise(500);
+
+  mode = "history-tool";
+  historyToolResults.length = 0;
+  await auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "where did I park my car?" }),
+  }, roman);
+  const result = historyToolResults[0];
+  // Found by meaning alone, and labelled as such with its similarity.
+  assert.match(result, /my Tesla is in the garage/, result);
+  assert.match(result, /matched by meaning, similarity \d\.\d\d/, result);
+  // Across languages too.
+  assert.match(result, /wo parkt der Wagen/, result);
+  // The unrelated turn stays out: the score floor is doing its job.
+  assert.doesNotMatch(result, /Sunny/, result);
+  // And the semantic half is owner-scoped like the keyword half.
+  assert.doesNotMatch(result, /Noted, Mila/, result);
+  mode = "success";
+});
+
+test("a failing embedding endpoint degrades to keyword search instead of failing the turn", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-degrade-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { process: child, origin: backendOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: join(dir, "conversations.db"),
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+  await auth(backendOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "the Vikunja token is in the env", answer: "Stored." }),
+  }, roman);
+  await setTimeoutPromise(300);
+  embeddingMode = "down";
+  t.after(() => { embeddingMode = "up"; });
+  mode = "history-tool";
+  historyToolResults.length = 0;
+  const response = await auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "the Vikunja token" }),
+  }, roman);
+  // The turn still succeeds, the word match still comes back, and the brain
+  // is told the meaning half was unavailable rather than silently losing it.
+  assert.equal(response.status, 200);
+  assert.match(historyToolResults[0], /the Vikunja token is in the env/);
+  assert.match(historyToolResults[0], /meaning-based matching was unavailable/);
+  mode = "success";
+});
+
+test("without an embedding endpoint the search is keyword-only and says so", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-nokey-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { process: child, origin: backendOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: join(dir, "conversations.db"),
+    EMBEDDING_BASE_URL: "", BRAIN_OVHCLOUD_BASE_URL: "",
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+  await auth(backendOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "the Vikunja token is in the env", answer: "Stored." }),
+  }, roman);
+  mode = "history-tool";
+  historyToolResults.length = 0;
+  await auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "the Vikunja token" }),
+  }, roman);
+  assert.match(historyToolResults[0], /the Vikunja token is in the env/);
+  assert.match(historyToolResults[0], /meaning-based matching is not configured/);
+  mode = "success";
+});
+
+test("turns stored before the feature are embedded by the startup backfill", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-backfill-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "conversations.db");
+  // First backend: no embedding endpoint, so the turn is stored with no vector
+  // — exactly the state of the live database before this feature shipped.
+  const { process: first, origin: firstOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: dbPath, EMBEDDING_BASE_URL: "", BRAIN_OVHCLOUD_BASE_URL: "",
+  });
+  const firstExit = new Promise((resolve) => first.once("exit", resolve));
+  t.after(async () => { first.kill(); await firstExit; });
+  const roman = await login(firstOrigin, "Roman");
+  await auth(firstOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "my Tesla is in the garage", answer: "Noted, Roman." }),
+  }, roman);
+  first.kill();
+  await firstExit;
+  // Second backend, same db, embeddings configured: the backfill picks the
+  // old row up and it becomes findable by meaning.
+  const { process: second, origin: secondOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  t.after(async () => { second.kill(); await once(second, "exit"); });
+  const romanAgain = await login(secondOrigin, "Roman");
+  await setTimeoutPromise(700);
+  mode = "history-tool";
+  historyToolResults.length = 0;
+  await auth(secondOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "where did I park my car?" }),
+  }, romanAgain);
+  assert.match(historyToolResults[0], /my Tesla is in the garage/, historyToolResults[0]);
+  assert.match(historyToolResults[0], /matched by meaning/, historyToolResults[0]);
+  mode = "success";
+});
+
 test("a history search with no hits says so instead of inventing one", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-history-miss-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -1117,7 +1280,8 @@ test("a history search with no hits says so instead of inventing one", async (t)
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ prompt: "what about the Vikunja token?" }),
   }, roman);
-  assert.match(historyToolResults[0], /No earlier conversation/);
+  // The miss is explicit about both halves having been tried.
+  assert.match(historyToolResults[0], /Nothing in this user's last 90 days of conversation matches .*by words or by meaning/);
   mode = "success";
 });
 

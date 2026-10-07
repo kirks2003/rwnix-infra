@@ -3783,3 +3783,64 @@ the brain**. The panels read SQLite; the brain read a separate in-memory
   you've asked me".
 
 Backend change only: no browser refresh needed.
+
+## 2026-10-07: semantic search over the stored conversation
+
+Requested right after the keyword version shipped: keyword search misses
+the turn the user means. "Where did I park my car" never matches a turn
+that only ever said "Tesla" or "Wagen".
+
+**Picking the endpoint (measured, not assumed).** Probed the fleet's
+existing OpenAI-compatible backends from vm104: the self-hosted vLLM
+DeepSeek is chat-only (`POST /embeddings` → 404) and so is the OVH default
+route, but the OVH model list carries `bge-m3`, `Qwen3-Embedding-8B` and
+`bge-multilingual-gemma2`. `bge-m3` answered in ~0.3 s with 1024 dims.
+Chose it for being multilingual — this app has a DE/EN switch, and a
+German turn must be findable by an English query.
+
+**Threshold, calibrated on real turns** rather than guessed. Query "where
+did I park my car?" against seven stored-turn texts scored:
+
+| turn | cosine |
+| --- | --- |
+| "my Tesla is in the underground garage on level 2" | 0.605 |
+| "wo steht mein Wagen / In der Tiefgarage, Ebene 2" | 0.614 |
+| "I bought a new bike yesterday" | 0.489 |
+| "the Vikunja token is in the .env" | 0.413 |
+| "actual todos?" | 0.413 |
+| "what is the weather today" | 0.374 |
+
+Related 0.60-0.61, unrelated 0.37-0.49, so `EMBEDDING_MIN_SCORE` defaults
+to **0.55**, in the gap. Note both relevant turns share *no word* with the
+query — keyword search finds neither.
+
+- `conversation_embeddings(conversation_id, model, dims, vec)`, a separate
+  table so a model change is a DELETE, never a migration of the
+  conversation itself. Vectors are stored L2-normalised, so the query-time
+  cosine is a plain dot product.
+- Turns are embedded on write (fire-and-forget; a failure only means that
+  turn is keyword-only until the next backfill) and a bounded background
+  backfill at startup embeds everything older — which is how the existing
+  live conversation got vectors without a migration step.
+- `search_history` is now the **union** of the two halves, keyword first:
+  an exact hit is never pushed out by a vector one, and each hit is
+  labelled `(matched by words | meaning, similarity 0.xx | both)`.
+- Brute-force cosine over one user's rows, on purpose: a user's
+  conversation is thousands of rows at most and 1024 floats each scans in
+  milliseconds. A vector index would be machinery without a measured
+  problem.
+- **Degradation is explicit**: no endpoint configured, or the endpoint
+  down, leaves the keyword half answering and tells the brain the meaning
+  half was unavailable — it never fails the turn.
+- Both halves pin `user` inside the store, so the semantic half is
+  owner-scoped exactly like the keyword half.
+- `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` /
+  `EMBEDDING_MIN_SCORE` in `.env.example`; the URL and key fall back to the
+  OVHcloud brain profile, so no new credential was needed.
+- Tests use a deterministic fake embedding endpoint (texts map to counts
+  over three concept groups, so car/Tesla/Wagen share a dimension): the
+  semantic-only hit, the cross-language hit, the score floor excluding the
+  unrelated turn, cross-user isolation, the degraded path with the
+  endpoint down, the unconfigured path, and the startup backfill picking
+  up a turn stored before the feature existed.
+- Unit suite 162/162, browser suite 53 pass + 2 opt-in skips.

@@ -92,6 +92,15 @@ function openConversationDb(dbPath) {
       answer TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_conversations_user_ts ON conversations (user, ts);
+    -- One embedding per stored turn, for semantic search. Separate table so a
+    -- model change is a DELETE here, never a migration of the conversation
+    -- itself: the turns are the data, the vectors are a derived index.
+    CREATE TABLE IF NOT EXISTS conversation_embeddings (
+      conversation_id INTEGER PRIMARY KEY REFERENCES conversations (id) ON DELETE CASCADE,
+      model TEXT NOT NULL,
+      dims INTEGER NOT NULL,
+      vec BLOB NOT NULL
+    );
   `);
   return {
     db,
@@ -99,6 +108,21 @@ function openConversationDb(dbPath) {
     selectWindow: db.prepare("SELECT ts, prompt, answer FROM conversations WHERE user = @user AND ts >= @floor ORDER BY ts ASC, id ASC"),
     // The brain's short-term memory after a restart: the newest turns of this
     // user, newest first (the caller reverses them into chronological order).
+    // Turns of this user that have no vector yet for the current model — the
+    // backfill queue (existing rows, and any row whose embedding call failed).
+    selectUnembedded: db.prepare(`SELECT c.id, c.prompt, c.answer FROM conversations c
+      LEFT JOIN conversation_embeddings e ON e.conversation_id = c.id AND e.model = @model
+      WHERE e.conversation_id IS NULL ORDER BY c.id DESC LIMIT @limit`),
+    insertEmbedding: db.prepare(`INSERT INTO conversation_embeddings (conversation_id, model, dims, vec)
+      VALUES (@id, @model, @dims, @vec)
+      ON CONFLICT (conversation_id) DO UPDATE SET model = @model, dims = @dims, vec = @vec`),
+    // Every embedded turn of ONE user, for the cosine scan. Pinned to the
+    // signed-in user here, like search() below: the vectors are per-account
+    // data, not a shared index.
+    selectVectors: db.prepare(`SELECT c.id, c.ts, c.prompt, c.answer, e.vec FROM conversations c
+      JOIN conversation_embeddings e ON e.conversation_id = c.id AND e.model = @model
+      WHERE c.user = @user AND c.ts >= @floor`),
+    countEmbedded: db.prepare(`SELECT COUNT(*) AS n FROM conversation_embeddings WHERE model = @model`),
     selectRecent: db.prepare("SELECT ts, prompt, answer FROM conversations WHERE user = @user ORDER BY ts DESC, id DESC LIMIT @limit"),
     // Free-text search over this user's own stored turns, newest first. The
     // term list is variable, so the WHERE clause is built per call — the
@@ -110,7 +134,7 @@ function openConversationDb(dbPath) {
         `(prompt LIKE @term${index} ESCAPE '\\' OR answer LIKE @term${index} ESCAPE '\\')`).join(" AND ");
       const params = { user, floor, limit };
       terms.forEach((term, index) => { params[`term${index}`] = `%${escapeLike(term)}%`; });
-      return db.prepare(`SELECT ts, prompt, answer FROM conversations
+      return db.prepare(`SELECT id, ts, prompt, answer FROM conversations
         WHERE user = @user AND ts >= @floor AND ${conditions}
         ORDER BY ts DESC, id DESC LIMIT @limit`).all(params);
     },
@@ -123,6 +147,126 @@ function escapeLike(term) {
   return term.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 const conversationStore = openConversationDb(CONVERSATION_DB_PATH);
+
+// --- Semantic search over the stored conversation -------------------------
+//
+// Keyword search misses the thing the user actually wants: "where did I park
+// my car" never matches a turn that only ever said "Tesla" or "Wagen". So each
+// stored turn also gets an embedding, and search_history ranks by cosine
+// similarity as well as by words.
+//
+// The endpoint is OpenAI-compatible (`POST /embeddings`). It defaults to the
+// OVHcloud profile the brain already uses, so no new credential is needed;
+// point EMBEDDING_* at any other server (a self-hosted llama.cpp or vLLM with
+// an embedding model) to move it. Unset and unavailable are both fine: search
+// degrades to keyword-only and says so.
+const EMBEDDING_BASE_URL = process.env.EMBEDDING_BASE_URL || process.env.BRAIN_OVHCLOUD_BASE_URL || "";
+const EMBEDDING_API_KEY = process.env.EMBEDDING_API_KEY || process.env.BRAIN_OVHCLOUD_API_KEY || "";
+// bge-m3: multilingual, so a German turn is found by an English query and the
+// other way round — which this app needs, having a language switch. Measured
+// on the fleet's endpoint: 1024 dims, ~0.3 s for a small batch.
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "bge-m3";
+// Measured against real turns with bge-m3: related turns scored 0.60-0.61
+// (including across languages) and unrelated ones 0.37-0.49, so 0.55 sits in
+// the gap. Raise it for stricter hits, lower it for more recall.
+const EMBEDDING_MIN_SCORE = Number(process.env.EMBEDDING_MIN_SCORE || 0.55);
+const EMBEDDING_TIMEOUT_MS = 20000;
+// One embedding covers a whole turn (prompt + answer); longer turns are cut,
+// since the opening of a turn carries its topic.
+const EMBEDDING_INPUT_CHARS = 2000;
+const EMBEDDING_BATCH = 16;
+const embeddingConfigured = Boolean(EMBEDDING_BASE_URL);
+
+function embeddingText(prompt, answer) {
+  return `${prompt}\n${answer}`.replace(/\s+/g, " ").trim().slice(0, EMBEDDING_INPUT_CHARS);
+}
+
+// Vectors are stored L2-normalised, so cosine similarity is a plain dot
+// product at query time and the scan stays cheap.
+function normalize(vector) {
+  const vec = Float32Array.from(vector);
+  let sum = 0;
+  for (const value of vec) sum += value * value;
+  const length = Math.sqrt(sum) || 1;
+  for (let i = 0; i < vec.length; i += 1) vec[i] /= length;
+  return vec;
+}
+
+function dot(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) sum += a[i] * b[i];
+  return sum;
+}
+
+async function embed(inputs, signal) {
+  if (!embeddingConfigured) throw new Error("No embedding endpoint configured");
+  const headers = { "content-type": "application/json" };
+  if (EMBEDDING_API_KEY) headers.authorization = `Bearer ${EMBEDDING_API_KEY}`;
+  const response = await fetch(`${EMBEDDING_BASE_URL}/embeddings`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model: EMBEDDING_MODEL, input: inputs }),
+    signal: signal || AbortSignal.timeout(EMBEDDING_TIMEOUT_MS),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Embedding HTTP ${response.status}: ${text.slice(0, 300)}`);
+  const data = JSON.parse(text);
+  const vectors = (data?.data || []).map((item) => item.embedding);
+  if (vectors.length !== inputs.length) throw new Error(`Embedding returned ${vectors.length} vectors for ${inputs.length} inputs`);
+  return vectors;
+}
+
+// Embeds stored turns that have no vector for the current model: the existing
+// conversation on first start, plus anything a failed call left behind. One
+// run at a time, bounded per call, never blocking a request.
+let backfillRunning = false;
+async function backfillEmbeddings(maxBatches = 20) {
+  if (!embeddingConfigured || backfillRunning) return { embedded: 0 };
+  backfillRunning = true;
+  let embedded = 0;
+  try {
+    for (let batch = 0; batch < maxBatches; batch += 1) {
+      const rows = conversationStore.selectUnembedded.all({ model: EMBEDDING_MODEL, limit: EMBEDDING_BATCH });
+      if (!rows.length) break;
+      const vectors = await embed(rows.map((row) => embeddingText(row.prompt, row.answer)));
+      const write = conversationStore.db.transaction(() => {
+        rows.forEach((row, index) => {
+          const vec = normalize(vectors[index]);
+          conversationStore.insertEmbedding.run({ id: row.id, model: EMBEDDING_MODEL, dims: vec.length, vec: Buffer.from(vec.buffer) });
+        });
+      });
+      write();
+      embedded += rows.length;
+    }
+    if (embedded) console.log(JSON.stringify({ level: "info", msg: "embedding_backfill", model: EMBEDDING_MODEL, embedded }));
+  } catch (error) {
+    // Leaves the rows unembedded: the next insert or restart retries them,
+    // and search stays keyword-only in the meantime.
+    console.log(JSON.stringify({ level: "warn", msg: "embedding_backfill_failed", error: String(error.message || error).slice(0, 200), embedded }));
+  } finally {
+    backfillRunning = false;
+  }
+  return { embedded };
+}
+
+// Cosine ranking over one user's embedded turns. Brute force on purpose: a
+// user's conversation is thousands of rows at most, and 1024 floats each
+// scans in milliseconds — a vector index would be machinery without a
+// measured problem to solve.
+async function semanticMatches(user, query, floor, limit) {
+  const rows = conversationStore.selectVectors.all({ user, floor, model: EMBEDDING_MODEL });
+  if (!rows.length) return [];
+  const [queryVector] = await embed([query]);
+  const target = normalize(queryVector);
+  return rows
+    .map((row) => ({
+      id: row.id, ts: row.ts, prompt: row.prompt, answer: row.answer,
+      score: dot(target, new Float32Array(row.vec.buffer, row.vec.byteOffset, row.vec.byteLength / 4)),
+    }))
+    .filter((row) => row.score >= EMBEDDING_MIN_SCORE)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
 
 // The brain carries the last 10 messages (5 turns) in context. On a cold
 // process that cache is empty, so rebuild it from the stored conversation;
@@ -617,6 +761,9 @@ const server = http.createServer(async (req, res) => {
       if (!prompt || !answer) return json(res, 400, { error: "prompt_and_answer_required", requestId });
       const entry = { ts: new Date().toISOString(), prompt, answer };
       conversationStore.insert.run({ user: req.user, ...entry });
+      // Fire-and-forget: the turn is stored either way, and an embedding
+      // failure only means this turn is keyword-only until the next backfill.
+      backfillEmbeddings(1).catch(() => {});
       return json(res, 200, { requestId, entry });
     }
 
@@ -761,6 +908,10 @@ server.listen(port, "0.0.0.0", () => {
   graphStore?.ensureIndexes()
     .then((result) => console.log(JSON.stringify({ level: "info", msg: "graph_indexes_ready", ...result })))
     .catch((error) => console.log(JSON.stringify({ level: "warn", msg: "graph_indexes_failed", error: error.message })));
+  // Embed whatever the conversation store already holds (the turns from
+  // before this feature, or from a model change). Bounded, in the background:
+  // a slow or down embedding endpoint must not delay serving.
+  if (embeddingConfigured) backfillEmbeddings().catch(() => {});
 });
 
 function splitCsv(value) {
@@ -1553,11 +1704,11 @@ function historyTools() {
       type: "function",
       function: {
         name: "search_history",
-        description: "Search this user's own earlier conversations with you (their stored prompts and your answers) for words or a topic. Use it whenever the user refers to something from a past conversation — 'what did I ask you about X', 'what did you tell me last week', 'the link you gave me', 'did we talk about Y' — or when you need what was agreed earlier. Your in-context memory only covers the last few turns of this session; everything older is reachable ONLY through this tool, so search before saying you have no record of something.",
+        description: "Search this user's own earlier conversations with you (their stored prompts and your answers). It is a SEMANTIC search: it finds turns that mean the same thing even when they use different words or another language, so 'where did I park my car' finds a turn that only said 'Tesla' or 'Wagen'. It also matches literal words. Use it whenever the user refers to something from a past conversation — 'what did I ask you about X', 'what did you tell me last week', 'the link you gave me', 'did we talk about Y' — or when you need what was agreed earlier. Your in-context memory only covers the last few turns of this session; everything older is reachable ONLY through this tool, so search before saying you have no record of something.",
         parameters: {
           type: "object",
           properties: {
-            query: { type: "string", description: "The words to look for, e.g. 'Vikunja token' or 'Berlin trip'. All words must appear in the same turn, so use few, distinctive ones." },
+            query: { type: "string", description: "What to look for, as the user would say it, e.g. 'where I parked the car' or 'Vikunja token'. Meaning is matched as well as words, so a short natural phrase works better than keywords." },
             days: { type: "number", description: `How far back to look, in days (default ${HISTORY_SEARCH_DEFAULT_DAYS}, max ${HISTORY_SEARCH_MAX_DAYS}).` },
             max_results: { type: "number", description: `Maximum number of matching turns (default ${HISTORY_SEARCH_DEFAULT_RESULTS}, max ${HISTORY_SEARCH_MAX_RESULTS}).` },
           },
@@ -1579,20 +1730,51 @@ function snippet(text) {
   return clean.length > HISTORY_SNIPPET_CHARS ? `${clean.slice(0, HISTORY_SNIPPET_CHARS)}…` : clean;
 }
 
-// The search runs against the signed-in user's own rows only (the store pins
-// `user`), so a prompt injection riding on the brain cannot widen it.
-function searchHistory(user, args) {
-  const terms = String(args.query || "").trim().split(/\s+/).filter(Boolean).slice(0, 6);
+// Hybrid search over the signed-in user's own rows only — both halves pin
+// `user` inside the store, so a prompt injection riding on the brain cannot
+// widen either one to another account.
+//
+// Keyword matching is exact and high precision; semantic matching finds the
+// turn that means the same thing in other words (or another language). They
+// find different turns, so the result is their union: a turn the words hit is
+// worth showing even when its vector scores low, and vice versa.
+async function searchHistory(user, args) {
+  const query = String(args.query || "").trim();
+  const terms = query.split(/\s+/).filter(Boolean).slice(0, 6);
   if (!terms.length) return "No query given. Call search_history again with the words to look for.";
   const days = clampNumber(args.days, 1, HISTORY_SEARCH_MAX_DAYS, HISTORY_SEARCH_DEFAULT_DAYS);
   const limit = clampNumber(args.max_results, 1, HISTORY_SEARCH_MAX_RESULTS, HISTORY_SEARCH_DEFAULT_RESULTS);
   const floor = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-  const rows = conversationStore.search(terms, { user, floor, limit });
-  if (!rows.length) return `No earlier conversation of this user in the last ${days} days contains ${terms.map((term) => `"${term}"`).join(" and ")}.`;
+
+  const keywordRows = conversationStore.search(terms, { user, floor, limit });
+  let semanticRows = [];
+  let semanticNote = "";
+  if (embeddingConfigured) {
+    try {
+      semanticRows = await semanticMatches(user, query, floor, limit);
+    } catch (error) {
+      // Degrade, never fail the turn: the keyword half still answers.
+      semanticNote = " (meaning-based matching was unavailable for this search, so only word matches are listed)";
+      console.log(JSON.stringify({ level: "warn", msg: "history_semantic_failed", error: String(error.message || error).slice(0, 200) }));
+    }
+  } else {
+    semanticNote = " (meaning-based matching is not configured, so only word matches are listed)";
+  }
+
+  // Union, keyword first so an exact hit is never pushed out by a vector one.
+  const byId = new Map();
+  for (const row of keywordRows) byId.set(row.id, { ...row, how: "words" });
+  for (const row of semanticRows) {
+    const existing = byId.get(row.id);
+    if (existing) existing.how = `words + meaning, similarity ${row.score.toFixed(2)}`;
+    else if (byId.size < limit * 2) byId.set(row.id, { ...row, how: `meaning, similarity ${row.score.toFixed(2)}` });
+  }
+  const rows = [...byId.values()].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  if (!rows.length) return `Nothing in this user's last ${days} days of conversation matches "${query}", by words or by meaning${semanticNote}.`;
   // Oldest first reads like a conversation; the dates are what the user will
   // recognise, so they lead each hit.
-  return [`${rows.length} earlier turn(s) matching ${terms.map((term) => `"${term}"`).join(" and ")}, oldest first:`]
-    .concat(rows.reverse().map((row) => `[${row.ts}]\nUser: ${snippet(row.prompt)}\nYou: ${snippet(row.answer)}`))
+  return [`${rows.length} earlier turn(s) matching "${query}", oldest first${semanticNote}:`]
+    .concat(rows.map((row) => `[${row.ts}] (matched by ${row.how})\nUser: ${snippet(row.prompt)}\nYou: ${snippet(row.answer)}`))
     .join("\n\n");
 }
 
@@ -1708,7 +1890,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         // Local SQLite read, scoped to the signed-in user inside the store —
         // the brain's arguments carry no user and cannot add one.
         try {
-          const resultText = searchHistory(user, args);
+          const resultText = await withAbort(searchHistory(user, args), totalSignal);
           console.log(JSON.stringify({ level: "info", requestId, msg: "history_tool", tool: name, query: String(args.query || "").slice(0, 200), ms: Date.now() - started, chars: resultText.length }));
           local.push({ role: "tool", tool_call_id: call.id, content: resultText });
         } catch (error) {
