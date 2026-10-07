@@ -20,6 +20,7 @@ const config = {
   brainBaseUrl: trimSlash(process.env.BRAIN_BASE_URL || "https://ds4-flash.gpu-2-de-fra-1-exo.csdc-nm.at/v1"),
   brainModel: process.env.BRAIN_MODEL || "deepseek-v4-flash",
   brainApiKey: process.env.BRAIN_API_KEY || "",
+  brainProfileDefault: process.env.BRAIN_PROFILE_DEFAULT || "a1-deepseek",
   brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are Jarvis, a concise voice assistant. Answer in English, be helpful, and keep spoken answers short.",
   // `??`, not `||`: an explicitly empty TTS_ENDPOINTS must disable self-hosted TTS
   // and leave HAL 9000 on its speechSynthesis fallback.
@@ -52,6 +53,8 @@ const config = {
     writePassword: process.env.NEO4J_WRITE_PASSWORD || "",
   },
 };
+config.aiProfiles = buildAiProfiles();
+config.whisperProfiles = buildWhisperProfiles();
 
 let whisperCursor = 0;
 let ttsCursor = 0;
@@ -178,6 +181,175 @@ const mcpServers = [
   { id: "graph", label: "Knowledge graph" },
 ];
 
+function normalizeSelectorId(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function readOpencodeConfig() {
+  const filePath = process.env.OPENCODE_CONFIG_PATH || "/data/home/.config/opencode/opencode.jsonc";
+  try {
+    return JSON.parse(stripJsonComments(fs.readFileSync(filePath, "utf8")));
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.log(JSON.stringify({ level: "warn", msg: "opencode_config_unavailable", path: filePath, error: error.message }));
+    }
+    return {};
+  }
+}
+
+function stripJsonComments(source) {
+  let output = "";
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+    if (inString) {
+      output += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) inString = false;
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      inString = true;
+      quote = char;
+      output += char;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i += 1;
+      output += "\n";
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      i += 2;
+      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i += 1;
+      i += 1;
+      continue;
+    }
+    output += char;
+  }
+  return output;
+}
+
+function opencodeProfile(opencode, providerId, modelRef, fallback = {}) {
+  const provider = opencode.provider?.[providerId] || {};
+  const models = provider.models || {};
+  const model = models[modelRef] || models[fallback.modelRef] || {};
+  return {
+    baseUrl: trimSlash(process.env[fallback.baseEnv] || provider.options?.baseURL || fallback.baseUrl || ""),
+    model: process.env[fallback.modelEnv] || model.id || fallback.model || modelRef,
+    apiKey: process.env[fallback.keyEnv] || provider.options?.apiKey || fallback.apiKey || "",
+  };
+}
+
+function buildAiProfiles() {
+  const opencode = readOpencodeConfig();
+  const defaults = {
+    "a1-deepseek": opencodeProfile(opencode, "a1-dsv4f", "a1-dsv4f", {
+      baseEnv: "BRAIN_BASE_URL",
+      modelEnv: "BRAIN_MODEL",
+      keyEnv: "BRAIN_API_KEY",
+      baseUrl: config.brainBaseUrl,
+      model: config.brainModel,
+      apiKey: config.brainApiKey,
+    }),
+    "a1-qwen": opencodeProfile(opencode, "qwen", "Qwen3.8-27B-UD-Q8_K_XL.gguf", {
+      baseEnv: "BRAIN_A1_QWEN_BASE_URL",
+      modelEnv: "BRAIN_A1_QWEN_MODEL",
+      keyEnv: "BRAIN_A1_QWEN_API_KEY",
+      baseUrl: "https://qwen38-27b-mtp.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1",
+      model: "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+    }),
+    ovhcloud: opencodeProfile(opencode, "ovh", "Qwen3.6-27B", {
+      baseEnv: "BRAIN_OVHCLOUD_BASE_URL",
+      modelEnv: "BRAIN_OVHCLOUD_MODEL",
+      keyEnv: "BRAIN_OVHCLOUD_API_KEY",
+      baseUrl: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+      model: "Qwen3.6-27B",
+    }),
+    openrouter: opencodeProfile(opencode, "openrouter", "qwen/qwen3.8-27b", {
+      baseEnv: "BRAIN_OPENROUTER_BASE_URL",
+      modelEnv: "BRAIN_OPENROUTER_MODEL",
+      keyEnv: "BRAIN_OPENROUTER_API_KEY",
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: "qwen/qwen3.8-27b",
+    }),
+    claudecode: {
+      baseUrl: trimSlash(process.env.BRAIN_CLAUDECODE_BASE_URL || ""),
+      model: process.env.BRAIN_CLAUDECODE_MODEL || "opus",
+      apiKey: process.env.BRAIN_CLAUDECODE_API_KEY || "",
+    },
+  };
+  const labels = {
+    "a1-deepseek": ["A1 DeepSeek", "a1-deepseek-v4.0-flash", true],
+    "a1-qwen": ["A1 Qwen", "a1-qwen38-27b", true],
+    ovhcloud: ["OVHcloud", "rw_ovhcloud-qwen3.6-27b", true],
+    openrouter: ["OpenRouter", "rw_openrouter-qwen3.8-27b", true],
+    claudecode: ["Claude Code", "rw-claude-Opus5.5", true],
+  };
+  const profiles = Object.entries(defaults).map(([id, profile]) => ({
+    id,
+    label: labels[id][0],
+    profile: labels[id][1],
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    apiKey: profile.apiKey,
+    configured: Boolean(profile.baseUrl && profile.model && (!labels[id][2] || profile.apiKey)),
+  }));
+  if (!profiles.some((profile) => profile.id === config.brainProfileDefault && profile.configured)) {
+    config.brainProfileDefault = profiles.find((profile) => profile.configured)?.id || "a1-deepseek";
+  }
+  return profiles;
+}
+
+function buildWhisperProfiles() {
+  const profiles = [
+    {
+      id: "gpu-1",
+      label: "gpu-1",
+      endpoints: splitCsv(process.env.WHISPER_GPU1_ENDPOINTS || process.env.WHISPER_ENDPOINTS || "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions"),
+      model: process.env.WHISPER_GPU1_MODEL || config.whisperModel,
+      apiKey: process.env.WHISPER_GPU1_API_KEY || config.whisperApiKey,
+      vadFilter: parseBoolean(process.env.WHISPER_GPU1_VAD_FILTER || String(config.whisperVadFilter)),
+      sendVadFilter: true,
+    },
+    {
+      id: "vm103",
+      label: "vm103 on pve103",
+      endpoints: splitCsv(process.env.WHISPER_VM103_ENDPOINTS || "http://192.168.53.111:8003/v1/audio/transcriptions"),
+      model: process.env.WHISPER_VM103_MODEL || "deepdml/faster-whisper-large-v3-turbo-ct2",
+      apiKey: process.env.WHISPER_VM103_API_KEY || "",
+      vadFilter: parseBoolean(process.env.WHISPER_VM103_VAD_FILTER || "true"),
+      sendVadFilter: true,
+    },
+    {
+      id: "ovhcloud",
+      label: "OVHcloud Whisper",
+      endpoints: splitCsv(process.env.WHISPER_OVHCLOUD_ENDPOINTS || "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/audio/transcriptions"),
+      model: process.env.WHISPER_OVHCLOUD_MODEL || "whisper-large-v3",
+      apiKey: process.env.WHISPER_OVHCLOUD_API_KEY || process.env.OVH_AI_ENDPOINTS_ACCESS_TOKEN || process.env.BRAIN_OVHCLOUD_API_KEY || "",
+      vadFilter: false,
+      sendVadFilter: false,
+    },
+  ].filter((profile) => profile.endpoints.length && profile.model);
+  return profiles;
+}
+
+function aiProfileFor(value) {
+  const id = normalizeSelectorId(value) || config.brainProfileDefault;
+  return config.aiProfiles.find((profile) => profile.id === id && profile.configured)
+    || config.aiProfiles.find((profile) => profile.id === config.brainProfileDefault && profile.configured)
+    || config.aiProfiles.find((profile) => profile.configured);
+}
+
+function whisperProfileFor(value) {
+  const id = normalizeSelectorId(value) || "gpu-1";
+  return config.whisperProfiles.find((profile) => profile.id === id) || config.whisperProfiles[0] || null;
+}
+
 function normalizeMcpFlags(payload) {
   const flags = {};
   for (const server of mcpServers) flags[server.id] = false;
@@ -214,8 +386,9 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         requestId,
         uptimeSec: Math.round(process.uptime()),
-        whisperEndpoints: config.whisperEndpoints.length,
+        whisperEndpoints: config.whisperProfiles.reduce((count, profile) => count + profile.endpoints.length, 0),
         brainConfigured: isBrainConfigured(),
+        aiProfiles: config.aiProfiles.filter((profile) => profile.configured).length,
         ttsEndpoints: config.ttsEndpoints.length,
       });
     }
@@ -267,10 +440,25 @@ const server = http.createServer(async (req, res) => {
         wakePhrase: config.wakePhrase,
         silenceMs: config.silenceMs,
         whisperEndpoints: config.whisperEndpoints.map(redactUrl),
+        whisperProfiles: config.whisperProfiles.map((profile) => ({
+          id: profile.id,
+          label: profile.label,
+          endpoints: profile.endpoints.map(redactUrl),
+          model: profile.model,
+        })),
         whisperLanguage: config.whisperLanguage,
         whisperVadFilter: config.whisperVadFilter,
         brainBaseUrl: redactUrl(config.brainBaseUrl),
         brainModel: config.brainModel,
+        brainProfileDefault: config.brainProfileDefault,
+        aiProfiles: config.aiProfiles.map((profile) => ({
+          id: profile.id,
+          label: profile.label,
+          profile: profile.profile,
+          baseUrl: redactUrl(profile.baseUrl),
+          model: profile.model,
+          configured: profile.configured,
+        })),
         brainConfigured: isBrainConfigured(),
         ttsEndpoints: config.ttsEndpoints.map(redactUrl),
         ttsConfigured: config.ttsEndpoints.length > 0,
@@ -370,7 +558,9 @@ const server = http.createServer(async (req, res) => {
       // The UI language switch sends the spoken language per request; the
       // configured WHISPER_LANGUAGE stays the default for other clients.
       const language = normalizeLanguage(url.searchParams.get("language")) || config.whisperLanguage;
-      const result = await transcribeWithFailover(body, req.headers["content-type"] || "audio/webm", language, requestId, controller.signal);
+      const profile = whisperProfileFor(url.searchParams.get("whisperProfile"));
+      if (!profile) return json(res, 503, { error: "whisper_not_configured", requestId });
+      const result = await transcribeWithFailover(body, req.headers["content-type"] || "audio/webm", language, profile, requestId, controller.signal);
       return json(res, result.error ? 502 : 200, result);
     }
 
@@ -381,7 +571,9 @@ const server = http.createServer(async (req, res) => {
       // The prompt history is keyed by the authenticated user, not by a
       // client-chosen id: every tab of Mila shares Mila's cache and no
       // other user can read or write it.
-      const result = await chat(prompt, req.user, normalizeLanguage(payload.language) || "en", requestId, controller.signal, normalizeMcpFlags(payload),
+      const profile = aiProfileFor(payload.brainProfile);
+      if (!profile) return json(res, 503, { error: "brain_not_configured", requestId });
+      const result = await chat(prompt, req.user, normalizeLanguage(payload.language) || "en", profile, requestId, controller.signal, normalizeMcpFlags(payload),
         String(payload.wakePhrase || "").slice(0, 60));
       return json(res, 200, result);
     }
@@ -449,7 +641,7 @@ function stripBasePath(pathname) {
 }
 
 function isBrainConfigured() {
-  return Boolean(config.brainBaseUrl && config.brainModel && !config.brainApiKey.includes("PUT-YOUR"));
+  return config.aiProfiles.some((profile) => profile.configured && !String(profile.apiKey).includes("PUT-YOUR"));
 }
 
 function isGraphConfigured() {
@@ -543,28 +735,28 @@ function readBody(req, limitBytes) {
   });
 }
 
-async function transcribeWithFailover(audioBuffer, mimeType, language, requestId, signal) {
-  if (!config.whisperEndpoints.length) throw new Error("No Whisper endpoints configured");
+async function transcribeWithFailover(audioBuffer, mimeType, language, profile, requestId, signal) {
+  if (!profile?.endpoints?.length) throw new Error("No Whisper endpoints configured");
   const attempts = [];
 
-  for (let i = 0; i < config.whisperEndpoints.length; i += 1) {
-    const index = whisperCursor % config.whisperEndpoints.length;
-    whisperCursor = (whisperCursor + 1) % config.whisperEndpoints.length;
-    const endpoint = config.whisperEndpoints[index];
+  for (let i = 0; i < profile.endpoints.length; i += 1) {
+    const index = whisperCursor % profile.endpoints.length;
+    whisperCursor = (whisperCursor + 1) % profile.endpoints.length;
+    const endpoint = profile.endpoints[index];
     const started = Date.now();
     try {
-      console.log(JSON.stringify({ level: "info", requestId, msg: "whisper_attempt", endpoint: redactUrl(endpoint), bytes: audioBuffer.length, mimeType }));
+      console.log(JSON.stringify({ level: "info", requestId, msg: "whisper_attempt", profile: profile.id, endpoint: redactUrl(endpoint), bytes: audioBuffer.length, mimeType }));
       const form = new FormData();
       const blob = new Blob([audioBuffer], { type: mimeType });
       form.append("file", blob, mimeType.startsWith("audio/wav") ? "jarvis-command.wav" : "jarvis-command.webm");
-      form.append("model", config.whisperModel);
+      form.append("model", profile.model);
       form.append("language", language);
       form.append("response_format", "json");
-      form.append("vad_filter", String(config.whisperVadFilter));
+      if (profile.sendVadFilter !== false) form.append("vad_filter", String(profile.vadFilter));
       form.append("temperature", "0");
 
       const headers = {};
-      if (config.whisperApiKey) headers.authorization = `Bearer ${config.whisperApiKey}`;
+      if (profile.apiKey) headers.authorization = `Bearer ${profile.apiKey}`;
       const response = await fetch(endpoint, {
         method: "POST", body: form, headers,
         signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
@@ -574,22 +766,24 @@ async function transcribeWithFailover(audioBuffer, mimeType, language, requestId
       const data = parseJsonOrText(text);
       const rawTranscript = extractTranscript(data);
       const transcript = isLikelyWhisperHallucination(rawTranscript) ? "" : rawTranscript;
-      console.log(JSON.stringify({ level: "info", requestId, msg: transcript ? "whisper_success" : "whisper_no_speech", endpoint: redactUrl(endpoint), ms: Date.now() - started, transcriptChars: transcript.length }));
+      console.log(JSON.stringify({ level: "info", requestId, msg: transcript ? "whisper_success" : "whisper_no_speech", profile: profile.id, endpoint: redactUrl(endpoint), ms: Date.now() - started, transcriptChars: transcript.length }));
       return {
         requestId,
         text: transcript,
         noSpeech: !transcript,
+        profile: profile.id,
+        profileLabel: profile.label,
         endpoint: redactUrl(endpoint),
         attempts: attempts.concat({ endpoint: redactUrl(endpoint), ok: true, ms: Date.now() - started }),
       };
     } catch (error) {
-      console.log(JSON.stringify({ level: "warn", requestId, msg: "whisper_failure", endpoint: redactUrl(endpoint), ms: Date.now() - started, error: error.message }));
+      console.log(JSON.stringify({ level: "warn", requestId, msg: "whisper_failure", profile: profile.id, endpoint: redactUrl(endpoint), ms: Date.now() - started, error: error.message }));
       attempts.push({ endpoint: redactUrl(endpoint), ok: false, ms: Date.now() - started, error: error.message });
       signal.throwIfAborted();
     }
   }
 
-  return { requestId, text: "", error: "all_whisper_endpoints_failed", attempts };
+  return { requestId, text: "", profile: profile.id, profileLabel: profile.label, error: "all_whisper_endpoints_failed", attempts };
 }
 
 function clampSpeed(value) {
@@ -838,8 +1032,8 @@ function withAbort(promise, signal) {
   });
 }
 
-async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhrase) {
-  if (!isBrainConfigured()) {
+async function chat(prompt, user, language, brainProfile, requestId, signal, mcpFlags, wakePhrase) {
+  if (!brainProfile?.configured || String(brainProfile.apiKey).includes("PUT-YOUR")) {
     throw new Error("Brain endpoint/model is not configured");
   }
 
@@ -916,11 +1110,11 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
   ];
 
   const headers = { "content-type": "application/json" };
-  if (config.brainApiKey) headers.authorization = `Bearer ${config.brainApiKey}`;
+  if (brainProfile.apiKey) headers.authorization = `Bearer ${brainProfile.apiKey}`;
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults } = await runBrain({ messages, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), admin: isAdmin(user), lang: language === "de" ? "de" : "en", requestId, signal, headers,
+  const { data, webResults } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), admin: isAdmin(user), lang: language === "de" ? "de" : "en", requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -943,9 +1137,9 @@ async function chat(prompt, user, language, requestId, signal, mcpFlags, wakePhr
     // the graph only through its explicit write tools.
     // The extractor reads what the turn actually used: the up-front search
     // results plus any web tool results the brain gathered itself.
-    ingestTurn({ user, prompt, searchResults: [searchMessage?.content, ...webResults].filter(Boolean).join("\n\n") || null, answer, requestId }).catch(() => {});
+    ingestTurn({ user, prompt, searchResults: [searchMessage?.content, ...webResults].filter(Boolean).join("\n\n") || null, answer, brainProfile, requestId }).catch(() => {});
   }
-  return { requestId, answer, configured: true, model: config.brainModel };
+  return { requestId, answer, configured: true, model: brainProfile.model, brainProfile: brainProfile.id, brainProfileLabel: brainProfile.label };
 }
 
 // The graph tools offered to the brain when the knowledge graph toggle is on.
@@ -1134,7 +1328,7 @@ function graphToolDetail(name, args) {
   return parts.length ? `${name}: ${parts.join(", ")}` : name;
 }
 
-async function runBrain({ messages, user, useTools, webTools: webToolsOn = false, admin = false, lang = "de", requestId, signal, headers, deadlineMs }) {
+async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, admin = false, lang = "de", requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
   const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
   // Web tool results collected for post-turn ingestion (the extractor reads
@@ -1143,7 +1337,7 @@ async function runBrain({ messages, user, useTools, webTools: webToolsOn = false
   const hasTools = Boolean(useTools || webToolsOn);
   for (let round = 0; ; round += 1) {
     const body = {
-      model: config.brainModel,
+      model: brainProfile.model,
       messages: local,
       temperature: 0.2,
       // The brain is a reasoning model: max_tokens covers its thinking tokens
@@ -1155,7 +1349,7 @@ async function runBrain({ messages, user, useTools, webTools: webToolsOn = false
     if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : [])];
     let data;
     try {
-      const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
+      const response = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
         method: "POST", signal: totalSignal, headers, body: JSON.stringify(body),
       });
       const text = await response.text();
@@ -1185,9 +1379,9 @@ async function runBrain({ messages, user, useTools, webTools: webToolsOn = false
     if (round >= GRAPH_TOOL_ROUNDS) {
       // Tool budget spent: force a final answer without tools.
       local.push({ ...message, role: "assistant" }, { role: "system", content: "Tool budget reached. Answer now from what you have gathered." });
-      const fallback = await fetch(`${config.brainBaseUrl}/chat/completions`, {
+      const fallback = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
         method: "POST", signal: totalSignal, headers,
-        body: JSON.stringify({ model: config.brainModel, messages: local, temperature: 0.2, max_tokens: 4096 }),
+        body: JSON.stringify({ model: brainProfile.model, messages: local, temperature: 0.2, max_tokens: 4096 }),
       });
       const fallbackText = await fallback.text();
       if (!fallback.ok) throw new Error(`Brain HTTP ${fallback.status}: ${fallbackText.slice(0, 500)}`);
@@ -1284,12 +1478,12 @@ Rules:
 // Runs after a finished turn: one cheap structured LLM call over the prompt,
 // the search results (if any) and the answer, then an idempotent MERGE upsert
 // with the write-only DB user. Never blocks or fails the user's reply.
-async function ingestTurn({ user, prompt, searchResults, answer, requestId }) {
+async function ingestTurn({ user, prompt, searchResults, answer, brainProfile, requestId }) {
   const started = Date.now();
   const headers = { "content-type": "application/json" };
-  if (config.brainApiKey) headers.authorization = `Bearer ${config.brainApiKey}`;
+  if (brainProfile.apiKey) headers.authorization = `Bearer ${brainProfile.apiKey}`;
   try {
-    const response = await fetch(`${config.brainBaseUrl}/chat/completions`, {
+    const response = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
       method: "POST",
       headers,
       // 45 s, like the brain's own deadline: a full 4096-token budget can be
@@ -1297,7 +1491,7 @@ async function ingestTurn({ user, prompt, searchResults, answer, requestId }) {
       // abort would race the extraction.
       signal: AbortSignal.timeout(45000),
       body: JSON.stringify({
-        model: config.brainModel,
+        model: brainProfile.model,
         temperature: 0,
         // The brain is a reasoning model: max_tokens covers its thinking
         // tokens too. 1200 left no budget for the JSON reply — live turns

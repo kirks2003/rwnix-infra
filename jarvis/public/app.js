@@ -14,6 +14,7 @@ const el = Object.fromEntries([
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
   "languageSwitch", "languageStatus",
+  "aiProfileSelect", "aiProfileStatus", "whisperProfileSelect", "whisperProfileStatus",
   "mcpSwitches",
   "speakSwitch", "speakStatus",
   "graphPanel", "graphStatus", "graphRefreshButton", "graphRemoveButton", "graphCanvas", "graph3dStage",
@@ -33,6 +34,8 @@ const speakEnabledStorageKey = "jarvis.speakEnabled";
 const panelsStorageKey = "jarvis.panelsVisible";
 const graphSizesStorageKey = "jarvis.graphSizes";
 const silenceStorageKey = "jarvis.silenceMs";
+const aiProfileStorageKey = "jarvis.aiProfile";
+const whisperProfileStorageKey = "jarvis.whisperProfile";
 let config;
 let authedUser = null;
 let voiceId = "browser";
@@ -41,6 +44,8 @@ let language = "en";
 let speakEnabled = true;
 let silenceMs = 1500;
 let panelsVisible = true;
+let aiProfileId = "";
+let whisperProfileId = "";
 const mcpServers = [];
 const mcpFlags = {};
 let current = null;
@@ -138,6 +143,68 @@ el.languageSwitch.addEventListener("click", () => {
   if (el.languageSwitch.disabled) return;
   setLanguage(language === "de" ? "en" : "de", true);
 });
+
+function selectOptions(profiles, describe) {
+  return profiles.map((profile) => {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = describe(profile);
+    if (profile.configured === false) option.disabled = true;
+    return option;
+  });
+}
+
+function setAiProfile(value, persist) {
+  const profiles = config?.aiProfiles || [];
+  const profile = profiles.find((entry) => entry.id === value && entry.configured !== false)
+    || profiles.find((entry) => entry.id === config?.brainProfileDefault && entry.configured !== false)
+    || profiles.find((entry) => entry.configured !== false);
+  if (!profile) {
+    el.aiProfileStatus.textContent = "No AI endpoint profile is configured on this server.";
+    el.aiProfileSelect.disabled = true;
+    return;
+  }
+  aiProfileId = profile.id;
+  el.aiProfileSelect.value = aiProfileId;
+  el.aiProfileStatus.textContent = `Active: ${profile.label} (${profile.profile || profile.model}).`;
+  if (persist) {
+    try {
+      localStorage.setItem(aiProfileStorageKey, aiProfileId);
+    } catch (error) {
+      el.aiProfileStatus.textContent = `${profile.label} for this tab only; storage unavailable.`;
+      log("settings", "Could not save AI endpoint profile", { message: error.message });
+    }
+  }
+  const active = profiles.find((entry) => entry.id === aiProfileId);
+  el.steps.querySelector('[data-step="brain"] .step-name').textContent =
+    active?.model ? `${active.model} brain` : "Brain";
+  log("settings", `AI endpoint: ${profile.label}`);
+}
+
+function setWhisperProfile(value, persist) {
+  const profiles = config?.whisperProfiles || [];
+  const profile = profiles.find((entry) => entry.id === value) || profiles[0];
+  if (!profile) {
+    el.whisperProfileStatus.textContent = "No Whisper server is configured on this server.";
+    el.whisperProfileSelect.disabled = true;
+    return;
+  }
+  whisperProfileId = profile.id;
+  el.whisperProfileSelect.value = whisperProfileId;
+  el.whisperProfileStatus.textContent = `Active: ${profile.label} (${profile.model}).`;
+  if (persist) {
+    try {
+      localStorage.setItem(whisperProfileStorageKey, whisperProfileId);
+    } catch (error) {
+      el.whisperProfileStatus.textContent = `${profile.label} for this tab only; storage unavailable.`;
+      log("settings", "Could not save Whisper server", { message: error.message });
+    }
+  }
+  log("settings", `Whisper server: ${profile.label}`);
+}
+
+el.aiProfileSelect.addEventListener("change", () => setAiProfile(el.aiProfileSelect.value, true));
+el.whisperProfileSelect.addEventListener("change", () => setWhisperProfile(el.whisperProfileSelect.value, true));
 
 // Silence-stop slider: how long the microphone must stay quiet before a
 // recorded command is sent to Whisper. The server default (SILENCE_MS) is only
@@ -668,14 +735,15 @@ async function transcribe(session, start, purpose) {
   check(session);
   const blob = session.mic.buffer.wav(start);
   if (purpose === "wake") probeCount += 1;
+  const whisperProfile = config.whisperProfiles?.find((profile) => profile.id === whisperProfileId);
   stage("transcribing", purpose === "wake" ? "Checking wake word" : "Transcribing command",
-    `Sending ${Math.round(blob.size / 1024)} KB to ${config.whisperEndpoints.join(", ")}`, purpose === "wake" ? "wake" : "whisper");
+    `Sending ${Math.round(blob.size / 1024)} KB to ${whisperProfile?.label || "Whisper"}`, purpose === "wake" ? "wake" : "whisper");
   // Audible feedback that the captured audio left the browser and the
   // transcription is starting: a soft tick for wake probes, a higher ping for
   // the command.
   if (purpose === "wake") session.mic.probeBeep();
   else session.mic.sentBeep();
-  const result = await request(session, `/api/transcribe?language=${language}`, {
+  const result = await request(session, `/api/transcribe?language=${language}&whisperProfile=${encodeURIComponent(whisperProfileId)}`, {
     method: "POST", headers: { "content-type": blob.type }, body: blob,
   });
   log("stt", `Last ${purpose}: ${result.endpoint} | request ${result.requestId}`);
@@ -914,7 +982,7 @@ async function answer(session, prompt) {
       method: "POST", headers: { "content-type": "application/json" },
       // The brain answers as the wake word's name, so the active phrase
       // (server default or personal override) travels with every request.
-      body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase }),
+      body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase, brainProfile: aiProfileId }),
     });
     if (!data.answer) throw new Error("Brain returned no answer");
     return data;
@@ -1046,7 +1114,7 @@ function watchForVoiceCommand(session, signal, speech) {
         : Math.max(probedThrough, buffer.end - buffer.sampleRate * 15);
       try {
         const blob = buffer.wav(start);
-        const result = await request(session, `/api/transcribe?language=${language}`, {
+        const result = await request(session, `/api/transcribe?language=${language}&whisperProfile=${encodeURIComponent(whisperProfileId)}`, {
           method: "POST", headers: { "content-type": blob.type }, body: blob, signal,
         });
         const text = result.text || "";
@@ -1326,6 +1394,8 @@ el.armButton.disabled = el.sendManualButton.disabled = true;
 for (const button of previewButtons) button.disabled = true;
 el.languageSwitch.disabled = true;
 el.speakSwitch.disabled = true;
+el.aiProfileSelect.disabled = true;
+el.whisperProfileSelect.disabled = true;
 // The select is grouped Basic / Character / Female / Male so a male or female
 // voice is a two-level choice; the stored value is still the flat profile id.
 const voiceGroups = [
@@ -1361,13 +1431,41 @@ async function loadConfig(userFromLogin) {
   document.body.classList.add("authenticated");
   el.loginPanel.hidden = true;
   el.userLine.textContent = authedUser ? `Signed in as ${authedUser}` : "";
-    if (!value.whisperEndpoints?.length || !value.wakePhrase || !(value.silenceMs > 0)) {
+    value.whisperProfiles ||= (value.whisperEndpoints || []).length ? [{
+      id: "default",
+      label: "Default Whisper",
+      endpoints: value.whisperEndpoints,
+      model: value.whisperModel || "configured model",
+    }] : [];
+    value.aiProfiles ||= [{
+      id: "default",
+      label: "Default AI",
+      profile: "server default",
+      baseUrl: value.brainBaseUrl,
+      model: value.brainModel,
+      configured: value.brainConfigured !== false,
+    }];
+    value.brainProfileDefault ||= value.aiProfiles.find((profile) => profile.configured !== false)?.id || value.aiProfiles[0]?.id || "default";
+    if (!value.whisperProfiles?.length || !value.wakePhrase || !(value.silenceMs > 0)) {
       throw new Error("Invalid Whisper/wake configuration");
     }
     config = value;
-    // The pipeline panel names reflect the actual configuration.
-    el.steps.querySelector('[data-step="brain"] .step-name').textContent =
-      config.brainModel ? `${config.brainModel} brain` : "Brain";
+    el.aiProfileSelect.replaceChildren(...selectOptions(config.aiProfiles || [], (profile) =>
+      `${profile.label} — ${profile.profile || profile.model}${profile.configured === false ? " (not configured)" : ""}`));
+    el.whisperProfileSelect.replaceChildren(...selectOptions(config.whisperProfiles || [], (profile) =>
+      `${profile.label} — ${profile.model}`));
+    let savedAiProfile = null;
+    let savedWhisperProfile = null;
+    try {
+      savedAiProfile = localStorage.getItem(aiProfileStorageKey);
+      savedWhisperProfile = localStorage.getItem(whisperProfileStorageKey);
+    } catch (error) {
+      log("settings", "Could not load endpoint selector settings", { message: error.message });
+    }
+    setAiProfile(savedAiProfile || config.brainProfileDefault, false);
+    setWhisperProfile(savedWhisperProfile || "gpu-1", false);
+    el.aiProfileSelect.disabled = false;
+    el.whisperProfileSelect.disabled = false;
     el.wakeWordStatus.textContent = `Server default: "${config.wakePhrase}". Apply a personal wake word for this browser.`;
     try {
       const saved = localStorage.getItem(wakeWordStorageKey);
@@ -1462,7 +1560,7 @@ async function loadConfig(userFromLogin) {
       log("settings", "Could not load panels setting");
     }
     setPanelsVisible(savedPanels === null ? true : savedPanels === "true", false);
-    log("stt", `Configured STT: ${config.whisperEndpoints.join(", ")} (no request yet)`);
+    log("stt", `Configured STT profiles: ${config.whisperProfiles.map((profile) => `${profile.label} ${profile.endpoints.join(", ")}`).join(" | ")} (no request yet)`);
     el.armButton.disabled = el.sendManualButton.disabled = false;
     for (const button of previewButtons) button.disabled = false;
     stage("standby", "Standby", "Arm Jarvis to start wake listening. Microphone audio stays local until a probe or command is sent.");

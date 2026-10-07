@@ -1219,7 +1219,7 @@ function startBackend(extraEnv) {
     let output = "";
     const child = spawn(process.execPath, ["server.js"], {
       cwd: fileURLToPath(new URL("../", import.meta.url)),
-      env: { ...process.env, PORT: "0", BRAIN_API_KEY: "", ...extraEnv },
+      env: { ...process.env, PORT: "0", OPENCODE_CONFIG_PATH: "/tmp/jarvis-test-no-opencode.jsonc", BRAIN_API_KEY: "test-brain", ...extraEnv },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const collect = (chunk) => { output += chunk; };

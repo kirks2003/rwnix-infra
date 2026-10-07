@@ -180,6 +180,19 @@
           <div class="mcp-switches" id="mcpSwitches"></div>
         </section>
 
+        <section class="wake-settings endpoint-settings">
+          <h2>Endpoint selectors</h2>
+          <div class="endpoint-grid">
+            <label for="aiProfileSelect">AI API endpoint</label>
+            <select id="aiProfileSelect" aria-describedby="aiProfileStatus" disabled></select>
+            <p id="aiProfileStatus" role="status">Loading AI endpoint profiles.</p>
+            <label for="whisperProfileSelect">Whisper server</label>
+            <select id="whisperProfileSelect" aria-describedby="whisperProfileStatus" disabled></select>
+            <p id="whisperProfileStatus" role="status">Loading Whisper servers.</p>
+          </div>
+          <p class="endpoint-help">Saved in this browser only. Changes apply to the next prompt or transcription request.</p>
+        </section>
+
         <section class="stage-preview" id="stagePreview">
           <h2>Animation preview</h2>
           <div class="stage-preview-buttons">

@@ -145,7 +145,25 @@ async function startBackend(extraEnv) {
   let output = "";
   const child = spawn(process.execPath, ["server.js"], {
     cwd: new URL("../", import.meta.url),
-    env: { ...process.env, PORT: "0", WHISPER_ENDPOINTS: endpoint, BRAIN_BASE_URL: base, BRAIN_API_KEY: "", ...extraEnv },
+    env: {
+      ...process.env,
+      PORT: "0",
+      WHISPER_ENDPOINTS: endpoint,
+      WHISPER_VM103_ENDPOINTS: endpoint,
+      WHISPER_OVHCLOUD_ENDPOINTS: endpoint,
+      WHISPER_OVHCLOUD_API_KEY: "test-ovh-stt",
+      BRAIN_BASE_URL: base,
+      BRAIN_OPENROUTER_BASE_URL: base,
+      BRAIN_OPENROUTER_API_KEY: "test-openrouter",
+      BRAIN_OVHCLOUD_BASE_URL: base,
+      BRAIN_OVHCLOUD_API_KEY: "test-ovh",
+      BRAIN_A1_QWEN_BASE_URL: base,
+      BRAIN_A1_QWEN_API_KEY: "test-qwen",
+      BRAIN_CLAUDECODE_BASE_URL: base,
+      BRAIN_CLAUDECODE_API_KEY: "test-claude",
+      BRAIN_API_KEY: "",
+      ...extraEnv,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout.on("data", (data) => { output += data; logs += data; });
@@ -239,6 +257,51 @@ test("the language switch reaches Whisper per request and invalid codes fall bac
   assert.equal(languageOf(), "fr");
   await transcribe(undefined, "/api/transcribe?language=english");
   assert.equal(languageOf(), "en");
+});
+
+test("config advertises AI and Whisper selectors from the local profiles", async () => {
+  const config = await (await auth(origin, "/api/config")).json();
+  assert.ok(config.aiProfiles.some((profile) => profile.id === "ovhcloud" && profile.profile === "rw_ovhcloud-qwen3.6-27b"));
+  assert.ok(config.aiProfiles.some((profile) => profile.id === "openrouter" && profile.profile === "rw_openrouter-qwen3.8-27b"));
+  assert.ok(config.aiProfiles.some((profile) => profile.id === "claudecode" && profile.profile === "rw-claude-Opus5.5"));
+  assert.ok(config.aiProfiles.some((profile) => profile.id === "a1-qwen" && profile.profile === "a1-qwen38-27b"));
+  assert.ok(config.aiProfiles.some((profile) => profile.id === "a1-deepseek" && profile.profile === "a1-deepseek-v4.0-flash"));
+  assert.deepEqual(config.whisperProfiles.map((profile) => profile.id), ["gpu-1", "vm103", "ovhcloud"]);
+});
+
+test("the Whisper selector routes a request to the requested server profile", async () => {
+  mode = "success";
+  const response = await transcribe(undefined, "/api/transcribe?language=en&whisperProfile=vm103");
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.profile, "vm103");
+  assert.equal(result.profileLabel, "vm103 on pve103");
+  assert.match(received.toString("latin1"), /name="model"\r?\n\r?\ndeepdml\/faster-whisper-large-v3-turbo-ct2\r?\n/);
+});
+
+test("the Whisper selector can route transcription to OVHcloud whisper-large-v3", async () => {
+  mode = "success";
+  const response = await transcribe(undefined, "/api/transcribe?language=en&whisperProfile=ovhcloud");
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.profile, "ovhcloud");
+  assert.equal(result.profileLabel, "OVHcloud Whisper");
+  assert.equal(receivedAuth, "Bearer test-ovh-stt");
+  const body = received.toString("latin1");
+  assert.match(body, /name="model"\r?\n\r?\nwhisper-large-v3\r?\n/);
+  assert.doesNotMatch(body, /name="vad_filter"/);
+});
+
+test("the AI selector routes chat to the requested profile", async () => {
+  mode = "success";
+  const response = await auth(origin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Hello", brainProfile: "openrouter" }),
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.brainProfile, "openrouter");
+  assert.equal(JSON.parse(received.toString("utf8")).model, "qwen/qwen3.8-27b");
 });
 
 test("the language switch overrides the brain answer language", async () => {

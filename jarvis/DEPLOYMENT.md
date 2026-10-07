@@ -54,8 +54,11 @@ Findings while exposing the service:
 - Wake engine: self-hosted Whisper probes from continuous browser AudioWorklet PCM capture, triggered on the trailing edge of speech (~350 ms after the talker stops, 3 s speech cap). Measured against the gpu-1 service with four isolated "Rocky" utterances: the old fixed-interval trigger cut two of eight probe windows mid-word and returned empty for them; the trailing-edge trigger recognized all six of its probes and detected the phrase about 0.9 s sooner.
 - Command recording: complete mono WAV snapshots; capture continues during Whisper latency
 - Auto-stop: `1500 ms` continuous silence (server default `SILENCE_MS`; the UI's Silence stop slider overrides it per browser, 100 ms-5 s, live)
-- STT: backend proxy to `WHISPER_ENDPOINTS`
-- Brain: backend proxy to the OpenAI-compatible `a1-dsv4f` / `deepseek-v4-flash` endpoint
+- STT: backend proxy to the selected Whisper profile. The UI's **Whisper server** selector is saved per browser and currently offers:
+  - `gpu-1`: `https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions`, model `Systran/faster-whisper-large-v3`
+  - `vm103 on pve103`: `http://192.168.53.111:8003/v1/audio/transcriptions`, model `deepdml/faster-whisper-large-v3-turbo-ct2`
+  - `OVHcloud Whisper`: `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/audio/transcriptions`, model `whisper-large-v3`
+- Brain: backend proxy to the selected AI API endpoint profile. The UI's **AI API endpoint** selector is saved per browser; live vm104 has `a1-deepseek`, `a1-qwen`, `ovhcloud` and `openrouter` configured. `claudecode` is listed but disabled until a Claude Code OpenAI-compatible gateway is provided.
 - Output: the selected answer voice plus prompt/result text in the UI
 - Answer voice: the UI's **Answer voice** select and **Speaking speed** slider (0.60x-1.60x, a multiplier on the voice's own pace) persist locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** and the character profiles (Commander, Android, Wizard, Newscaster) proxy clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shape them in Web Audio. The deployed backend is the `speaches` Kokoro container on gpu-1; `server.js` maps each profile to its own Kokoro voice (`profileVoices`), so the timbre changes with the profile.
 - Language: the UI's **Language** toggle (English/Deutsch, per browser) sends the language with every Whisper request (`/api/transcribe?language=…`), appends a `Language override` directive to the brain system prompt per `/api/chat` request, and switches spoken output. German answers are spoken with the browser voice (German voice preferred) because the Kokoro engine ships English voices only; `/api/speak` rejects non-English with `tts_language_unsupported` as a backstop.
@@ -74,6 +77,55 @@ The frontend exposes progress at each small step:
 8. Error states and backend request IDs
 
 The backend intentionally proxies Whisper and brain requests so browser clients never receive service keys and do not need direct CORS access to internal endpoints.
+
+## Endpoint selector rollout (2026-10-07)
+
+The Jarvis controls panel now has an **Endpoint selectors** section. The frontend persists
+both dropdowns in local storage and sends the choices per request: `/api/chat` receives
+`brainProfile`, and `/api/transcribe` receives `whisperProfile`. Existing in-flight calls
+are not moved when the user changes a selector; the next brain or transcription request
+uses the new profile.
+
+Backend behavior:
+
+- AI profiles are built from the local opencode/Kandev profile config when readable, with
+  environment variables taking precedence. On live vm104 the app directory is not a git
+  checkout and the useful opencode config was not present under the container's default
+  path, so live `.env` was updated with non-committed endpoint keys copied from the local
+  Kandev opencode config. `.env` backups were taken first as
+  `.env.bak-ai-profiles-<timestamp>`.
+- AI profiles that require provider keys are shown but disabled unless their key is
+  available. Live status after rollout: `a1-deepseek`, `a1-qwen`, `ovhcloud` and
+  `openrouter` are configured; `claudecode` is disabled because the Kandev Claude Code
+  profile is ACP/CLI, not an OpenAI-compatible `/chat/completions` endpoint.
+- Whisper profiles are built from env/defaults. `gpu-1` and `vm103` keep sending the
+  faster-whisper `vad_filter` form field. OVHcloud's OpenAI-compatible
+  `whisper-large-v3` endpoint rejects that field (`HTTP 400: Unknown field name:
+  vad_filter`), so Jarvis deliberately omits `vad_filter` only for the OVH profile.
+  OVH STT auth reads `WHISPER_OVHCLOUD_API_KEY`, falling back to
+  `OVH_AI_ENDPOINTS_ACCESS_TOKEN` and then `BRAIN_OVHCLOUD_API_KEY`.
+
+Validation and deployment:
+
+- Local validation: `npm test` passed with 145 tests after adding OVH Whisper coverage,
+  including that the OVH STT request uses model `whisper-large-v3`, sends its bearer key
+  and does **not** send `vad_filter`. Browser coverage from the selector rollout passed
+  separately (`npm run test:browser`: 43 pass, 2 skipped).
+- vm104 code backups were taken before each sync:
+  `jarvis-code.bak-20261007_061528.tgz`,
+  `jarvis-code.bak-20261007_061825.tgz`,
+  `jarvis-code.bak-20261007_062018.tgz` and
+  `jarvis-code.bak-20261007_062157.tgz`.
+- Live `/api/health` after the OVH Whisper rollout returned `whisperEndpoints: 3`,
+  `brainConfigured: true`, `aiProfiles: 4`, `ttsEndpoints: 1`, and the container health
+  was `healthy`.
+- Served static assets matched the source checksums after deployment:
+  `app.js` `6223db1a8eea80e80df2492b909ab4b1`,
+  `index.html` `87afc404f4f15adea0cc69e682fb5873`,
+  `style.css` `b2e086b20a1b6094e0634d619b27e3a0`.
+- Live smoke tests: `a1-qwen` chat answered `OK` using model
+  `Qwen3.8-27B-UD-Q8_K_XL.gguf`; OVH Whisper transcribed a Jarvis-generated WAV as
+  `Jarvis OVH Whisper Test` through `/api/transcribe?whisperProfile=ovhcloud`.
 
 ## Whisper and pipeline finding: ZDF subtitle hallucination
 

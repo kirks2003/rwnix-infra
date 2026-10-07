@@ -553,7 +553,7 @@ button:disabled {
   font: inherit;
 }
 
-#voiceSelect {
+#voiceSelect, #aiProfileSelect, #whisperProfileSelect {
   flex: 1 1 180px;
   min-width: 0;
   padding: 12px;
@@ -562,6 +562,30 @@ button:disabled {
   color: var(--text);
   background: #02050b;
   font: inherit;
+}
+
+.endpoint-settings h2 {
+  margin: 0 0 10px;
+}
+
+.endpoint-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(220px, 1fr);
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.endpoint-grid p {
+  grid-column: 2;
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.endpoint-help {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 #voiceSpeed {
