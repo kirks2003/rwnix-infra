@@ -3383,3 +3383,88 @@ Unit **152/152**, browser **51 pass** (2 skipped: the opt-in live tests).
 
 It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
 required for clients to pick it up.
+
+## 2026-10-07: butler farewell, graph disconnect policy, hero switches, conversation history
+
+User request (five parts): (1) butler closings for informal thanks ("thx",
+"tks", "ty", "thank u") and for session-ending farewells ("bye", "goodbye",
+"that's all", "Tschüss", "Auf Wiedersehen", …); (2) stored graph policy — no
+entity node without a relation (a bounded path of fact edges) to the user,
+enforced after every ingestion and every entity deletion; (3) an enable /
+disable Jarvis toggle in the hero, left of Sign out; (4) scrollable
+conversation history with date-time stamps in the Prompt/Answer panels,
+showing the last 24 days while the backend keeps everything; (5) the existing
+Speak / Text only switch moved from the voice settings into the hero, left of
+Sign out.
+
+Implementation:
+
+- `public/voice.js` — `ACKNOWLEDGMENTS.thanks` gained the informal thanks
+  (also "thx jarvis", "danke jarvis"); new `ACKNOWLEDGMENTS.farewell` kind
+  (en + de, jarvis/rocky variants included) and `CLOSING_LINES.farewell`
+  closings that say goodbye instead of "standing by" ("It was my pleasure.
+  Goodbye." / "Es war mir eine Freude. Auf Wiedersehen."); the English thanks
+  line "It is my pleasure." became "It was my pleasure."; `acknowledgmentIn`
+  walks all three kinds, whole-utterance and trailing-phrase alike.
+- `graphdb.js` — exported `DISCONNECT_SWEEP` Cypher: an owned entity must
+  reach the owner's `:User` node through a bounded (`*1..6`) undirected path
+  of fact edges (`KNOWS` bookkeeping never counts), otherwise `DETACH DELETE`.
+  The Neo4j `upsertTurn` runs one global sweep per user after the turn's
+  upserts (a disconnected cluster dies in the same turn it is created);
+  `removeEntity` captures the deleted entity's `owner`, sweeps for that user,
+  and returns `{ deleted, name, orphansRemoved }` (a removal that frees an
+  entity's last path sweeps the freed cluster); the memory store runs the
+  same policy with a bounded 6-hop BFS. The seed graph (Rocky/Berlin/Kokoro
+  for Mila, Coffee for Roman) is pre-policy legacy state, swept on that
+  user's first ingestion or deletion.
+- `mcp/graph.mjs` — the `delete-entity` tool runs the sweep after its delete
+  and reports the swept names; tool description updated.
+- `public/index.html` + `public/app.js` — hero `#enableSwitch` (left of Sign
+  out): off = the normal stop path (mic released, Arm free), on = the normal
+  arm flow; `aria-checked` mirrors the armed state via `syncEnableSwitch()`
+  in `newSession()` and `stop()`. `#speakSwitch` (the pre-existing
+  Speak / Text only switch) moved from the voice settings into the hero; the
+  hero's controls sit in a `.user-controls` cluster, left to right: enable,
+  speak, Sign out; the status line stays in the voice settings. No app.js
+  logic changed for the move (all element access is by id).
+- `server.js` — `conversationLogs` map (authenticated user → `[{ts, prompt,
+  answer}]`, everything stored, 500 entries per user, oldest dropped);
+  `GET /api/conversation` serves the last 24 days (`CONVERSATION_WINDOW_MS`);
+  `POST /api/conversation` server-stamps the entry (400
+  `prompt_and_answer_required` when a side is missing); per-user isolation
+  like every other `/api` route. `public/app.js` — the panels are now
+  scrollable `transcript-list`s: one `transcript-entry` (a `time` stamp plus
+  the body) per panel per finished turn (brain answers, butler closings,
+  manual prompts alike), an in-flight turn shows a pending "…" body, a failed
+  one "Failed: …"; `recordTurn` posts fire-and-forget; `loadConversationHistory`
+  refills both panels from the 24-day window on load ("No conversation yet."
+  when empty).
+- `public/style.css` — `.user-controls` cluster; `.transcript-list`
+  (min-height 161px / max-height 637px, vertical scroll) with
+  `.transcript-entry` / `.transcript-time` / `.transcript-body` (pending
+  dimmed) / `.transcript-empty`; the transcript rows are `auto 1fr auto`
+  (heading, history, manual-prompt form).
+
+Tests: unit **153/153** (new server conversation-endpoint test; the ten
+graph-policy fallout tests rewritten for the sweep semantics; voice tests
+cover the informal thanks and the farewell kind, whole-utterance and
+trailing). Browser **53 pass** (2 skipped: the opt-in live tests), including
+the new "a bye after the answer ends the turn with a butler farewell" and
+"the hero switches sit left of Sign out, and the panels keep the conversation
+history" (placement, text-only mode speaks nothing, per-browser persistence
+and the 24-day history across a reload).
+
+**Rolled out 2026-10-07 ~18:11.**
+
+- Backup first: `jarvis-code.bak-20261007_180755.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `server.js`, `graphdb.js`, `mcp/graph.mjs`, `public/app.js`,
+  `public/index.html`, `public/style.css`, `public/voice.js` and the four
+  changed test files to `/home/ubuntu/docker/jarvis`, then
+  `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served
+  `index.html` / `style.css` / `app.js` / `voice.js` md5s and the live
+  `server.js` / `graphdb.js` / `mcp/graph.mjs` md5s all match the source.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
