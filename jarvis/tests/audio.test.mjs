@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { AudioBufferWindow, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst } from "../public/audio.js";
+import { AudioBufferWindow, Microphone, delay, wakeCommand, normalizeWakePhrase, hasLoudBurst } from "../public/audio.js";
 
 test("Whisper punctuation and case do not prevent wake detection", () => {
   assert.equal(wakeCommand("Hey, Jarvis! What's the time?", "hey jarvis"), "What's the time?");
@@ -108,4 +108,52 @@ test("a loud user burst is found against a quieter echo, uniform windows are not
   assert.equal(hasLoudBurst(noise.samples, 0, noise.end, rate), false);
   // A window too short to judge is rejected, not a false positive.
   assert.equal(hasLoudBurst(mixed.samples, 0, rate * 0.3, rate), false);
+});
+
+// The pipeline loop is paced by Microphone.tick, and the whole point of it is
+// that a minimized window (where Chrome clamps background timers to >= 1 s,
+// and to once a minute under intensive throttling) keeps its cadence: capture
+// blocks arriving from the audio thread are what advance the loop. Tested
+// against the prototype directly — a real Microphone needs an AudioContext.
+test("the capture clock advances on audio blocks even with the timer throttled away", async () => {
+  const mic = { waiters: new Set(), signal: new AbortController().signal };
+  const block = () => {
+    const waiting = [...mic.waiters];
+    mic.waiters.clear();
+    for (const wake of waiting) wake();
+  };
+  const realSetTimeout = globalThis.setTimeout;
+  // Stand in for a fully throttled background timer: it never fires.
+  globalThis.setTimeout = () => 0;
+  let resolved = false;
+  const pending = Microphone.prototype.tick.call(mic, 40).then(() => { resolved = true; });
+  globalThis.setTimeout = realSetTimeout;
+  // A block before the interval has elapsed re-arms the waiter, it does not
+  // resolve early: the cadence must not depend on the block size.
+  block();
+  await Promise.resolve();
+  assert.equal(resolved, false);
+  assert.equal(mic.waiters.size, 1);
+  await delay(50, mic.signal);
+  block();
+  await pending;
+  assert.equal(resolved, true);
+  assert.equal(mic.waiters.size, 0);
+});
+
+test("the capture clock still resolves on its timer when capture has gone silent", async () => {
+  const mic = { waiters: new Set(), signal: new AbortController().signal };
+  const started = performance.now();
+  await Microphone.prototype.tick.call(mic, 30);
+  assert.ok(performance.now() - started >= 30);
+  assert.equal(mic.waiters.size, 0);
+});
+
+test("an aborted session rejects a pending capture tick and drops its waiter", async () => {
+  const controller = new AbortController();
+  const mic = { waiters: new Set(), signal: controller.signal };
+  const pending = Microphone.prototype.tick.call(mic, 5000);
+  controller.abort(new Error("Session stopped"));
+  await assert.rejects(pending, /Session stopped/);
+  assert.equal(mic.waiters.size, 0);
 });

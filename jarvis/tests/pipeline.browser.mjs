@@ -379,7 +379,7 @@ test("an empty command window after the beep returns to wake listening without a
   await page.click("#stopButton");
 });
 
-test("silence makes no Whisper calls and hiding the tab releases capture", async (t) => {
+test("silence makes no Whisper calls and hiding the tab keeps the session armed", async (t) => {
   const { page, calls } = await setup(t, async () => ({ text: "" }), { silent: true });
   await page.waitForTimeout(4500);
   assert.equal(calls.audio.length, 0);
@@ -387,7 +387,16 @@ test("silence makes no Whisper calls and hiding the tab releases capture", async
     Object.defineProperty(document, "hidden", { configurable: true, value: true });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  assert.equal(await page.textContent("#stageTitle"), "Stopped");
+  // Minimizing the window must not disarm: the wake word has to be heard while
+  // the user is doing something else.
+  assert.equal(await page.textContent("#stageTitle"), "Wake listening");
+  assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "live")));
+  assert.match(await page.textContent("#log"), /still armed and listening/);
+  // The pipeline loop is clocked off capture blocks, so it keeps running while
+  // hidden: capture must still be alive after the stale-block watchdog window.
+  await page.waitForTimeout(3500);
+  assert.equal(await page.textContent("#stageTitle"), "Wake listening");
+  await page.click("#stopButton");
   assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "ended")));
 });
 

@@ -60,7 +60,7 @@ const stepTimers = new Map();
 // URLs, host names or payload sizes. Those stay in the Live log and the
 // pipeline status line.
 const stageCaptions = {
-  standby: "Arm Jarvis to unlock audio and start wake listening.",
+  standby: "Arm Jarvis to unlock audio and start wake listening. It keeps listening if you minimize the window.",
   prompting: "Opening the microphone.",
   wake: "Listening for the wake word.",
   recording: "Recording your command.",
@@ -651,7 +651,7 @@ function check(session) {
 // recorded audio window, the prompt, the answer text) up to MAX_STEP_ATTEMPTS
 // times instead of returning to wake listening and making the user speak the
 // input again. Only transient failures (upstream errors, timeouts) are
-// retried: aborts from Stop / tab hidden propagate immediately, and once the
+// retried: aborts from Stop / leaving the page propagate immediately, and once the
 // attempts are exhausted the error reaches the pipeline's usual error stage.
 const MAX_STEP_ATTEMPTS = 3;
 const STEP_RETRY_DELAY_MS = 1000;
@@ -754,7 +754,9 @@ async function transcribe(session, start, purpose) {
 }
 
 async function tick(session) {
-  await delay(100, session.signal);
+  // Paced by capture blocks rather than a bare timer, so the loop keeps its
+  // 100 ms cadence while the window is minimized; see Microphone.tick.
+  await session.mic.tick(100, session.signal);
   check(session);
   session.mic.check();
 }
@@ -850,7 +852,7 @@ async function waitForQuiet(session, maxMs, quietMs) {
   while (performance.now() < deadline) {
     quietFor = session.mic.buffer.level < VOICE_THRESHOLD ? quietFor + 100 : 0;
     if (quietFor >= quietMs) return;
-    await delay(100, session.signal);
+    await session.mic.tick(100, session.signal);
   }
 }
 
@@ -1096,7 +1098,9 @@ function watchForVoiceCommand(session, signal, speech) {
   const runner = (async () => {
     if (!session.mic) return;
     while (watching && !signal.aborted) {
-      await delay(150, signal).catch(() => {});
+      // Audio-clocked like the wake loop, so a spoken "stop" is still caught
+      // promptly while the window is minimized.
+      await session.mic.tick(150, signal).catch(() => {});
       if (!watching || signal.aborted) return;
       const buffer = session.mic.buffer;
       if (buffer.lastVoice <= probedThrough) continue;
@@ -1207,9 +1211,9 @@ function fatal(session, error) {
 }
 
 el.armButton.addEventListener("click", async () => {
-  if (!config || document.hidden) return;
+  if (!config) return;
   const session = newSession();
-  stage("prompting", "Opening microphone", "Allow microphone access. Keep this tab in the foreground.");
+  stage("prompting", "Opening microphone", "Allow microphone access. You can minimize the window once armed.");
   try {
     session.mic = new Microphone(session.signal);
     const unlock = new SpeechSynthesisUtterance("");
@@ -1386,8 +1390,24 @@ el.signOutButton.addEventListener("click", async () => {
   showLogin();
 });
 
+// Minimizing the window or switching tab must not disarm Jarvis: the whole
+// point of a wake word is that it is heard while you are doing something else.
+// An armed session therefore survives going hidden — capture, wake probes and
+// speech all continue, and the pipeline loop is clocked off the audio thread
+// (see Microphone.tick) so background timer throttling cannot slow it down.
+// Only Stop, an error or leaving the page releases the microphone. The browser
+// keeps showing its recording indicator throughout, so the mic is never live
+// without the user being able to see it.
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && current) stop("Tab hidden; microphone and pending requests stopped. Re-arm when ready.");
+  if (!current) return;
+  if (document.hidden) {
+    log("session", "Window hidden; still armed and listening for the wake word.");
+    return;
+  }
+  // Some browsers suspend the audio graph across a minimize; nudge it back so
+  // the first probe after returning is not cut short.
+  current.mic?.context.resume().catch(() => {});
+  log("session", "Window visible again; still armed.");
 });
 window.addEventListener("pagehide", () => stop());
 el.armButton.disabled = el.sendManualButton.disabled = true;

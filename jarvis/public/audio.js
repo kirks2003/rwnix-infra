@@ -82,6 +82,8 @@ export class Microphone {
     this.buffer = new AudioBufferWindow(this.context.sampleRate);
     this.lastBlockAt = performance.now();
     this.failure = null;
+    // Resolvers waiting for the next capture block; see tick().
+    this.waiters = new Set();
     signal.addEventListener("abort", () => this.close(), { once: true });
   }
 
@@ -120,17 +122,63 @@ export class Microphone {
       if (this.signal.aborted) return;
       this.buffer.push(data);
       this.lastBlockAt = performance.now();
+      // Wake the pipeline loop from the audio thread, not from a timer.
+      if (this.waiters.size) {
+        const waiting = [...this.waiters];
+        this.waiters.clear();
+        for (const wake of waiting) wake();
+      }
     };
     this.inputMix.connect(this.node);
     this.node.connect(this.context.destination);
     this.lastBlockAt = performance.now();
   }
 
+  // The pipeline's clock. A plain setTimeout is not one while the window is
+  // minimized or the tab is in the background: Chrome clamps background timers
+  // to >= 1 s (and far less often under intensive throttling), which would
+  // stretch the 100 ms poll into a wake loop that reacts seconds late. Capture
+  // blocks arrive from the AudioWorklet's real-time thread as port messages —
+  // tasks, not timers, and never throttled while a microphone stream is live —
+  // so a block arrival is what advances the loop; the timer is only the
+  // fallback that still fires if capture itself has died (check() then reports
+  // it). Either way at least `ms` of wall time passes, so the cadence is the
+  // same in the foreground as in the background.
+  tick(ms, signal = this.signal) {
+    return new Promise((resolve, reject) => {
+      signal.throwIfAborted();
+      const started = performance.now();
+      const settle = () => {
+        clearTimeout(timer);
+        this.waiters.delete(wake);
+        signal.removeEventListener("abort", cancel);
+        resolve();
+      };
+      const wake = () => {
+        if (performance.now() - started >= ms) settle();
+        else this.waiters.add(wake);
+      };
+      const cancel = () => {
+        clearTimeout(timer);
+        this.waiters.delete(wake);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(settle, ms);
+      this.waiters.add(wake);
+      signal.addEventListener("abort", cancel, { once: true });
+    });
+  }
+
   check() {
     this.signal.throwIfAborted();
     if (this.failure) throw this.failure;
-    if (this.context.state !== "running" || performance.now() - this.lastBlockAt > 3000) {
-      throw new Error("Microphone capture paused. Keep this tab in the foreground and re-arm.");
+    // A suspended context is recoverable (the browser may suspend it around a
+    // minimize or a device change), so ask it back rather than ending the
+    // session; the stale-block rule below is what actually decides whether
+    // capture is still alive.
+    if (this.context.state === "suspended") this.context.resume().catch(() => {});
+    if (this.context.state === "closed" || performance.now() - this.lastBlockAt > 3000) {
+      throw new Error("Microphone capture stopped. Re-arm to reopen the microphone.");
     }
   }
 
@@ -175,6 +223,7 @@ export class Microphone {
   }
 
   close() {
+    this.waiters.clear();
     if (this.node) {
       this.node.port.onmessage = null;
       this.node.disconnect();

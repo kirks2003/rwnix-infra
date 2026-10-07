@@ -153,7 +153,7 @@ Concrete defects in the successive implementations:
 - Independent UI/restart/TTS timers and mutable recording flags allowed late callbacks to affect later runs.
 - Whisper/brain requests had no deadline; upstream failures were returned as HTTP 200, and wake polling treated failures like no wake word.
 
-The replacement uses one sequential async pipeline per cancellable browser session and valid WAV snapshots from a bounded PCM ring. Stop/re-arm and tab hiding invalidate the session, cancel downstream fetches and release the mic. Voice probes overlap; command completion waits for silence. The UI distinguishes listening, checking wake audio, command capture, Whisper, brain, TTS and errors. The displayed last STT endpoint/request ID comes from the response rather than a hardcoded success label.
+The replacement uses one sequential async pipeline per cancellable browser session and valid WAV snapshots from a bounded PCM ring. Stop/re-arm and leaving the page invalidate the session, cancel downstream fetches and release the mic; hiding the tab or minimizing the window does not — an armed session keeps listening in the background, clocked off capture blocks rather than throttled background timers. Voice probes overlap; command completion waits for silence. The UI distinguishes listening, checking wake audio, command capture, Whisper, brain, TTS and errors. The displayed last STT endpoint/request ID comes from the response rather than a hardcoded success label.
 
 Whisper has a 20-second deadline per attempt; brain has a 45-second deadline. Actual upstream failures return HTTP 502 with attempt details. Valid silence/hallucination filtering returns `noSpeech: true` with empty text and a `whisper_no_speech` log, never a fabricated prompt. Browser errors are visible before bounded retry; capture failure requires re-arming.
 
@@ -192,7 +192,7 @@ The UI's **MCP web search** toggle (per browser, saved in local storage like the
 ## Browser limitations and next improvements
 
 - Browser speech recognition is not used. While armed, voice-containing ambient audio is sent to the configured vm103 service to check for wake words; this is not on-device wake detection.
-- Android Chrome can stop capture when the tab is backgrounded, the device locks, or the OS throttles the browser. This build explicitly disarms on tab hiding.
+- Android Chrome can stop capture when the tab is backgrounded, the device locks, or the OS throttles the browser. This build no longer disarms on tab hiding — an armed session keeps listening — so on mobile the session survives backgrounding only as far as the OS lets capture continue; if the platform does cut capture, the stale-block watchdog (no capture block for 3 s) surfaces it as an error and the user re-arms.
 - A production wake-word path should replace the current wake listener with an on-device WASM model such as Porcupine or another local wake-word model.
 - Browser TTS is intentionally used for the first version; cloned/server-side TTS can be added later behind a backend proxy if needed.
 
@@ -891,7 +891,7 @@ Two requested behaviours shipped together:
    listening and making the user speak the input again. Covered steps:
    wake-probe transcription, command transcription (the audio window is
    still in the 45 s capture buffer), the brain request (prompt captured),
-   and the speech output (answer text known). Aborts (Stop, tab hidden)
+   and the speech output (answer text known). Aborts (Stop, leaving the page)
    propagate immediately; after all 3 attempts the error reaches the
    pipeline's usual red error stage and backoff. The Live log records each
    attempt (`<step> failed (attempt N/3): …; retrying in 1000 ms`) and the
@@ -2735,3 +2735,90 @@ Google Finance ab (…NVD:FRA) und sag mir den aktuellen Kurs" → the brain cal
 and answered **214,70 € (+0,82 %, +1,75 €)**, Vortagesschluss 212,95 € — the
 exact live quote, read from the rendered page, not recalled. No static-asset
 change, so no browser hard refresh is needed (backend/image only).
+
+## 2026-10-07: an armed session survives a minimized window (no more auto-disarm)
+
+**Symptom.** Arm Jarvis, then minimize the Chrome window on Windows: the UI
+dropped straight back to **Stopped** and the microphone was released. Returning
+to the window meant clicking **Arm Jarvis** again. A wake word you have to be
+looking at the page for is not a wake word.
+
+**Cause.** `public/app.js` disarmed on purpose:
+
+```js
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && current) stop("Tab hidden; microphone and pending requests stopped. Re-arm when ready.");
+});
+```
+
+Chrome fires `visibilitychange` with `document.hidden === true` when a window is
+minimized, not just when the tab is switched away, so a minimize hit the same
+path as leaving the page.
+
+**Why the handler existed at all**, and why removing it is not enough: the
+pipeline polls on `setTimeout` (`tick()` → `delay(100)`, the voice stop-watch →
+`delay(150)`). Chrome clamps timers in a hidden page to **>= 1 s**, and after
+five minutes hidden to roughly **once a minute** under intensive throttling. So
+simply keeping the session alive would have produced a session that is nominally
+armed but reacts seconds — eventually a minute — late, and `Microphone.check()`
+would then trip its own "no capture block for 3 s" watchdog and error out. The
+disarm was the honest behaviour for a timer-clocked loop.
+
+**Fix — clock the loop off the audio thread, not off timers.** The capture
+AudioWorklet posts a 2048-sample block (~43 ms at 48 kHz) to the main thread for
+the whole session. Those arrive as **tasks, not timers**, and are not throttled
+while a microphone stream is live, so a block arrival is what advances the loop:
+
+- `Microphone.tick(ms, signal)` (new, `public/audio.js`) resolves once **at
+  least `ms` of wall time** has passed, woken by block arrivals; a block that
+  lands early re-arms the waiter instead of resolving, so the cadence is the
+  same in the foreground as in the background. A `setTimeout` is kept as the
+  *fallback* path only — it is what still fires if capture itself has died, so
+  `check()` can report it.
+- `tick()`, `waitForQuiet()` and `watchForVoiceCommand()` in `app.js` use it
+  instead of `delay()`. The inter-cycle pauses (`delay(300)`, the error backoff)
+  stay on plain timers: a 1 s clamp on those is harmless.
+- `Microphone.check()` no longer treats a non-running context as fatal. A
+  **suspended** context is recoverable (the browser may suspend the graph around
+  a minimize), so it calls `context.resume()` and keeps going; only a *closed*
+  context or a stale capture buffer (no block for 3 s) ends the session. The
+  message lost its "keep this tab in the foreground" instruction.
+- `visibilitychange` now logs `Window hidden; still armed and listening for the
+  wake word.` and, on return, nudges `context.resume()`. `pagehide` still
+  stops — leaving the page genuinely must release the mic.
+- The `document.hidden` guard on the Arm button is gone (it was unreachable: you
+  cannot click a button in a minimized window) and the opening-microphone stage
+  now reads "You can minimize the window once armed."
+
+**Privacy note.** The microphone is now live while the page is not visible,
+which is the requested behaviour, but it is deliberately not silent about it:
+only **Stop**, a pipeline error or leaving the page releases capture, and
+Chrome's own recording indicator (tab marker + taskbar/omnibox icon) stays up
+for the entire armed session, so the mic is never live without the user being
+able to see it. Wake probes still go to the configured Whisper server exactly as
+before — hiding the window changes nothing about what is uploaded.
+
+**Tests.** `tests/audio.test.mjs` gains three `Microphone.tick` cases against
+the prototype (a real `Microphone` needs an `AudioContext`): a block advances
+the clock **with `setTimeout` stubbed out to never fire** (the throttled
+background case), an early block re-arms rather than resolving early, the timer
+still resolves when capture has gone silent, and an abort rejects the pending
+tick and drops its waiter. The Chromium lifecycle test formerly named "hiding
+the tab releases capture" is now "hiding the tab keeps the session armed": after
+the `visibilitychange`, the stage stays **Wake listening**, every track stays
+`live`, the log carries the still-armed line, and it waits out another 3.5 s —
+past the stale-block watchdog — to prove the loop is still being driven, before
+**Stop** ends the tracks. Unit **148/148**, browser **43/43** (2 skipped: the
+live-backend tests).
+
+**Not verified here:** the browser test spoofs `document.hidden`, so the page is
+really visible and Chromium's throttling is not actually engaged; the
+unthrottled-timer path is covered by the unit test instead. A genuinely
+minimized Windows Chrome window has not been exercised in CI — worth one manual
+check after deploy (arm, minimize for >5 min to cross into intensive throttling,
+speak the wake word).
+
+**Deploy:** static assets only (`public/app.js`, `public/audio.js`,
+`public/index.html`) plus tests and docs — no image rebuild needed, but it is a
+static-asset change, so a **browser hard refresh** is required for clients to
+pick it up.
