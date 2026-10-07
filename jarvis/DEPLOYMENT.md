@@ -3706,3 +3706,22 @@ reading the CSS:
   container: no `xauth`). The layout measurement works headless either
   way, which is what the test asserts.
 - Unit suite 155/155, browser suite 53 pass + 2 opt-in skips.
+
+**Rolled out 2026-10-07 ~21:28.**
+
+- Backup first: `jarvis-code.bak-20261007_212754.tgz` under
+  `/home/ubuntu/docker/`.
+- Synced `public/index.html` + `public/style.css`, then
+  `docker compose up -d --build jarvis` (the code is baked into the image,
+  see the entry above).
+- Verified on `http://192.168.54.111:8094`: container `healthy`,
+  `/api/health` `ok: true`, served md5s match the committed source
+  (`index.html` `de979752…`, `style.css` `a10758df…`, `app.js`
+  `2c22bc54…`), the served HTML carries two `class="transcript-panel"`
+  divs and `min="1" max="31"`, the served CSS carries `.transcript-panel {`
+  and `scrollbar-gutter: stable` with no `scrollbar-width: thin`, and a
+  live login read 8 stored turns back out of the 31-day window
+  (`?days=0` still 400).
+
+Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
+where the old UI is cached.
