@@ -166,10 +166,18 @@ const EMBEDDING_API_KEY = process.env.EMBEDDING_API_KEY || process.env.BRAIN_OVH
 // other way round — which this app needs, having a language switch. Measured
 // on the fleet's endpoint: 1024 dims, ~0.3 s for a small batch.
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "bge-m3";
-// Measured against real turns with bge-m3: related turns scored 0.60-0.61
-// (including across languages) and unrelated ones 0.37-0.49, so 0.55 sits in
-// the gap. Raise it for stricter hits, lower it for more recall.
-const EMBEDDING_MIN_SCORE = Number(process.env.EMBEDDING_MIN_SCORE || 0.55);
+// Calibrated twice against the live endpoint. Full-sentence queries put
+// related turns at 0.60-0.61 and unrelated at 0.37-0.49, which suggested
+// 0.55 — but the brain does not send sentences, it sends short phrases, and
+// those score lower: the real query "pet appetite problem" scored 0.535
+// against the turn "the cat refuses to eat the new food" and was missed,
+// while noise stayed at 0.37-0.38. Hence 0.50, measured from the queries the
+// tool actually receives rather than from the ones a human would type.
+const EMBEDDING_MIN_SCORE = Number(process.env.EMBEDDING_MIN_SCORE || 0.5);
+// Above this a hit is a confident match; between the floor and this it is
+// shown but flagged, so the brain can weigh a loose association instead of
+// treating it as fact.
+const EMBEDDING_STRONG_SCORE = 0.58;
 const EMBEDDING_TIMEOUT_MS = 20000;
 // One embedding covers a whole turn (prompt + answer); longer turns are cut,
 // since the opening of a turn carries its topic.
@@ -220,8 +228,14 @@ async function embed(inputs, signal) {
 // conversation on first start, plus anything a failed call left behind. One
 // run at a time, bounded per call, never blocking a request.
 let backfillRunning = false;
+let backfillQueued = false;
 async function backfillEmbeddings(maxBatches = 20) {
-  if (!embeddingConfigured || backfillRunning) return { embedded: 0 };
+  if (!embeddingConfigured) return { embedded: 0 };
+  // Coalesce instead of dropping: several turns stored in quick succession
+  // used to hit this guard and get skipped, leaving them unembedded (and so
+  // unfindable by meaning) until the next restart. Measured on the live
+  // instance: 6 of 8 rapid writes had no vector.
+  if (backfillRunning) { backfillQueued = true; return { embedded: 0, queued: true }; }
   backfillRunning = true;
   let embedded = 0;
   try {
@@ -245,8 +259,20 @@ async function backfillEmbeddings(maxBatches = 20) {
     console.log(JSON.stringify({ level: "warn", msg: "embedding_backfill_failed", error: String(error.message || error).slice(0, 200), embedded }));
   } finally {
     backfillRunning = false;
+    if (backfillQueued) {
+      backfillQueued = false;
+      setImmediate(() => { backfillEmbeddings().catch(() => {}); });
+    }
   }
   return { embedded };
+}
+
+// Safety net for turns whose embedding call failed while the endpoint was
+// down: without it they would wait for a restart. Unref'd so it never holds
+// the process open.
+const EMBEDDING_SWEEP_MS = 5 * 60 * 1000;
+if (embeddingConfigured) {
+  setInterval(() => { backfillEmbeddings().catch(() => {}); }, EMBEDDING_SWEEP_MS).unref();
 }
 
 // Cosine ranking over one user's embedded turns. Brute force on purpose: a
@@ -763,7 +789,7 @@ const server = http.createServer(async (req, res) => {
       conversationStore.insert.run({ user: req.user, ...entry });
       // Fire-and-forget: the turn is stored either way, and an embedding
       // failure only means this turn is keyword-only until the next backfill.
-      backfillEmbeddings(1).catch(() => {});
+      backfillEmbeddings().catch(() => {});
       return json(res, 200, { requestId, entry });
     }
 
@@ -1767,7 +1793,7 @@ async function searchHistory(user, args) {
   for (const row of semanticRows) {
     const existing = byId.get(row.id);
     if (existing) existing.how = `words + meaning, similarity ${row.score.toFixed(2)}`;
-    else if (byId.size < limit * 2) byId.set(row.id, { ...row, how: `meaning, similarity ${row.score.toFixed(2)}` });
+    else if (byId.size < limit * 2) byId.set(row.id, { ...row, how: `meaning, similarity ${row.score.toFixed(2)}${row.score < EMBEDDING_STRONG_SCORE ? " — loosely related, treat with care" : ""}` });
   }
   const rows = [...byId.values()].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
   if (!rows.length) return `Nothing in this user's last ${days} days of conversation matches "${query}", by words or by meaning${semanticNote}.`;

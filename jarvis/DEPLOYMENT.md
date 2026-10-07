@@ -3810,9 +3810,20 @@ did I park my car?" against seven stored-turn texts scored:
 | "actual todos?" | 0.413 |
 | "what is the weather today" | 0.374 |
 
-Related 0.60-0.61, unrelated 0.37-0.49, so `EMBEDDING_MIN_SCORE` defaults
-to **0.55**, in the gap. Note both relevant turns share *no word* with the
-query — keyword search finds neither.
+Related 0.60-0.61, unrelated 0.37-0.49. Note both relevant turns share *no
+word* with the query — keyword search finds neither.
+
+**That calibration was wrong, and the live end-to-end check caught it.**
+Those numbers come from full-sentence queries; the brain does not send
+sentences, it sends short phrases, which score lower. Asked "Did I ever
+mention a problem with my pet appetite?" against a stored "the cat refuses
+to eat the new food", the live assistant answered "nothing came up" — the
+tool had sent the query `pet appetite problem`, which scored **0.535**
+against that turn, just under a 0.55 floor, while noise sat at 0.37-0.38.
+`EMBEDDING_MIN_SCORE` therefore defaults to **0.50**, calibrated on the
+queries the tool actually receives. Hits between the floor and 0.58 are
+labelled "loosely related, treat with care" so the brain weighs them
+instead of reading them as fact.
 
 - `conversation_embeddings(conversation_id, model, dims, vec)`, a separate
   table so a model change is a DELETE, never a migration of the
@@ -3843,4 +3854,12 @@ query — keyword search finds neither.
   unrelated turn, cross-user isolation, the degraded path with the
   endpoint down, the unconfigured path, and the startup backfill picking
   up a turn stored before the feature existed.
-- Unit suite 162/162, browser suite 53 pass + 2 opt-in skips.
+- **Second defect found by the same live check**: the backfill's
+  "already running" guard *dropped* concurrent requests instead of
+  queueing them, so turns written back-to-back never got vectors — 6 of 8
+  rapid writes on the live instance, recoverable only by a restart. It now
+  coalesces (a request arriving mid-run re-runs afterwards) and an unref'd
+  5-minute sweep catches anything an endpoint outage left behind. The
+  regression test stores 8 turns at once and demands 8 vectors; against the
+  old guard it gets 1.
+- Unit suite 163/163, browser suite 53 pass + 2 opt-in skips.

@@ -7,6 +7,7 @@ import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { AudioBufferWindow } from "../public/audio.js";
 
 let upstream, backend, origin, endpoint, speechEndpoint, base;
@@ -1172,6 +1173,30 @@ test("history search is semantic: it finds the turn that means the same thing", 
   // And the semantic half is owner-scoped like the keyword half.
   assert.doesNotMatch(result, /Noted, Mila/, result);
   mode = "success";
+});
+
+test("turns stored back-to-back all get embedded, none dropped by the backfill guard", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-burst-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "conversations.db");
+  const { process: child, origin: backendOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+  // A burst: each POST kicks off a fire-and-forget embedding run, so all but
+  // the first land while one is already running. They used to be dropped and
+  // stay unembedded until the next restart (measured live: 6 of 8).
+  await Promise.all(Array.from({ length: 8 }, (_, index) => auth(backendOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: `burst turn ${index} about the car`, answer: `answer ${index}` }),
+  }, roman)));
+  // Let the coalesced runs drain.
+  await setTimeoutPromise(1500);
+  const db = new Database(dbPath, { readonly: true });
+  t.after(() => db.close());
+  const turns = db.prepare("SELECT COUNT(*) AS n FROM conversations").get().n;
+  const embedded = db.prepare("SELECT COUNT(*) AS n FROM conversation_embeddings").get().n;
+  assert.equal(turns, 8);
+  assert.equal(embedded, 8, `every stored turn needs a vector, got ${embedded}/${turns}`);
 });
 
 test("a failing embedding endpoint degrades to keyword search instead of failing the turn", async (t) => {
