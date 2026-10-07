@@ -63,7 +63,9 @@ Findings while exposing the service:
 - Brain: backend proxy to the selected AI API endpoint profile. The UI's **AI API endpoint** selector is saved per browser; live vm104 has `a1-deepseek`, `a1-qwen`, `ovhcloud` and `openrouter` configured. `claudecode` is listed but disabled until a Claude Code OpenAI-compatible gateway is provided.
 - Output: the selected answer voice plus prompt/result text in the UI
 - Hero controls (2026-10-07): the **Jarvis on/off** switch (enable/disable the session) and the **Speak / Text only** switch (voice output; per browser) sit left of Sign out, in a `.user-controls` cluster.
-- Conversation history (2026-10-07): every finished turn (prompt + answer, server-stamped) is stored per user (`conversationLogs` in `server.js`, 500-entry cap); `GET /api/conversation` serves the last 24 days, and the Prompt/Answer panels render that window as a scrollable history with date-time stamps.
+- Conversation history (2026-10-07): every finished turn (prompt + answer, server-stamped) is stored per user in **SQLite** (`CONVERSATION_DB_PATH`, the `jarvis_data` volume at `/data/conversations.db`, no entry cap — it survives container rebuilds). `GET /api/conversation?days=N` serves a window (backend clamp 1..365, default 24); the Prompt/Answer panels **are** the history — each a scrollable list of every stored turn with its date-time stamp — and one **History** slider (1-31 days) above them picks the window. There is no separate history panel.
+- Conversation search (2026-10-07): the brain reaches past its in-context window with the **`search_history`** tool — **hybrid**, literal word matching unioned with **semantic** matching over per-turn embeddings (`conversation_embeddings`, `bge-m3` on the OVHcloud endpoint via `EMBEDDING_*`, floor `EMBEDDING_MIN_SCORE=0.50`), so "where did I park my car" finds a turn that only said "Tesla", in either language. Embedded on write plus a background backfill; a missing or failing endpoint degrades to keyword-only and says so. Short-term memory is rebuilt from the store on a cold process, so a restart no longer makes Jarvis claim it has never spoken to the user. Every parameter is a slider in the **History search** panel (last panel on the page, under the Panels switch); the backend owns the limits (`HISTORY_SETTINGS`, advertised in `/api/config`) and the window/max-results values are ceilings the brain cannot widen.
+- Testing against the live instance (2026-10-07): every answered `/api/chat` turn is ingested into the **signed-in user's knowledge graph**, so probe as the **`admin`** account — admin turns are deliberately not auto-ingested, so they write nothing into anyone's graph.
 - Graph policy (2026-10-07): no entity may exist without a bounded path of fact edges to its owner — after every ingestion and every entity removal, disconnected clusters are swept (`DISCONNECT_SWEEP` in `graphdb.js`), and every sweep is counted in the activity feed. The seed graph (Mila: Rocky/Berlin/Kokoro-82M; Roman: Coffee) is pre-policy legacy state, swept on that user's first ingestion or removal.
 - Answer voice: the UI's **Answer voice** select and **Speaking speed** slider (0.60x-1.60x, a multiplier on the voice's own pace) persist locally per browser/origin. **Browser voice** uses `speechSynthesis`; **HAL 9000** and the character profiles (Commander, Android, Wizard, Newscaster) proxy clauses through `/api/speak` to `TTS_ENDPOINTS` (OpenAI `/v1/audio/speech`) and shape them in Web Audio. The deployed backend is the `speaches` Kokoro container on gpu-1; `server.js` maps each profile to its own Kokoro voice (`profileVoices`), so the timbre changes with the profile.
 - Language: the UI's **Language** toggle (English/Deutsch, per browser) sends the language with every Whisper request (`/api/transcribe?language=…`), appends a `Language override` directive to the brain system prompt per `/api/chat` request, and switches spoken output. German answers are spoken with the browser voice (German voice preferred) because the Kokoro engine ships English voices only; `/api/speak` rejects non-English with `tts_language_unsupported` as a backstop.
@@ -3613,72 +3615,6 @@ database (previously an in-memory map, lost on every restart).
 
 Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
 where the old UI is cached.
-
-**Verifying the ceiling (and a misread along the way).** The first live
-check compared the same question at `maxResults` 1 and 8 and saw ~5.8 KB
-both times, which read as "the slider does nothing". That reading was not
-trustworthy: both log lines carried the *same* requestId (the brain
-searched twice within one turn) and the window overlapped the pre-fix
-container. A controlled run settled it — five known turns, `snippetChars`
-100, same query:
-
-| maxResults | tool result |
-| --- | --- |
-| 1 | 229 chars |
-| 3 | 616 chars |
-| 5 | 1084 chars |
-
-Linear, one entry each: the panel value reaches the live search and holds
-as a ceiling. **Lesson for next time: when a live probe is ambiguous,
-build the controlled case rather than reasoning from the ambiguous one** —
-free-form questions let the brain choose its own query, which changes the
-result size independently of the knob under test.
-
-**Test-data hygiene.** The controlled turns were stored under **Mila**, not
-Roman, and deleted afterwards (22 Roman turns untouched, 23/23 embedded,
-`PRAGMA integrity_check` ok), with the backup taken via
-`VACUUM INTO '/data/conversations.backup-before-zebra-cleanup.db'` — the
-WAL-safe form, per the note in the semantic-search entry above. An earlier
-round had put its test turns straight into Roman's real history, which then
-had to be cleaned out; using the second account avoids that entirely.
-
-## Working note: this session's recurring failure mode
-
-Four separate defects in this day's Jarvis work were **invisible to a green
-test suite and only showed up when the deployed system was driven for
-real**:
-
-1. The History slider strip rendered as a 560px empty box that pushed the
-   Prompt/Answer panels off the first screen — the data-level tests all
-   passed, because the data was fine.
-2. `scrollbar-width: thin` produced a 0-width overlay scrollbar, so there
-   was nothing to grab.
-3. The semantic score floor was calibrated on full sentences, but the brain
-   sends short phrases, which score lower — a real hit at 0.535 fell under
-   a 0.55 floor.
-4. The panel's `max_results` was a default rather than a ceiling, because
-   the mock brain never sent `max_results` of its own and a real one always
-   does.
-
-The common shape: **the test doubles were more obedient than the real
-system.** A mock brain does exactly what the test says; a real brain adds
-arguments, rephrases queries and calls tools twice. A headless screenshot
-is not a browser; a localhost stub is not the fleet.
-
-Practical rules that came out of it, for whoever works on this next:
-
-- After deploying a UI change, **look at the rendered page** (Playwright
-  with `headless: false` under a manually started `Xvfb :99` — `xvfb-run`
-  has no `xauth` in these containers). md5s prove shipping, not visibility.
-- After deploying a brain-facing change, **ask the live assistant a
-  question that exercises it** and read the backend log line, not just the
-  answer.
-- When a knob is meant to bound the brain, **make the mock brain fight it**
-  (ask for more than the knob allows) — otherwise the test only proves the
-  default path.
-- Calibrate thresholds on the inputs the system really receives, not on the
-  ones that are convenient to type.
-
 ## 2026-10-07: the History slider is capped at 31 days
 
 Requested: the Prompt/Answer panels keep the full scrollback with
@@ -3732,72 +3668,6 @@ should limit the window to **1 to 31 days** instead of 1 to 90.
 
 Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
 where the old UI is cached.
-
-**Verifying the ceiling (and a misread along the way).** The first live
-check compared the same question at `maxResults` 1 and 8 and saw ~5.8 KB
-both times, which read as "the slider does nothing". That reading was not
-trustworthy: both log lines carried the *same* requestId (the brain
-searched twice within one turn) and the window overlapped the pre-fix
-container. A controlled run settled it — five known turns, `snippetChars`
-100, same query:
-
-| maxResults | tool result |
-| --- | --- |
-| 1 | 229 chars |
-| 3 | 616 chars |
-| 5 | 1084 chars |
-
-Linear, one entry each: the panel value reaches the live search and holds
-as a ceiling. **Lesson for next time: when a live probe is ambiguous,
-build the controlled case rather than reasoning from the ambiguous one** —
-free-form questions let the brain choose its own query, which changes the
-result size independently of the knob under test.
-
-**Test-data hygiene.** The controlled turns were stored under **Mila**, not
-Roman, and deleted afterwards (22 Roman turns untouched, 23/23 embedded,
-`PRAGMA integrity_check` ok), with the backup taken via
-`VACUUM INTO '/data/conversations.backup-before-zebra-cleanup.db'` — the
-WAL-safe form, per the note in the semantic-search entry above. An earlier
-round had put its test turns straight into Roman's real history, which then
-had to be cleaned out; using the second account avoids that entirely.
-
-## Working note: this session's recurring failure mode
-
-Four separate defects in this day's Jarvis work were **invisible to a green
-test suite and only showed up when the deployed system was driven for
-real**:
-
-1. The History slider strip rendered as a 560px empty box that pushed the
-   Prompt/Answer panels off the first screen — the data-level tests all
-   passed, because the data was fine.
-2. `scrollbar-width: thin` produced a 0-width overlay scrollbar, so there
-   was nothing to grab.
-3. The semantic score floor was calibrated on full sentences, but the brain
-   sends short phrases, which score lower — a real hit at 0.535 fell under
-   a 0.55 floor.
-4. The panel's `max_results` was a default rather than a ceiling, because
-   the mock brain never sent `max_results` of its own and a real one always
-   does.
-
-The common shape: **the test doubles were more obedient than the real
-system.** A mock brain does exactly what the test says; a real brain adds
-arguments, rephrases queries and calls tools twice. A headless screenshot
-is not a browser; a localhost stub is not the fleet.
-
-Practical rules that came out of it, for whoever works on this next:
-
-- After deploying a UI change, **look at the rendered page** (Playwright
-  with `headless: false` under a manually started `Xvfb :99` — `xvfb-run`
-  has no `xauth` in these containers). md5s prove shipping, not visibility.
-- After deploying a brain-facing change, **ask the live assistant a
-  question that exercises it** and read the backend log line, not just the
-  answer.
-- When a knob is meant to bound the brain, **make the mock brain fight it**
-  (ask for more than the knob allows) — otherwise the test only proves the
-  default path.
-- Calibrate thresholds on the inputs the system really receives, not on the
-  ones that are convenient to type.
-
 ## 2026-10-07: the History slider strip was eating the first screen
 
 Reported twice: "show the history in the Prompt and Answer panels with the
@@ -3855,72 +3725,6 @@ reading the CSS:
 
 Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
 where the old UI is cached.
-
-**Verifying the ceiling (and a misread along the way).** The first live
-check compared the same question at `maxResults` 1 and 8 and saw ~5.8 KB
-both times, which read as "the slider does nothing". That reading was not
-trustworthy: both log lines carried the *same* requestId (the brain
-searched twice within one turn) and the window overlapped the pre-fix
-container. A controlled run settled it — five known turns, `snippetChars`
-100, same query:
-
-| maxResults | tool result |
-| --- | --- |
-| 1 | 229 chars |
-| 3 | 616 chars |
-| 5 | 1084 chars |
-
-Linear, one entry each: the panel value reaches the live search and holds
-as a ceiling. **Lesson for next time: when a live probe is ambiguous,
-build the controlled case rather than reasoning from the ambiguous one** —
-free-form questions let the brain choose its own query, which changes the
-result size independently of the knob under test.
-
-**Test-data hygiene.** The controlled turns were stored under **Mila**, not
-Roman, and deleted afterwards (22 Roman turns untouched, 23/23 embedded,
-`PRAGMA integrity_check` ok), with the backup taken via
-`VACUUM INTO '/data/conversations.backup-before-zebra-cleanup.db'` — the
-WAL-safe form, per the note in the semantic-search entry above. An earlier
-round had put its test turns straight into Roman's real history, which then
-had to be cleaned out; using the second account avoids that entirely.
-
-## Working note: this session's recurring failure mode
-
-Four separate defects in this day's Jarvis work were **invisible to a green
-test suite and only showed up when the deployed system was driven for
-real**:
-
-1. The History slider strip rendered as a 560px empty box that pushed the
-   Prompt/Answer panels off the first screen — the data-level tests all
-   passed, because the data was fine.
-2. `scrollbar-width: thin` produced a 0-width overlay scrollbar, so there
-   was nothing to grab.
-3. The semantic score floor was calibrated on full sentences, but the brain
-   sends short phrases, which score lower — a real hit at 0.535 fell under
-   a 0.55 floor.
-4. The panel's `max_results` was a default rather than a ceiling, because
-   the mock brain never sent `max_results` of its own and a real one always
-   does.
-
-The common shape: **the test doubles were more obedient than the real
-system.** A mock brain does exactly what the test says; a real brain adds
-arguments, rephrases queries and calls tools twice. A headless screenshot
-is not a browser; a localhost stub is not the fleet.
-
-Practical rules that came out of it, for whoever works on this next:
-
-- After deploying a UI change, **look at the rendered page** (Playwright
-  with `headless: false` under a manually started `Xvfb :99` — `xvfb-run`
-  has no `xauth` in these containers). md5s prove shipping, not visibility.
-- After deploying a brain-facing change, **ask the live assistant a
-  question that exercises it** and read the backend log line, not just the
-  answer.
-- When a knob is meant to bound the brain, **make the mock brain fight it**
-  (ask for more than the knob allows) — otherwise the test only proves the
-  default path.
-- Calibrate thresholds on the inputs the system really receives, not on the
-  ones that are convenient to type.
-
 ## 2026-10-07: the brain can search the stored conversation
 
 Reported with a transcript: Jarvis answered "this is the first question
