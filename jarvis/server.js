@@ -60,7 +60,8 @@ config.whisperProfiles = buildWhisperProfiles();
 
 let whisperCursor = 0;
 let ttsCursor = 0;
-// Per-user prompt history: authenticated username -> last 10 messages. Each
+// Per-user prompt history: authenticated username -> the last
+// BRAIN_HISTORY_MESSAGES messages, warm for this process only. Each
 // user's cache is fully isolated from every other user's.
 const conversations = new Map();
 // Per-user conversation log (the Prompt/Answer panels' scrollback), in
@@ -96,9 +97,52 @@ function openConversationDb(dbPath) {
     db,
     insert: db.prepare("INSERT INTO conversations (user, ts, prompt, answer) VALUES (@user, @ts, @prompt, @answer)"),
     selectWindow: db.prepare("SELECT ts, prompt, answer FROM conversations WHERE user = @user AND ts >= @floor ORDER BY ts ASC, id ASC"),
+    // The brain's short-term memory after a restart: the newest turns of this
+    // user, newest first (the caller reverses them into chronological order).
+    selectRecent: db.prepare("SELECT ts, prompt, answer FROM conversations WHERE user = @user ORDER BY ts DESC, id DESC LIMIT @limit"),
+    // Free-text search over this user's own stored turns, newest first. The
+    // term list is variable, so the WHERE clause is built per call — the
+    // terms themselves are always bound parameters, never interpolated, and
+    // `user = @user` is prepended here rather than supplied by the caller, so
+    // no query can reach another user's conversation.
+    search(terms, { user, floor, limit }) {
+      const conditions = terms.map((_, index) =>
+        `(prompt LIKE @term${index} ESCAPE '\\' OR answer LIKE @term${index} ESCAPE '\\')`).join(" AND ");
+      const params = { user, floor, limit };
+      terms.forEach((term, index) => { params[`term${index}`] = `%${escapeLike(term)}%`; });
+      return db.prepare(`SELECT ts, prompt, answer FROM conversations
+        WHERE user = @user AND ts >= @floor AND ${conditions}
+        ORDER BY ts DESC, id DESC LIMIT @limit`).all(params);
+    },
   };
 }
+
+// `%`, `_` and the escape character itself are literals in a user's search
+// term, not wildcards: a search for "100%" must not match everything.
+function escapeLike(term) {
+  return term.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
 const conversationStore = openConversationDb(CONVERSATION_DB_PATH);
+
+// The brain carries the last 10 messages (5 turns) in context. On a cold
+// process that cache is empty, so rebuild it from the stored conversation;
+// anything older than this window is reachable through the search_history
+// tool rather than by growing the prompt.
+const BRAIN_HISTORY_MESSAGES = 10;
+
+function recentHistoryFromStore(user) {
+  try {
+    const rows = conversationStore.selectRecent.all({ user, limit: Math.ceil(BRAIN_HISTORY_MESSAGES / 2) });
+    return rows.reverse().flatMap((row) => [
+      { role: "user", content: row.prompt },
+      { role: "assistant", content: row.answer },
+    ]);
+  } catch (error) {
+    // Memory is a convenience; a failed read must not cost the user an answer.
+    console.log(JSON.stringify({ level: "warn", msg: "history_seed_failed", error: String(error.message || error).slice(0, 200) }));
+    return [];
+  }
+}
 
 function conversationDaysFromUrl(reqUrl) {
   const raw = new URL(reqUrl, "http://localhost").searchParams.get("days");
@@ -1186,7 +1230,11 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
     throw new Error("Brain endpoint/model is not configured");
   }
 
-  const history = conversations.get(user) || [];
+  // Short-term memory: the in-process cache when it is warm, otherwise the
+  // newest stored turns. Without the fallback a restart made the brain say
+  // "this is the first question you've asked me" to a user whose panels were
+  // still showing weeks of conversation.
+  const history = conversations.get(user) || recentHistoryFromStore(user);
   const now = new Date();
   // The override wins over a hardcoded answer language in BRAIN_SYSTEM_PROMPT,
   // which is how the UI language switch reaches the brain.
@@ -1275,7 +1323,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
   const messages = [
     {
       role: "system",
-      content: `${config.brainSystemPrompt}\nYour name is ${wakeName} — the user calls you by your wake word, so use "${wakeName}" as your own name in your answers, for example when they ask who you are or address you by name.\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp. Answer directly; do not expose reasoning.`,
+      content: `${config.brainSystemPrompt}\nYour name is ${wakeName} — the user calls you by your wake word, so use "${wakeName}" as your own name in your answers, for example when they ask who you are or address you by name.\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp.\nMemory: the messages above are only the last few turns. Every earlier conversation with this user is stored and searchable with the search_history tool. If they refer to anything from before this session — what they asked, what you answered, a link or a decision — call search_history FIRST and answer from the hits with their dates. Never tell this user you have no conversation history or cannot look back: you can, through that tool. Only after a search comes back empty may you say you found nothing about it.\nAnswer directly; do not expose reasoning.`,
     },
     ...(searchMessage ? [searchMessage] : []),
     ...(graphMessage ? [graphMessage] : []),
@@ -1299,7 +1347,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
       : "Brain returned no answer text");
   }
 
-  const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-10);
+  const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-BRAIN_HISTORY_MESSAGES);
   conversations.set(user, nextHistory);
   // Store the turn in the knowledge graph after the answer is handed back:
   // fire-and-forget so the spoken reply is never blocked by or fails on the
@@ -1484,6 +1532,70 @@ function webTools() {
   ];
 }
 
+// The conversation-history tool. Always offered — it reads nothing but the
+// signed-in user's OWN stored turns, which they can already see in the
+// Prompt/Answer panels, so there is no toggle to get wrong. It exists
+// because the brain's in-context memory is only the last few turns: without
+// it, anything older ("what did I ask you about X last week?") is invisible
+// and the brain truthfully but uselessly says it has no record.
+const HISTORY_TOOL_NAMES = new Set(["search_history"]);
+const HISTORY_SEARCH_MAX_DAYS = 365;
+const HISTORY_SEARCH_DEFAULT_DAYS = 90;
+const HISTORY_SEARCH_MAX_RESULTS = 20;
+const HISTORY_SEARCH_DEFAULT_RESULTS = 6;
+// Long turns are truncated per field so a handful of hits cannot blow the
+// brain's context budget.
+const HISTORY_SNIPPET_CHARS = 600;
+
+function historyTools() {
+  return [
+    {
+      type: "function",
+      function: {
+        name: "search_history",
+        description: "Search this user's own earlier conversations with you (their stored prompts and your answers) for words or a topic. Use it whenever the user refers to something from a past conversation — 'what did I ask you about X', 'what did you tell me last week', 'the link you gave me', 'did we talk about Y' — or when you need what was agreed earlier. Your in-context memory only covers the last few turns of this session; everything older is reachable ONLY through this tool, so search before saying you have no record of something.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The words to look for, e.g. 'Vikunja token' or 'Berlin trip'. All words must appear in the same turn, so use few, distinctive ones." },
+            days: { type: "number", description: `How far back to look, in days (default ${HISTORY_SEARCH_DEFAULT_DAYS}, max ${HISTORY_SEARCH_MAX_DAYS}).` },
+            max_results: { type: "number", description: `Maximum number of matching turns (default ${HISTORY_SEARCH_DEFAULT_RESULTS}, max ${HISTORY_SEARCH_MAX_RESULTS}).` },
+          },
+          required: ["query"],
+        },
+      },
+    },
+  ];
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+function snippet(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  return clean.length > HISTORY_SNIPPET_CHARS ? `${clean.slice(0, HISTORY_SNIPPET_CHARS)}…` : clean;
+}
+
+// The search runs against the signed-in user's own rows only (the store pins
+// `user`), so a prompt injection riding on the brain cannot widen it.
+function searchHistory(user, args) {
+  const terms = String(args.query || "").trim().split(/\s+/).filter(Boolean).slice(0, 6);
+  if (!terms.length) return "No query given. Call search_history again with the words to look for.";
+  const days = clampNumber(args.days, 1, HISTORY_SEARCH_MAX_DAYS, HISTORY_SEARCH_DEFAULT_DAYS);
+  const limit = clampNumber(args.max_results, 1, HISTORY_SEARCH_MAX_RESULTS, HISTORY_SEARCH_DEFAULT_RESULTS);
+  const floor = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const rows = conversationStore.search(terms, { user, floor, limit });
+  if (!rows.length) return `No earlier conversation of this user in the last ${days} days contains ${terms.map((term) => `"${term}"`).join(" and ")}.`;
+  // Oldest first reads like a conversation; the dates are what the user will
+  // recognise, so they lead each hit.
+  return [`${rows.length} earlier turn(s) matching ${terms.map((term) => `"${term}"`).join(" and ")}, oldest first:`]
+    .concat(rows.reverse().map((row) => `[${row.ts}]\nUser: ${snippet(row.prompt)}\nYou: ${snippet(row.answer)}`))
+    .join("\n\n");
+}
+
 // One short, loggable description of a tool call for the activity feed —
 // never raw Cypher (there is none on the surface anymore).
 function graphToolDetail(name, args) {
@@ -1508,7 +1620,10 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
   // Web tool results collected for post-turn ingestion (the extractor reads
   // the search context the turn actually used), separate from the answer.
   const webResults = [];
-  const hasTools = Boolean(useTools || webToolsOn || (vikunjaTools && vikunjaTools.length));
+  // search_history is always in the tool set: it is the user's own stored
+  // conversation and has no browser toggle, so the brain can always reach
+  // back past its in-context window.
+  const hasTools = true;
   for (let round = 0; ; round += 1) {
     const body = {
       model: brainProfile.model,
@@ -1520,7 +1635,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       // budget at the measured ~150 tok/s while staying inside the timeout.
       max_tokens: 4096,
     };
-    if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : []), ...(vikunjaTools || [])];
+    if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : []), ...(vikunjaTools || []), ...historyTools()];
     let data;
     try {
       const response = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
@@ -1588,6 +1703,17 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
           if (totalSignal.aborted) throw error;
           recordGraphActivity({ kind: GRAPH_WRITE_TOOL_NAMES.has(name) ? "brain_write" : "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started });
           local.push({ role: "tool", tool_call_id: call.id, content: `Graph lookup failed: ${error.message}. Answer from what you know.` });
+        }
+      } else if (HISTORY_TOOL_NAMES.has(name)) {
+        // Local SQLite read, scoped to the signed-in user inside the store —
+        // the brain's arguments carry no user and cannot add one.
+        try {
+          const resultText = searchHistory(user, args);
+          console.log(JSON.stringify({ level: "info", requestId, msg: "history_tool", tool: name, query: String(args.query || "").slice(0, 200), ms: Date.now() - started, chars: resultText.length }));
+          local.push({ role: "tool", tool_call_id: call.id, content: resultText });
+        } catch (error) {
+          console.log(JSON.stringify({ level: "warn", requestId, msg: "history_tool", tool: name, ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started }));
+          local.push({ role: "tool", tool_call_id: call.id, content: `History lookup failed: ${error.message}. Answer from what you know.` });
         }
       } else if (webToolsOn && WEB_TOOL_NAMES.has(name)) {
         // The answer language is injected HERE (like the graph user): the

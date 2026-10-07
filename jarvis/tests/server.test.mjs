@@ -10,6 +10,10 @@ import { AudioBufferWindow } from "../public/audio.js";
 
 let upstream, backend, origin, endpoint, speechEndpoint, base;
 let mode = "success";
+// Captured by the history-tool / history-seed mock modes above.
+const historyToolOffers = [];
+const historyToolResults = [];
+const historySeedMessages = [];
 let receivedAuth;
 let disconnected;
 let received;
@@ -142,6 +146,35 @@ before(async () => {
           }));
         }
         return res.end(JSON.stringify({ choices: [{ message: { content: "Fetched the quote page." } }] }));
+      }
+      if (mode === "history-tool") {
+        // The mock brain asks for search_history on the first round and
+        // answers from the hit once the result arrives — exercising the
+        // conversation-search tool loop end to end. The tool result is echoed
+        // into the answer so the test can assert the brain actually saw the
+        // stored turn.
+        const body = JSON.parse(received.toString("utf8") || "{}");
+        const toolResult = (body.messages || []).find((message) => message.role === "tool");
+        if (body.tools && !toolResult) {
+          historyToolOffers.push((body.tools || []).map((tool) => tool.function?.name));
+          return res.end(JSON.stringify({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call_history", type: "function", function: { name: "search_history", arguments: JSON.stringify({ query: "Vikunja token", days: 90 }) } }],
+              },
+            }],
+          }));
+        }
+        historyToolResults.push(String(toolResult?.content || ""));
+        return res.end(JSON.stringify({ choices: [{ message: { content: `Found it: ${String(toolResult?.content || "").slice(0, 200)}` } }] }));
+      }
+      if (mode === "history-seed") {
+        // No tool call: the test only wants the messages the backend built,
+        // to check the brain's short-term memory was rebuilt from the store.
+        historySeedMessages.push(JSON.parse(received.toString("utf8") || "{}").messages || []);
+        return res.end(JSON.stringify({ choices: [{ message: { content: "Noted." } }] }));
       }
       if (mode === "vikunja-tools") {
         // The mock brain asks for list_tasks on the first round (the vikunja
@@ -617,7 +650,10 @@ test("the brain gets web_search and web_news tools and can fetch live news", asy
   // The final request (after the tool round) still offers all three web
   // tools...
   const body = JSON.parse(received.toString("utf8"));
-  assert.deepEqual(body.tools.map((tool) => tool.function.name), ["web_search", "web_news", "web_fetch"]);
+  // search_history rides along on every chat (the user's own stored
+  // conversation, no toggle); the web toggle adds exactly these three.
+  assert.deepEqual(body.tools.map((tool) => tool.function.name),
+    ["web_search", "web_news", "web_fetch", "search_history"]);
   // ...and the tool round landed: the brain's web_news call got the mock
   // result, the backend injected the answer language (lang) per call, and
   // the brain only supplied the topic — the MCP never sees a brain-chosen
@@ -1018,6 +1054,109 @@ test("the conversation log stores finished turns per user, windowed to 24 days",
   assert.equal(milaLog.entries.length, 1, JSON.stringify(milaLog.entries));
 });
 
+test("the brain can search the user's stored conversation, scoped to that user", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-search-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { process: child, origin: backendOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: join(dir, "conversations.db"),
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+  const mila = await login(backendOrigin, "Mila");
+  const post = (cookie, prompt, answer) => auth(backendOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, answer }),
+  }, cookie);
+  await post(roman, "where is my Vikunja token stored?", "In the .env on vm104, Roman.");
+  await post(roman, "what is the weather", "Sunny.");
+  // Mila's turn matches the same words: it must never reach Roman's brain.
+  await post(mila, "my Vikunja token is secret", "Noted, Mila.");
+
+  mode = "history-tool";
+  historyToolOffers.length = 0;
+  historyToolResults.length = 0;
+  const response = await auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "what did I ask you about the Vikunja token?" }),
+  }, roman);
+  assert.equal(response.status, 200);
+  const answer = (await response.json()).answer;
+
+  // The tool is offered with no MCP toggle on: it reads the user's own
+  // stored conversation, so there is no switch to forget.
+  assert.ok(historyToolOffers[0].includes("search_history"), JSON.stringify(historyToolOffers));
+  const toolResult = historyToolResults[0];
+  assert.match(toolResult, /where is my Vikunja token stored\?/);
+  assert.match(toolResult, /In the \.env on vm104, Roman\./);
+  // Every hit is dated: the dates are how the user recognises the turn.
+  assert.match(toolResult, /\[\d{4}-\d{2}-\d{2}T/);
+  // The non-matching turn is not padding the result.
+  assert.doesNotMatch(toolResult, /Sunny/);
+  // Mila's matching turn is invisible to Roman's brain.
+  assert.doesNotMatch(toolResult, /Noted, Mila/);
+  assert.doesNotMatch(toolResult, /my Vikunja token is secret/);
+  assert.match(answer, /Found it:/);
+  mode = "success";
+});
+
+test("a history search with no hits says so instead of inventing one", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-miss-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { process: child, origin: backendOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: join(dir, "conversations.db"),
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+  await auth(backendOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "unrelated", answer: "unrelated" }),
+  }, roman);
+  mode = "history-tool";
+  historyToolResults.length = 0;
+  await auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "what about the Vikunja token?" }),
+  }, roman);
+  assert.match(historyToolResults[0], /No earlier conversation/);
+  mode = "success";
+});
+
+test("the brain's short-term memory is rebuilt from the store after a restart", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-seed-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "conversations.db");
+  const { process: first, origin: firstOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  const firstExit = new Promise((resolve) => first.once("exit", resolve));
+  t.after(async () => { first.kill(); await firstExit; });
+  const roman = await login(firstOrigin, "Roman");
+  await auth(firstOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "my favourite colour is cyan", answer: "Noted, Roman." }),
+  }, roman);
+  // Restart: the in-process cache is gone, which is exactly the state that
+  // made the brain claim it had never spoken to the user before.
+  first.kill();
+  await firstExit;
+  const { process: second, origin: secondOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  t.after(async () => { second.kill(); await once(second, "exit"); });
+  const romanAgain = await login(secondOrigin, "Roman");
+  mode = "history-seed";
+  historySeedMessages.length = 0;
+  await auth(secondOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "what is my favourite colour?" }),
+  }, romanAgain);
+  const messages = historySeedMessages[0] || [];
+  assert.ok(messages.some((message) => message.role === "user" && message.content === "my favourite colour is cyan"),
+    JSON.stringify(messages.map((message) => [message.role, String(message.content).slice(0, 60)])));
+  assert.ok(messages.some((message) => message.role === "assistant" && message.content === "Noted, Roman."),
+    JSON.stringify(messages.map((message) => [message.role, String(message.content).slice(0, 60)])));
+  // And the brain is told the tool exists, so it looks back instead of
+  // saying it has no history.
+  assert.match(String(messages[0].content), /search_history/);
+  mode = "success";
+});
+
 test("the conversation store is a database: ?days= windows it and it survives a restart", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-conversation-db-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -1035,7 +1174,7 @@ test("the conversation store is a database: ?days= windows it and it survives a 
   await post(firstOrigin, mila, "first question", "first answer");
   await post(firstOrigin, mila, "second question", "second answer");
   // The History slider's ?days= parameter: a fresh entry is inside any
-  // window, and invalid values are rejected (the slider is 1..90, the
+  // window, and invalid values are rejected (the slider is 1..31, the
   // backend clamps 1..365).
   const days = (daysParam) => auth(firstOrigin, `/api/conversation${daysParam}`, {}, mila);
   const oneDay = await (await days("?days=1")).json();

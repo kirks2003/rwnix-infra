@@ -8,6 +8,14 @@ import graphdb from "../graphdb.js";
 
 // --- parseExtraction ---------------------------------------------------------
 
+// The graph tool surface only. `search_history` is offered on every chat
+// (it reads the user's own stored conversation and has no toggle), so these
+// assertions filter it out rather than restating it in each expected list.
+const NON_GRAPH_TOOLS = new Set(["search_history"]);
+const graphToolNames = (tools) => (tools || [])
+  .map((tool) => tool.function.name)
+  .filter((name) => !NON_GRAPH_TOOLS.has(name));
+
 test("parseExtraction handles plain, fenced and prose-wrapped JSON", () => {
   const plain = graphdb.parseExtraction('{"entities":[{"name":"Mila","type":"person"}],"relations":[{"from":"Mila","to":"Berlin","type":"LIVES_IN"}]}');
   assert.deepEqual(plain, {
@@ -1315,8 +1323,9 @@ test("a chat with the graph toggle on degrades gracefully when unconfigured", as
   const result = await response.json();
   assert.ok(result.answer);
   assert.match(receivedChat.messages[0].content, /knowledge graph \(MCP graph server\) is ON in the user's browser but not configured/);
-  // No tools are offered without a configured store, and nothing was ingested.
-  assert.equal(receivedChat.tools, undefined);
+  // No GRAPH tools are offered without a configured store, and nothing was
+  // ingested. (search_history is still there: it needs no graph.)
+  assert.deepEqual(graphToolNames(receivedChat.tools), []);
 });
 
 test("configured graph: status, schema, context, tool loop and ingestion", async () => {
@@ -1350,7 +1359,7 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
 // The brain got the parameterized read tools (no Cypher on the surface) and
   // the user's stored context.
   assert.equal(toolRequests.length, 1);
-  const names = toolRequests[0].tools.map((tool) => tool.function.name);
+  const names = graphToolNames(toolRequests[0].tools);
   assert.deepEqual(names, ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"]);
   const systemText = toolRequests[0].messages.map((message) => String(message.content || "")).join("\n");
   assert.match(systemText, /Knowledge graph context/);
@@ -1603,7 +1612,7 @@ test("admin write tools: offered only to the admin, routed to the MCP server wit
   assert.equal(response.status, 200);
   assert.equal(toolRequests.length, 1);
   assert.deepEqual(
-    toolRequests[0].tools.map((tool) => tool.function.name),
+    graphToolNames(toolRequests[0].tools),
     ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"],
   );
   // ...and the write call reached the MCP server with the backend-injected
@@ -1634,7 +1643,7 @@ test("admin write tools: offered only to the admin, routed to the MCP server wit
   });
   assert.equal(milaResponse.status, 200);
   assert.deepEqual(
-    toolRequests[0].tools.map((tool) => tool.function.name),
+    graphToolNames(toolRequests[0].tools),
     ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"],
   );
   // ...and a forged write-tool call from one is rejected as unknown before
@@ -1665,7 +1674,7 @@ test("admin rename-entity: on the write surface, routed with the injected args, 
   });
   assert.equal(response.status, 200);
   assert.deepEqual(
-    toolRequests[0].tools.map((tool) => tool.function.name),
+    graphToolNames(toolRequests[0].tools),
     ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"],
   );
   // The rename call reached the MCP server with the backend-injected session

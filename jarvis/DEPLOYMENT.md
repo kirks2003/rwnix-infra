@@ -3725,3 +3725,42 @@ reading the CSS:
 
 Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
 where the old UI is cached.
+
+## 2026-10-07: the brain can search the stored conversation
+
+Reported with a transcript: Jarvis answered "this is the first question
+you've asked me in our current conversation … I don't have that
+conversation history stored" while the Prompt/Answer panels were showing
+weeks of it. The store was never the problem — **nothing connected it to
+the brain**. The panels read SQLite; the brain read a separate in-memory
+`conversations` Map holding the last 10 messages, wiped on every restart.
+
+- **Short-term memory survives a restart**: `recentHistoryFromStore(user)`
+  rebuilds the last 5 turns from SQLite when the in-process cache is cold.
+  That alone fixes the "first question" answer after a container rebuild.
+- **`search_history` tool**: free-text search over the signed-in user's own
+  stored turns — `query` (up to 6 words, ANDed), `days` (1..365, default
+  90), `max_results` (1..20, default 6). Hits come back oldest-first with
+  their ISO timestamps and 600-char snippets per field.
+- It is offered on **every** chat, with no MCP toggle: it reads only this
+  user's own conversation, which they can already read in their panels, so
+  there is no switch to forget. `hasTools` in `runBrain` is now always
+  true.
+- **Scoping**: the `user` pin lives inside the store's `search()`, not in
+  the caller's arguments, so no brain output (or prompt injection riding on
+  it) can reach another account's conversation. Search terms are always
+  bound parameters; `%` and `_` in a term are escaped as literals, so a
+  search for "100%" does not match everything.
+- The system prompt now tells the brain its context is only the last few
+  turns, that everything older is reachable through the tool, and that it
+  must search before saying it has no record.
+- Tests (`tests/server.test.mjs`): the tool loop end to end, a cross-user
+  isolation check (Mila's matching turn must not appear in Roman's tool
+  result), the empty-result wording, and the restart-rebuilds-memory path.
+  Both the isolation and the restart assertions were checked against the
+  pre-fix code and fail on it (Mila's turn leaks; the seeded messages are
+  absent).
+- The graph/web tool-surface assertions in `tests/graph.test.mjs` and
+  `tests/server.test.mjs` now filter or include `search_history` — it joins
+  every offered tool list.
+- Unit suite 158/158, browser suite 53 pass + 2 opt-in skips.
