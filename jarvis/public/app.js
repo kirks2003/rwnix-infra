@@ -25,6 +25,13 @@ const el = Object.fromEntries([
   "graphView2dButton", "graphView3dButton", "graphSchema", "graphActivity",
   "graphNodeSize", "graphNodeSizeValue", "graphTextSize", "graphTextSizeValue",
   "panelsToggle", "panelsBelow",
+  "historySearchPanel", "historySearchReset", "historySearchStatus", "historySearchEngine",
+  "historySearchDays", "historySearchDaysValue",
+  "historySearchResults", "historySearchResultsValue",
+  "historySearchSnippet", "historySearchSnippetValue",
+  "historySearchMemory", "historySearchMemoryValue",
+  "historySearchMinScore", "historySearchMinScoreValue",
+  "historySearchStrongScore", "historySearchStrongScoreValue",
   "loginPanel", "loginForm", "loginUsername", "loginPassword", "loginButton", "loginStatus",
   "userLine", "enableSwitch", "signOutButton",
 ].map((id) => [id, document.getElementById(id)]));
@@ -40,6 +47,7 @@ const graphSizesStorageKey = "jarvis.graphSizes";
 const silenceStorageKey = "jarvis.silenceMs";
 const commandWaitStorageKey = "jarvis.commandWaitMs";
 const historyDaysStorageKey = "jarvis.historyDays";
+const historySearchStorageKey = "jarvis.historySearch";
 const aiProfileStorageKey = "jarvis.aiProfile";
 const whisperProfileStorageKey = "jarvis.whisperProfile";
 let config;
@@ -345,6 +353,110 @@ el.historyDays.addEventListener("input", () => {
   el.historyDaysValue.textContent = historyDaysLabel(historyDays);
 });
 el.historyDays.addEventListener("change", () => applyHistoryDays(el.historyDays.value, true));
+
+// The History search panel: one slider per knob of the backend's
+// `search_history` tool. The backend owns min/max/step/default and advertises
+// them in /api/config (`historySearch`), so the sliders can never offer a
+// value the backend would clamp away — and a backend change moves the UI with
+// it, with no second definition to keep in sync here. Values are saved per
+// browser and ride along with every /api/chat request.
+const historySearchFields = [
+  { key: "days", input: "historySearchDays", output: "historySearchDaysValue", unit: (value) => `${value} day${value === 1 ? "" : "s"}` },
+  { key: "maxResults", input: "historySearchResults", output: "historySearchResultsValue", unit: (value) => `${value} turn${value === 1 ? "" : "s"}` },
+  { key: "snippetChars", input: "historySearchSnippet", output: "historySearchSnippetValue", unit: (value) => `${value} chars` },
+  { key: "memoryTurns", input: "historySearchMemory", output: "historySearchMemoryValue", unit: (value) => `${value} turn${value === 1 ? "" : "s"}` },
+  { key: "minScore", input: "historySearchMinScore", output: "historySearchMinScoreValue", unit: (value) => value.toFixed(2) },
+  { key: "strongScore", input: "historySearchStrongScore", output: "historySearchStrongScoreValue", unit: (value) => value.toFixed(2) },
+];
+// Empty until /api/config lands; an empty object means "use your defaults",
+// which is exactly what the backend does with it.
+let historySearchSettings = {};
+let historySearchSpec = null;
+
+function historySearchDefaults() {
+  return Object.fromEntries(historySearchFields
+    .filter((field) => historySearchSpec?.[field.key])
+    .map((field) => [field.key, historySearchSpec[field.key].default]));
+}
+
+function renderHistorySearch() {
+  for (const field of historySearchFields) {
+    const spec = historySearchSpec?.[field.key];
+    if (!spec) continue;
+    const value = historySearchSettings[field.key] ?? spec.default;
+    el[field.input].value = String(value);
+    el[field.output].textContent = field.unit(Number(value));
+  }
+}
+
+function saveHistorySearch() {
+  try {
+    localStorage.setItem(historySearchStorageKey, JSON.stringify(historySearchSettings));
+    el.historySearchStatus.textContent = "Saved in this browser; applies to the next prompt.";
+  } catch (error) {
+    el.historySearchStatus.textContent = "Active for this tab only; browser storage is unavailable.";
+    log("settings", "Could not save history search settings", { message: error.message });
+  }
+}
+
+// Builds the sliders from the backend's limits, then restores this browser's
+// saved values on top (each one clamped to the advertised range, so a limit
+// the backend tightened later cannot leave a stale value behind).
+function applyHistorySearchConfig(spec) {
+  historySearchSpec = spec || null;
+  if (!historySearchSpec) {
+    el.historySearchStatus.textContent = "This backend does not advertise history-search settings.";
+    return;
+  }
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(historySearchStorageKey) || "{}") || {};
+  } catch {
+    saved = {};
+  }
+  historySearchSettings = historySearchDefaults();
+  for (const field of historySearchFields) {
+    const limits = historySearchSpec[field.key];
+    if (!limits) continue;
+    el[field.input].min = String(limits.min);
+    el[field.input].max = String(limits.max);
+    el[field.input].step = String(limits.step);
+    el[field.input].disabled = false;
+    const value = Number(saved[field.key]);
+    if (Number.isFinite(value)) {
+      historySearchSettings[field.key] = Math.min(limits.max, Math.max(limits.min, value));
+    }
+  }
+  el.historySearchReset.disabled = false;
+  renderHistorySearch();
+  el.historySearchStatus.textContent = Object.keys(saved).length
+    ? "Saved in this browser; applies to the next prompt."
+    : "Backend defaults; change a slider to save your own.";
+}
+
+for (const field of historySearchFields) {
+  const input = el[field.input];
+  if (!input) continue;
+  input.addEventListener("input", () => {
+    historySearchSettings[field.key] = Number(input.value);
+    el[field.output].textContent = field.unit(Number(input.value));
+  });
+  input.addEventListener("change", () => {
+    historySearchSettings[field.key] = Number(input.value);
+    saveHistorySearch();
+    log("settings", `History search ${field.key} = ${input.value}`);
+  });
+}
+
+el.historySearchReset?.addEventListener("click", () => {
+  historySearchSettings = historySearchDefaults();
+  renderHistorySearch();
+  try {
+    localStorage.removeItem(historySearchStorageKey);
+  } catch { /* storage unavailable: the in-memory reset still applies */ }
+  el.historySearchStatus.textContent = "Reset to the backend defaults.";
+  log("settings", "History search settings reset to backend defaults");
+});
 
 // One switch per MCP server (the backend advertises the list in /api/config).
 // Each flag is sent with every /api/chat request as `mcp: { id: bool }` and is
@@ -1394,7 +1506,7 @@ async function answer(session, prompt) {
         method: "POST", headers: { "content-type": "application/json" },
         // The brain answers as the wake word's name, so the active phrase
         // (server default or personal override) travels with every request.
-        body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase, brainProfile: aiProfileId }),
+        body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase, brainProfile: aiProfileId, historySearch: historySearchSettings }),
       });
       if (!data.answer) throw new Error("Brain returned no answer");
       return data;
@@ -2007,6 +2119,12 @@ async function loadConfig(userFromLogin) {
     // also fetches the window and renders both panels.
     applyHistoryDays(savedHistoryDays ?? historyDays, false);
     el.historyDays.disabled = false;
+    // The History search panel's sliders are built from the backend's own
+    // limits, so they only exist once the config has landed.
+    applyHistorySearchConfig(config.historySearch);
+    el.historySearchEngine.textContent = config.embeddingConfigured
+      ? `Semantic search: on, model ${config.embeddingModel}. Searches match by meaning as well as by words.`
+      : "Semantic search: not configured on this backend — searches match literal words only, and the similarity sliders have no effect.";
     let savedSpeakEnabled = null;
     try {
       savedSpeakEnabled = localStorage.getItem(speakEnabledStorageKey);

@@ -275,6 +275,53 @@
           </div>
           <pre id="log"></pre>
         </section>
+
+        <section class="wake-settings history-search-panel" id="historySearchPanel">
+          <h2>History search</h2>
+          <p class="history-search-intro">
+            Every knob of the <code>search_history</code> tool the brain uses to look back through your stored
+            conversation — by words and by meaning. The limits come from the backend, which clamps every request
+            to them, so nothing here can ask for more than it allows. Saved in this browser only; applies to the
+            next prompt.
+          </p>
+          <div class="history-search-grid">
+            <label for="historySearchDays">Search window <output id="historySearchDaysValue">90 days</output></label>
+            <input id="historySearchDays" type="range" disabled aria-describedby="historySearchDaysHelp">
+            <p id="historySearchDaysHelp">How far back a search reaches by default. The brain may narrow it per
+              call; it can never widen it past the backend maximum.</p>
+
+            <label for="historySearchResults">Max results <output id="historySearchResultsValue">6 turns</output></label>
+            <input id="historySearchResults" type="range" disabled aria-describedby="historySearchResultsHelp">
+            <p id="historySearchResultsHelp">How many matching turns come back per search. More context for the
+              brain, but a larger prompt.</p>
+
+            <label for="historySearchSnippet">Snippet length <output id="historySearchSnippetValue">600 chars</output></label>
+            <input id="historySearchSnippet" type="range" disabled aria-describedby="historySearchSnippetHelp">
+            <p id="historySearchSnippetHelp">How much of each matched prompt and answer is quoted back. Longer
+              turns are cut at this length.</p>
+
+            <label for="historySearchMemory">Short-term memory <output id="historySearchMemoryValue">5 turns</output></label>
+            <input id="historySearchMemory" type="range" disabled aria-describedby="historySearchMemoryHelp">
+            <p id="historySearchMemoryHelp">How many recent turns ride along in the prompt without a search.
+              Everything older is reached through the tool.</p>
+
+            <label for="historySearchMinScore">Semantic match floor <output id="historySearchMinScoreValue">0.50</output></label>
+            <input id="historySearchMinScore" type="range" disabled aria-describedby="historySearchMinScoreHelp">
+            <p id="historySearchMinScoreHelp">Cosine similarity a turn needs to count as a meaning match.
+              Measured on real turns: a true hit scored 0.54, noise 0.37-0.38. Lower it for recall, raise it
+              for precision.</p>
+
+            <label for="historySearchStrongScore">Confident match <output id="historySearchStrongScoreValue">0.58</output></label>
+            <input id="historySearchStrongScore" type="range" disabled aria-describedby="historySearchStrongScoreHelp">
+            <p id="historySearchStrongScoreHelp">Above this a hit is handed to the brain plainly; between the
+              floor and this it is flagged "loosely related, treat with care".</p>
+          </div>
+          <div class="history-search-footer">
+            <button id="historySearchReset" type="button" disabled>Reset to backend defaults</button>
+            <p id="historySearchStatus" role="status">Loading history-search settings.</p>
+          </div>
+          <p id="historySearchEngine" class="history-search-engine">Semantic search: checking…</p>
+        </section>
       </div>
     </main>
 

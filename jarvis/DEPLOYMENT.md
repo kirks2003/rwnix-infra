@@ -3889,3 +3889,45 @@ instead of reading them as fact.
   now is), never a plain file copy.
 
 Backend change only: no browser refresh needed.
+
+## 2026-10-07: History search panel — every search parameter as a slider
+
+Requested: all parameters of the prompt/answer search and the semantic
+search in a new panel at the bottom, under the existing Panels on/off
+switch.
+
+- New `#historySearchPanel`, last section inside `#panelsBelow` (so the
+  Panels switch hides it with everything else). Six sliders: **search
+  window** (days), **max results**, **snippet length**, **short-term
+  memory** (turns carried in the prompt without a search), **semantic match
+  floor** and **confident match** threshold — each with a one-line
+  explanation — plus **Reset to backend defaults** and a status line, and a
+  footer stating whether semantic search is configured and with which
+  model.
+- **The backend owns the limits.** `HISTORY_SETTINGS` in `server.js` holds
+  min/max/step/default per knob, `/api/config` advertises it, and the
+  client builds the sliders from that — there is no second copy of the
+  numbers in the browser, so a backend change moves the UI with it and the
+  UI can never offer a value the backend would reject. Every `/api/chat`
+  request carries `historySearch`, re-clamped server-side with
+  `normalizeHistorySettings`, so a hand-made request cannot widen anything
+  either.
+- Saved per browser under `jarvis.historySearch`; saved values are clamped
+  to the advertised range on load, so tightening a backend limit cannot
+  leave a stale value behind.
+- **Defect found while testing the sliders**: the keyword/semantic union
+  was capped at `limit * 2`, one limit per half — so "max results 6" could
+  return 12 turns. It is now capped at `limit` overall, keyword hits first
+  and the strongest semantic hits filling the rest, which is what the
+  slider says.
+- Tests: a server test pins that `/api/config` advertises all six knobs
+  with a self-consistent min/max/step/default, that `maxResults`,
+  `snippetChars` and `minScore` each visibly change the tool result, and
+  that absurd values (days 999999, minScore 42, snippetChars -5) are
+  clamped rather than rejected; a second pins the short-term memory slider
+  against a cold process (`memoryTurns: 2` carries exactly the last two
+  stored turns). A browser test pins that the panel sits inside
+  `#panelsBelow`, that each slider's range comes from the advertised
+  limits, that moved values are sent with the next prompt and survive a
+  reload, and that Reset restores the backend defaults and clears storage.
+- Unit suite 165/165, browser suite 54 pass + 2 opt-in skips.

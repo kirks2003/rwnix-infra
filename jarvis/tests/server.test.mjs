@@ -1175,6 +1175,102 @@ test("history search is semantic: it finds the turn that means the same thing", 
   mode = "success";
 });
 
+test("the History search panel's parameters reach the search, clamped to the backend limits", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-params-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { process: child, origin: backendOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: join(dir, "conversations.db"),
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+
+  // The panel builds its sliders from this, so the limits must be advertised.
+  const config = await (await auth(backendOrigin, "/api/config", {}, roman)).json();
+  assert.deepEqual(Object.keys(config.historySearch).sort(),
+    ["days", "maxResults", "memoryTurns", "minScore", "snippetChars", "strongScore"]);
+  for (const [key, spec] of Object.entries(config.historySearch)) {
+    assert.ok(Number.isFinite(spec.min) && Number.isFinite(spec.max) && Number.isFinite(spec.step)
+      && Number.isFinite(spec.default), `${key} needs min/max/step/default: ${JSON.stringify(spec)}`);
+    assert.ok(spec.default >= spec.min && spec.default <= spec.max, `${key} default is outside its own range`);
+  }
+  assert.equal(typeof config.embeddingConfigured, "boolean");
+
+  const post = (prompt, answer) => auth(backendOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, answer }),
+  }, roman);
+  await post("the car is in the garage", "A".repeat(300));
+  await post("the car is on the street", "B".repeat(300));
+  await post("the car is at the shop", "C".repeat(300));
+  await setTimeoutPromise(600);
+
+  const ask = (historySearch) => auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "the car", historySearch }),
+  }, roman);
+
+  // Max results caps the hits...
+  mode = "history-tool";
+  historyToolResults.length = 0;
+  await ask({ maxResults: 1 });
+  assert.equal((historyToolResults[0].match(/\[\d{4}-/g) || []).length, 1, historyToolResults[0]);
+  // ...and raising it brings the others back.
+  historyToolResults.length = 0;
+  await ask({ maxResults: 10 });
+  assert.equal((historyToolResults[0].match(/\[\d{4}-/g) || []).length, 3, historyToolResults[0]);
+  // The snippet length truncates the quoted text.
+  historyToolResults.length = 0;
+  await ask({ maxResults: 1, snippetChars: 100 });
+  // Newest first, so the single hit is the "at the shop" turn: its 300-char
+  // answer comes back cut to exactly 100 characters plus the ellipsis.
+  assert.match(historyToolResults[0], /C{100}…/, historyToolResults[0]);
+  assert.doesNotMatch(historyToolResults[0], /C{101}/, historyToolResults[0]);
+  // A semantic floor above 1.0 can match nothing, so only word hits remain —
+  // proof the slider reaches the ranking.
+  historyToolResults.length = 0;
+  await ask({ minScore: 0.9, maxResults: 10 });
+  assert.doesNotMatch(historyToolResults[0], /matched by meaning/, historyToolResults[0]);
+  // Out-of-range values are clamped, not rejected: the turn still succeeds.
+  historyToolResults.length = 0;
+  const silly = await ask({ days: 999999, maxResults: 9999, minScore: 42, snippetChars: -5, memoryTurns: 0 });
+  assert.equal(silly.status, 200);
+  assert.ok(historyToolResults[0].length > 0);
+  mode = "success";
+});
+
+test("the short-term memory slider sets how many stored turns ride in the prompt", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-memory-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "conversations.db");
+  const { process: first, origin: firstOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  const firstExit = new Promise((resolve) => first.once("exit", resolve));
+  t.after(async () => { first.kill(); await firstExit; });
+  const roman = await login(firstOrigin, "Roman");
+  for (const index of [1, 2, 3, 4]) {
+    await auth(firstOrigin, "/api/conversation", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: `memory turn ${index}`, answer: `answer ${index}` }),
+    }, roman);
+  }
+  // A cold process, so the memory comes from the store and the slider decides
+  // how much of it is rebuilt.
+  first.kill();
+  await firstExit;
+  const { process: second, origin: secondOrigin } = await startBackend({ CONVERSATION_DB_PATH: dbPath });
+  t.after(async () => { second.kill(); await once(second, "exit"); });
+  const romanAgain = await login(secondOrigin, "Roman");
+  mode = "history-seed";
+  historySeedMessages.length = 0;
+  await auth(secondOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "and now?", historySearch: { memoryTurns: 2 } }),
+  }, romanAgain);
+  const carried = (historySeedMessages[0] || []).filter((message) => /^memory turn /.test(String(message.content)));
+  assert.deepEqual(carried.map((message) => message.content), ["memory turn 3", "memory turn 4"],
+    JSON.stringify(historySeedMessages[0]?.map((message) => String(message.content).slice(0, 40))));
+  mode = "success";
+});
+
 test("turns stored back-to-back all get embedded, none dropped by the backfill guard", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-history-burst-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

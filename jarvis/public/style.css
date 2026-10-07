@@ -1414,3 +1414,46 @@ menu {
     height: 85px;
   }
 }
+
+/* The History search panel: every knob of the brain's search_history tool,
+   one slider per backend-advertised limit. Same visual language as the other
+   settings panels (.wake-settings), laid out as label / slider / help rows so
+   a long explanation never squeezes its slider. */
+.history-search-intro {
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+.history-search-grid {
+  display: grid;
+  gap: 4px 14px;
+}
+
+.history-search-grid label {
+  margin-top: 10px;
+}
+
+.history-search-grid input[type="range"] {
+  width: 100%;
+  max-width: 420px;
+}
+
+.history-search-grid p {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0 0 6px;
+}
+
+.history-search-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.history-search-engine {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 6px 0 0;
+}

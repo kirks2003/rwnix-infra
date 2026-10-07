@@ -279,7 +279,7 @@ if (embeddingConfigured) {
 // user's conversation is thousands of rows at most, and 1024 floats each
 // scans in milliseconds — a vector index would be machinery without a
 // measured problem to solve.
-async function semanticMatches(user, query, floor, limit) {
+async function semanticMatches(user, query, floor, limit, minScore = EMBEDDING_MIN_SCORE) {
   const rows = conversationStore.selectVectors.all({ user, floor, model: EMBEDDING_MODEL });
   if (!rows.length) return [];
   const [queryVector] = await embed([query]);
@@ -289,7 +289,7 @@ async function semanticMatches(user, query, floor, limit) {
       id: row.id, ts: row.ts, prompt: row.prompt, answer: row.answer,
       score: dot(target, new Float32Array(row.vec.buffer, row.vec.byteOffset, row.vec.byteLength / 4)),
     }))
-    .filter((row) => row.score >= EMBEDDING_MIN_SCORE)
+    .filter((row) => row.score >= minScore)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }
@@ -300,9 +300,9 @@ async function semanticMatches(user, query, floor, limit) {
 // tool rather than by growing the prompt.
 const BRAIN_HISTORY_MESSAGES = 10;
 
-function recentHistoryFromStore(user) {
+function recentHistoryFromStore(user, turns = BRAIN_HISTORY_MESSAGES / 2) {
   try {
-    const rows = conversationStore.selectRecent.all({ user, limit: Math.ceil(BRAIN_HISTORY_MESSAGES / 2) });
+    const rows = conversationStore.selectRecent.all({ user, limit: Math.ceil(turns) });
     return rows.reverse().flatMap((row) => [
       { role: "user", content: row.prompt },
       { role: "assistant", content: row.answer },
@@ -764,6 +764,12 @@ const server = http.createServer(async (req, res) => {
         // global view (a regular user may only remove their own — which is
         // exactly the owner of every entity in their view anyway).
         admin: isAdmin(req.user),
+        // The History search panel builds one slider per entry from this:
+        // min/max/step/default live in the backend, so the UI can never
+        // offer a value the backend would reject.
+        historySearch: HISTORY_SETTINGS,
+        embeddingModel: EMBEDDING_MODEL,
+        embeddingConfigured,
       });
     }
 
@@ -894,7 +900,7 @@ const server = http.createServer(async (req, res) => {
       const profile = aiProfileFor(payload.brainProfile);
       if (!profile) return json(res, 503, { error: "brain_not_configured", requestId });
       const result = await chat(prompt, req.user, normalizeLanguage(payload.language) || "en", profile, requestId, controller.signal, normalizeMcpFlags(payload),
-        String(payload.wakePhrase || "").slice(0, 60), req.headers.host);
+        String(payload.wakePhrase || "").slice(0, 60), req.headers.host, normalizeHistorySettings(payload.historySearch));
       return json(res, 200, result);
     }
 
@@ -1402,7 +1408,7 @@ function withAbort(promise, signal) {
   });
 }
 
-async function chat(prompt, user, language, brainProfile, requestId, signal, mcpFlags, wakePhrase, host) {
+async function chat(prompt, user, language, brainProfile, requestId, signal, mcpFlags, wakePhrase, host, historySettings = normalizeHistorySettings()) {
   if (!brainProfile?.configured || String(brainProfile.apiKey).includes("PUT-YOUR")) {
     throw new Error("Brain endpoint/model is not configured");
   }
@@ -1411,7 +1417,8 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
   // newest stored turns. Without the fallback a restart made the brain say
   // "this is the first question you've asked me" to a user whose panels were
   // still showing weeks of conversation.
-  const history = conversations.get(user) || recentHistoryFromStore(user);
+  const history = (conversations.get(user) || recentHistoryFromStore(user, historySettings.memoryTurns))
+    .slice(-historySettings.memoryTurns * 2);
   const now = new Date();
   // The override wins over a hardcoded answer language in BRAIN_SYSTEM_PROMPT,
   // which is how the UI language switch reaches the brain.
@@ -1513,7 +1520,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", requestId, signal, headers,
+  const { data, webResults } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -1524,7 +1531,8 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
       : "Brain returned no answer text");
   }
 
-  const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer }).slice(-BRAIN_HISTORY_MESSAGES);
+  const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer })
+    .slice(-Math.max(BRAIN_HISTORY_MESSAGES, historySettings.memoryTurns * 2));
   conversations.set(user, nextHistory);
   // Store the turn in the knowledge graph after the answer is handed back:
   // fire-and-forget so the spoken reply is never blocked by or fails on the
@@ -1751,9 +1759,40 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(number)));
 }
 
-function snippet(text) {
+function clampFloat(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+// Every knob of the history search in one place: the limits are the contract
+// the UI panel renders sliders from (/api/config) and the ceiling the backend
+// clamps each request to, so a hand-made request can never widen them.
+const HISTORY_SETTINGS = {
+  days: { min: 1, max: HISTORY_SEARCH_MAX_DAYS, step: 1, default: HISTORY_SEARCH_DEFAULT_DAYS },
+  maxResults: { min: 1, max: HISTORY_SEARCH_MAX_RESULTS, step: 1, default: HISTORY_SEARCH_DEFAULT_RESULTS },
+  snippetChars: { min: 100, max: 2000, step: 50, default: HISTORY_SNIPPET_CHARS },
+  minScore: { min: 0.3, max: 0.9, step: 0.01, default: EMBEDDING_MIN_SCORE },
+  strongScore: { min: 0.4, max: 0.95, step: 0.01, default: EMBEDDING_STRONG_SCORE },
+  memoryTurns: { min: 1, max: 20, step: 1, default: BRAIN_HISTORY_MESSAGES / 2 },
+};
+
+// The browser's panel sends these with every /api/chat request; anything
+// missing or out of range falls back to the configured default.
+function normalizeHistorySettings(raw) {
+  const given = raw && typeof raw === "object" ? raw : {};
+  const clamped = {};
+  for (const [key, spec] of Object.entries(HISTORY_SETTINGS)) {
+    clamped[key] = spec.step < 1
+      ? clampFloat(given[key], spec.min, spec.max, spec.default)
+      : clampNumber(given[key], spec.min, spec.max, spec.default);
+  }
+  return clamped;
+}
+
+function snippet(text, chars = HISTORY_SNIPPET_CHARS) {
   const clean = String(text || "").replace(/\s+/g, " ").trim();
-  return clean.length > HISTORY_SNIPPET_CHARS ? `${clean.slice(0, HISTORY_SNIPPET_CHARS)}…` : clean;
+  return clean.length > chars ? `${clean.slice(0, chars)}…` : clean;
 }
 
 // Hybrid search over the signed-in user's own rows only — both halves pin
@@ -1764,12 +1803,14 @@ function snippet(text) {
 // turn that means the same thing in other words (or another language). They
 // find different turns, so the result is their union: a turn the words hit is
 // worth showing even when its vector scores low, and vice versa.
-async function searchHistory(user, args) {
+async function searchHistory(user, args, settings = normalizeHistorySettings()) {
   const query = String(args.query || "").trim();
   const terms = query.split(/\s+/).filter(Boolean).slice(0, 6);
   if (!terms.length) return "No query given. Call search_history again with the words to look for.";
-  const days = clampNumber(args.days, 1, HISTORY_SEARCH_MAX_DAYS, HISTORY_SEARCH_DEFAULT_DAYS);
-  const limit = clampNumber(args.max_results, 1, HISTORY_SEARCH_MAX_RESULTS, HISTORY_SEARCH_DEFAULT_RESULTS);
+  // The brain may narrow the window per call; the browser panel's value is
+  // the default and the backend limit is still the ceiling.
+  const days = clampNumber(args.days, 1, HISTORY_SEARCH_MAX_DAYS, settings.days);
+  const limit = clampNumber(args.max_results, 1, HISTORY_SEARCH_MAX_RESULTS, settings.maxResults);
   const floor = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
   const keywordRows = conversationStore.search(terms, { user, floor, limit });
@@ -1777,7 +1818,7 @@ async function searchHistory(user, args) {
   let semanticNote = "";
   if (embeddingConfigured) {
     try {
-      semanticRows = await semanticMatches(user, query, floor, limit);
+      semanticRows = await semanticMatches(user, query, floor, limit, settings.minScore);
     } catch (error) {
       // Degrade, never fail the turn: the keyword half still answers.
       semanticNote = " (meaning-based matching was unavailable for this search, so only word matches are listed)";
@@ -1787,20 +1828,23 @@ async function searchHistory(user, args) {
     semanticNote = " (meaning-based matching is not configured, so only word matches are listed)";
   }
 
-  // Union, keyword first so an exact hit is never pushed out by a vector one.
+  // Union, keyword first so an exact hit is never pushed out by a vector one,
+  // and capped at `limit` overall — "max results 6" must mean six turns, not
+  // six per half. Semantic hits arrive best-score-first, so the ones that fill
+  // the remaining slots are the strongest.
   const byId = new Map();
   for (const row of keywordRows) byId.set(row.id, { ...row, how: "words" });
   for (const row of semanticRows) {
     const existing = byId.get(row.id);
     if (existing) existing.how = `words + meaning, similarity ${row.score.toFixed(2)}`;
-    else if (byId.size < limit * 2) byId.set(row.id, { ...row, how: `meaning, similarity ${row.score.toFixed(2)}${row.score < EMBEDDING_STRONG_SCORE ? " — loosely related, treat with care" : ""}` });
+    else if (byId.size < limit) byId.set(row.id, { ...row, how: `meaning, similarity ${row.score.toFixed(2)}${row.score < settings.strongScore ? " — loosely related, treat with care" : ""}` });
   }
   const rows = [...byId.values()].sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
   if (!rows.length) return `Nothing in this user's last ${days} days of conversation matches "${query}", by words or by meaning${semanticNote}.`;
   // Oldest first reads like a conversation; the dates are what the user will
   // recognise, so they lead each hit.
   return [`${rows.length} earlier turn(s) matching "${query}", oldest first${semanticNote}:`]
-    .concat(rows.map((row) => `[${row.ts}] (matched by ${row.how})\nUser: ${snippet(row.prompt)}\nYou: ${snippet(row.answer)}`))
+    .concat(rows.map((row) => `[${row.ts}] (matched by ${row.how})\nUser: ${snippet(row.prompt, settings.snippetChars)}\nYou: ${snippet(row.answer, settings.snippetChars)}`))
     .join("\n\n");
 }
 
@@ -1822,7 +1866,7 @@ function graphToolDetail(name, args) {
   return parts.length ? `${name}: ${parts.join(", ")}` : name;
 }
 
-async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, vikunjaTools = null, vikunjaClient = null, vikunjaToolNames = null, admin = false, lang = "de", requestId, signal, headers, deadlineMs }) {
+async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, vikunjaTools = null, vikunjaClient = null, vikunjaToolNames = null, admin = false, lang = "de", historySettings = normalizeHistorySettings(), requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
   const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
   // Web tool results collected for post-turn ingestion (the extractor reads
@@ -1916,7 +1960,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         // Local SQLite read, scoped to the signed-in user inside the store —
         // the brain's arguments carry no user and cannot add one.
         try {
-          const resultText = await withAbort(searchHistory(user, args), totalSignal);
+          const resultText = await withAbort(searchHistory(user, args, historySettings), totalSignal);
           console.log(JSON.stringify({ level: "info", requestId, msg: "history_tool", tool: name, query: String(args.query || "").slice(0, 200), ms: Date.now() - started, chars: resultText.length }));
           local.push({ role: "tool", tool_call_id: call.id, content: resultText });
         } catch (error) {

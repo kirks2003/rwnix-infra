@@ -1116,6 +1116,78 @@ test("a failed speech output is retried and still speaks the answer", { timeout:
   assert.equal(await lastAnswerBody(page), "Done.");
 });
 
+test("the History search panel builds its sliders from the backend limits and sends them", { timeout: 45000 }, async (t) => {
+  const historySearch = {
+    days: { min: 1, max: 365, step: 1, default: 90 },
+    maxResults: { min: 1, max: 20, step: 1, default: 6 },
+    snippetChars: { min: 100, max: 2000, step: 50, default: 600 },
+    minScore: { min: 0.3, max: 0.9, step: 0.01, default: 0.5 },
+    strongScore: { min: 0.4, max: 0.95, step: 0.01, default: 0.58 },
+    memoryTurns: { min: 1, max: 20, step: 1, default: 5 },
+  };
+  const chats = [];
+  const { page } = await setup(t, async () => ({ text: "", noSpeech: true }), {
+    silent: true,
+    config: { historySearch, embeddingConfigured: true, embeddingModel: "bge-m3" },
+  });
+  await page.route("**/api/conversation*", (route) => route.fulfill({ json: { entries: [] } }));
+  await page.route("**/api/chat", (route) => {
+    chats.push(route.request().postDataJSON());
+    return route.fulfill({ json: { answer: "Done.", requestId: "r1" } });
+  });
+  // The panel lives under the Panels on/off switch, like every other panel.
+  assert.equal(await page.evaluate(() =>
+    document.getElementById("panelsBelow").contains(document.getElementById("historySearchPanel"))), true);
+
+  // Each slider's range comes from the backend's advertised limits, not from
+  // a second copy of them in the client.
+  const sliders = await page.evaluate(() => ["historySearchDays", "historySearchResults",
+    "historySearchSnippet", "historySearchMemory", "historySearchMinScore", "historySearchStrongScore"]
+    .map((id) => { const input = document.getElementById(id); return { id, min: input.min, max: input.max, step: input.step, value: input.value, disabled: input.disabled }; }));
+  assert.deepEqual(sliders.find((slider) => slider.id === "historySearchDays"),
+    { id: "historySearchDays", min: "1", max: "365", step: "1", value: "90", disabled: false });
+  assert.deepEqual(sliders.find((slider) => slider.id === "historySearchMinScore"),
+    { id: "historySearchMinScore", min: "0.3", max: "0.9", step: "0.01", value: "0.5", disabled: false });
+  assert.ok(sliders.every((slider) => !slider.disabled), JSON.stringify(sliders));
+  assert.equal(await page.textContent("#historySearchDaysValue"), "90 days");
+  assert.match(await page.textContent("#historySearchEngine"), /Semantic search: on, model bge-m3/);
+
+  // The manual prompt box is for a disarmed session, so stop the one setup
+  // armed before typing into it.
+  await page.click("#enableSwitch");
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+
+  // Moving two sliders saves them and sends them with the next prompt.
+  await page.evaluate(() => {
+    for (const [id, value] of [["historySearchDays", "30"], ["historySearchMinScore", "0.62"]]) {
+      const input = document.getElementById(id);
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
+  assert.equal(await page.textContent("#historySearchDaysValue"), "30 days");
+  assert.equal(await page.textContent("#historySearchMinScoreValue"), "0.62");
+  await typeManualPrompt(page, "hello");
+  await page.waitForFunction(() => document.querySelectorAll("#answerText .transcript-entry").length > 0);
+  assert.equal(chats.at(-1).historySearch.days, 30, JSON.stringify(chats.at(-1).historySearch));
+  assert.equal(chats.at(-1).historySearch.minScore, 0.62);
+  // Untouched knobs still ride along at their backend defaults.
+  assert.equal(chats.at(-1).historySearch.maxResults, 6);
+
+  // They survive a reload (per browser, like the other settings).
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.inputValue("#historySearchDays"), "30");
+  assert.equal(await page.inputValue("#historySearchMinScore"), "0.62");
+
+  // Reset puts every slider back to the backend's default and forgets them.
+  await page.click("#historySearchReset");
+  assert.equal(await page.inputValue("#historySearchDays"), "90");
+  assert.equal(await page.inputValue("#historySearchMinScore"), "0.5");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.historySearch")), null);
+});
+
 test("the hero switches sit left of Sign out, and the panels keep the conversation history", { timeout: 45000 }, async (t) => {
   // The harness intercepts every /api route, so the conversation endpoint is
   // intercepted too, backed by this test's own array (the in-memory backend
