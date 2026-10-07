@@ -16,6 +16,9 @@ let mode = "success";
 const historyToolOffers = [];
 const historyToolResults = [];
 const historySeedMessages = [];
+// Extra arguments the mock brain adds to its search_history call, so a test
+// can make it ask for more than the user's panel allows.
+let historyToolArgs = {};
 // The fake embedding endpoint above: "down" makes it fail, so the degraded
 // keyword-only path is testable.
 let embeddingMode = "up";
@@ -195,7 +198,7 @@ before(async () => {
               message: {
                 role: "assistant",
                 content: null,
-                tool_calls: [{ id: "call_history", type: "function", function: { name: "search_history", arguments: JSON.stringify({ query: String(lastUser?.content || ""), days: 90 }) } }],
+                tool_calls: [{ id: "call_history", type: "function", function: { name: "search_history", arguments: JSON.stringify({ query: String(lastUser?.content || ""), days: 90, ...historyToolArgs }) } }],
               },
             }],
           }));
@@ -1235,6 +1238,44 @@ test("the History search panel's parameters reach the search, clamped to the bac
   const silly = await ask({ days: 999999, maxResults: 9999, minScore: 42, snippetChars: -5, memoryTurns: 0 });
   assert.equal(silly.status, 200);
   assert.ok(historyToolResults[0].length > 0);
+  mode = "success";
+});
+
+test("the panel's max results is a ceiling the brain cannot widen", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-history-ceiling-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { process: child, origin: backendOrigin } = await startBackend({
+    CONVERSATION_DB_PATH: join(dir, "conversations.db"),
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const roman = await login(backendOrigin, "Roman");
+  for (const index of [1, 2, 3, 4, 5]) {
+    await auth(backendOrigin, "/api/conversation", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: `the car note ${index}`, answer: `answer ${index}` }),
+    }, roman);
+  }
+  await setTimeoutPromise(600);
+  mode = "history-tool";
+  // A real brain sends max_results and days of its own; they must not be able
+  // to climb above the user's sliders.
+  historyToolArgs = { max_results: 20, days: 365 };
+  t.after(() => { historyToolArgs = {}; });
+  historyToolResults.length = 0;
+  await auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "the car", historySearch: { maxResults: 2, days: 1 } }),
+  }, roman);
+  assert.equal((historyToolResults[0].match(/\[\d{4}-/g) || []).length, 2,
+    `the brain asked for 20, the panel allows 2: ${historyToolResults[0]}`);
+  // And the brain may still narrow it.
+  historyToolArgs = { max_results: 1 };
+  historyToolResults.length = 0;
+  await auth(backendOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "the car", historySearch: { maxResults: 5 } }),
+  }, roman);
+  assert.equal((historyToolResults[0].match(/\[\d{4}-/g) || []).length, 1, historyToolResults[0]);
   mode = "success";
 });
 

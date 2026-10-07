@@ -1807,10 +1807,14 @@ async function searchHistory(user, args, settings = normalizeHistorySettings()) 
   const query = String(args.query || "").trim();
   const terms = query.split(/\s+/).filter(Boolean).slice(0, 6);
   if (!terms.length) return "No query given. Call search_history again with the words to look for.";
-  // The brain may narrow the window per call; the browser panel's value is
-  // the default and the backend limit is still the ceiling.
-  const days = clampNumber(args.days, 1, HISTORY_SEARCH_MAX_DAYS, settings.days);
-  const limit = clampNumber(args.max_results, 1, HISTORY_SEARCH_MAX_RESULTS, settings.maxResults);
+  // The user's panel value is the CEILING, not a suggestion: the brain may
+  // narrow the window or ask for fewer turns, but its own `days` /
+  // `max_results` can never widen past what the slider allows. (Measured
+  // live: the brain sends max_results of its own, so treating the panel
+  // value as a mere default let a "max results 1" setting return eight
+  // turns.)
+  const days = clampNumber(args.days, 1, settings.days, settings.days);
+  const limit = clampNumber(args.max_results, 1, settings.maxResults, settings.maxResults);
   const floor = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
   const keywordRows = conversationStore.search(terms, { user, floor, limit });

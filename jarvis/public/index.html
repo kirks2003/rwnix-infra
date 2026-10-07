@@ -287,12 +287,13 @@
           <div class="history-search-grid">
             <label for="historySearchDays">Search window <output id="historySearchDaysValue">90 days</output></label>
             <input id="historySearchDays" type="range" disabled aria-describedby="historySearchDaysHelp">
-            <p id="historySearchDaysHelp">How far back a search reaches by default. The brain may narrow it per
-              call; it can never widen it past the backend maximum.</p>
+            <p id="historySearchDaysHelp">How far back a search reaches. This is a ceiling: the brain may look at a
+              narrower window per call, never a wider one.</p>
 
             <label for="historySearchResults">Max results <output id="historySearchResultsValue">6 turns</output></label>
             <input id="historySearchResults" type="range" disabled aria-describedby="historySearchResultsHelp">
-            <p id="historySearchResultsHelp">How many matching turns come back per search. More context for the
+            <p id="historySearchResultsHelp">How many matching turns come back per search, counting word and meaning
+              matches together. A ceiling: the brain may ask for fewer, never more. More context for the
               brain, but a larger prompt.</p>
 
             <label for="historySearchSnippet">Snippet length <output id="historySearchSnippetValue">600 chars</output></label>

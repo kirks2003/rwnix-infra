@@ -3930,4 +3930,24 @@ switch.
   `#panelsBelow`, that each slider's range comes from the advertised
   limits, that moved values are sent with the next prompt and survive a
   reload, and that Reset restores the backend defaults and clears storage.
-- Unit suite 165/165, browser suite 54 pass + 2 opt-in skips.
+- **Second defect, found by driving the live brain** (the mock brain in the
+  tests never did this): a real brain sends `max_results` and `days` of its
+  own, and the panel value was only a *default*, so a "max results 1"
+  setting still returned eight turns — both requests came back ~5.8 KB. The
+  panel value is now the **ceiling**: the brain may narrow a search, never
+  widen it past the slider. A test makes the mock brain ask for 20 against a
+  panel limit of 2 and demands 2; against the old code it gets 5.
+- Unit suite 166/166, browser suite 54 pass + 2 opt-in skips.
+
+**Rolled out 2026-10-07 ~22:16, corrected ~22:30.**
+
+- Backup: `jarvis-code.bak-20261007_221602.tgz` under `/home/ubuntu/docker/`.
+- Synced `server.js`, `public/index.html`, `public/app.js`,
+  `public/style.css`; `docker compose up -d --build jarvis`.
+- Verified: container `healthy`, served asset md5s match the committed
+  source, the served HTML carries `historySearchPanel`, and `/api/config`
+  advertises all six knobs with `embeddingConfigured: true`,
+  `embeddingModel: bge-m3`.
+
+Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
+where the old UI is cached.
