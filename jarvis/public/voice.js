@@ -276,16 +276,29 @@ export function isPostSpeechStop(command, lastSpeechEndedAt, now, windowMs, { us
   return userBurst && Boolean(stopCommandIn(command, { trailing: true }));
 }
 
-// Acknowledgments ("ok", "thank you", …): the whole command is nothing the
-// brain should answer, so the pipeline ends the turn with a polite
-// butler-style closing instead of a brain round trip. Only the complete
-// command (trimmed, case- and trailing-punctuation-insensitive) counts —
-// "ok, and now check the weather" is a real command, never an acknowledgment.
+// Acknowledgments ("ok", "thank you", …) and farewells ("bye", …): the whole
+// command is nothing the brain should answer, so the pipeline ends the turn
+// with a polite butler-style closing instead of a brain round trip. Only the
+// complete command (trimmed, case- and trailing-punctuation-insensitive)
+// counts — "ok, and now check the weather" is a real command, never an
+// acknowledgment. The farewell kind is a word or sentence that ends the
+// prompt/answer session; it gets its own closing instead of the generic one.
 export const ACKNOWLEDGMENTS = {
   thanks: [
     "thank you", "thanks", "thank you very much", "thank you so much", "thanks a lot",
-    "thank you jarvis", "thank you rocky",
-    "danke", "danke schön", "danke schoen", "danke dir", "vielen dank",
+    "thx", "tks", "ty", "thanx", "thank u",
+    "thank you jarvis", "thank you rocky", "thx jarvis", "thx rocky",
+    "danke", "danke schön", "danke schoen", "danke dir", "danke jarvis", "danke rocky", "vielen dank",
+  ],
+  farewell: [
+    "bye", "bye bye", "goodbye", "see you", "see you later", "see ya",
+    "that's all", "thats all", "that is all", "that's it", "thats it", "that is it",
+    "no more", "never mind", "forget it", "take care",
+    "good night", "goodnight", "good night jarvis", "good night rocky",
+    "auf wiedersehen", "auf wieder hören", "auf wiederhoeren",
+    "tschüss", "tschuesse", "tschüss jarvis", "tschüss rocky", "tschuess jarvis", "tschuess rocky",
+    "bis später", "bis spaeter", "bis dann", "mach's gut", "machs gut",
+    "so das wars", "genug davon", "servus", "ciao",
   ],
   general: [
     "ok", "okay", "yes", "yeah", "yep", "sure", "alright", "all right", "cool",
@@ -298,46 +311,52 @@ export const ACKNOWLEDGMENTS = {
   ],
 };
 
-// "thanks" or "general" when the command is an acknowledgment, else null.
-// Without trailing, the whole command (trimmed, case- and
+// "thanks", "farewell" or "general" when the command is an acknowledgment,
+// else null. Without trailing, the whole command (trimmed, case- and
 // trailing-punctuation-insensitive) must be an acknowledgment —
 // "ok, and now check the weather" is a real command, never an
 // acknowledgment. With trailing, the last phrase of a longer transcript may
 // be the acknowledgment: the speaker's echo puts the answer's own words in
-// front of the user's "ok" / "thank you", and the caller gates that looser
-// match with a loud user burst in the window's audio.
+// front of the user's "ok" / "thank you" / "bye", and the caller gates that
+// looser match with a loud user burst in the window's audio.
 export function acknowledgmentIn(command, { trailing = false } = {}) {
   const normalized = String(command || "").trim().toLowerCase().replace(/[.!?,;:…]+$/g, "").trim();
   if (!normalized) return null;
   if (ACKNOWLEDGMENTS.thanks.includes(normalized)) return "thanks";
+  if (ACKNOWLEDGMENTS.farewell.includes(normalized)) return "farewell";
   if (ACKNOWLEDGMENTS.general.includes(normalized)) return "general";
   if (trailing) {
-    for (const list of [ACKNOWLEDGMENTS.thanks, ACKNOWLEDGMENTS.general]) {
+    for (const [kind, list] of [["thanks", ACKNOWLEDGMENTS.thanks], ["farewell", ACKNOWLEDGMENTS.farewell], ["general", ACKNOWLEDGMENTS.general]]) {
       for (const phrase of list) {
-        if (normalized.endsWith(` ${phrase}`)) {
-          return list === ACKNOWLEDGMENTS.thanks ? "thanks" : "general";
-        }
+        if (normalized.endsWith(` ${phrase}`)) return kind;
       }
     }
   }
   return null;
 }
 
-// "thanks" or "general" when the whole command is an acknowledgment, else
-// null.
+// "thanks", "farewell" or "general" when the whole command is an
+// acknowledgment, else null.
 export function acknowledgmentKind(command) {
   return acknowledgmentIn(command);
 }
 
 // Butler-style closings for acknowledgment turns, spoken in the active
 // answer language. The closing is picked per turn and goes through the
-// normal TTS path, so a stop word can cut it like any other speech.
+// normal TTS path, so a stop word can cut it like any other speech. The
+// farewell kind is the session-ending line: the user is done, not just
+// agreeing or thanking.
 export const CLOSING_LINES = {
   en: {
     thanks: [
       "You are most welcome. Standing by.",
-      "It is my pleasure. Standing by.",
+      "It was my pleasure. Standing by.",
       "At your service, always.",
+    ],
+    farewell: [
+      "It was my pleasure. Goodbye.",
+      "My pleasure, as always. Goodbye.",
+      "At your service, anytime. Goodbye.",
     ],
     general: [
       "Very good. Standing by.",
@@ -350,8 +369,13 @@ export const CLOSING_LINES = {
   de: {
     thanks: [
       "Sehr gern geschehen. Ich stehe bereit.",
-      "Es ist mir eine Freude. Ich stehe bereit.",
+      "Es war mir eine Freude. Ich stehe bereit.",
       "Zu Ihren Diensten, jederzeit.",
+    ],
+    farewell: [
+      "Es war mir eine Freude. Auf Wiedersehen.",
+      "Gern geschehen. Auf Wiedersehen.",
+      "Ich bin jederzeit für Sie da. Auf Wiedersehen.",
     ],
     general: [
       "Sehr gut. Ich stehe bereit.",

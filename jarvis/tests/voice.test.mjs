@@ -281,6 +281,27 @@ test("whole-utterance acknowledgments are recognized, real commands are not", ()
   assert.equal(acknowledgmentKind(""), null);
   assert.equal(acknowledgmentKind("   "), null);
   assert.equal(acknowledgmentKind(null), null);
+  // Informal thanks count as thanks, so "thx" after a question gets the
+  // butler's "it was my pleasure" closing, not a brain round trip.
+  assert.equal(acknowledgmentKind("thx"), "thanks");
+  assert.equal(acknowledgmentKind("THX."), "thanks");
+  assert.equal(acknowledgmentKind("tks"), "thanks");
+  assert.equal(acknowledgmentKind("ty"), "thanks");
+  assert.equal(acknowledgmentKind("thank u"), "thanks");
+  assert.equal(acknowledgmentKind("thx jarvis"), "thanks");
+  assert.equal(acknowledgmentKind("danke jarvis"), "thanks");
+  assert.equal(acknowledgmentKind("thx, and now check the weather"), null, "a follow-up is still a command");
+  // Session-ending words and sentences are farewells, not general acks.
+  assert.equal(acknowledgmentKind("bye"), "farewell");
+  assert.equal(acknowledgmentKind("Goodbye."), "farewell");
+  assert.equal(acknowledgmentKind("see you later"), "farewell");
+  assert.equal(acknowledgmentKind("that's all"), "farewell");
+  assert.equal(acknowledgmentKind("that's it"), "farewell");
+  assert.equal(acknowledgmentKind("never mind"), "farewell");
+  assert.equal(acknowledgmentKind("Tschüss"), "farewell");
+  assert.equal(acknowledgmentKind("Auf Wiedersehen."), "farewell");
+  assert.equal(acknowledgmentKind("bis später"), "farewell");
+  assert.equal(acknowledgmentKind("bye, and now check the weather"), null);
 });
 
 test("a trailing acknowledgment inside an echoed transcript is recognized, commands are not", () => {
@@ -291,8 +312,11 @@ test("a trailing acknowledgment inside an echoed transcript is recognized, comma
   assert.equal(acknowledgmentIn("Thank you."), "thanks");
   assert.equal(acknowledgmentIn("Done. Ok.", { trailing: true }), "general");
   assert.equal(acknowledgmentIn("It is 12:00. Thank you.", { trailing: true }), "thanks");
+  assert.equal(acknowledgmentIn("It is 12:00. thx.", { trailing: true }), "thanks");
   assert.equal(acknowledgmentIn("Es ist 12 Uhr. Danke.", { trailing: true }), "thanks");
   assert.equal(acknowledgmentIn("Wetter ist schön. Gut.", { trailing: true }), "general");
+  assert.equal(acknowledgmentIn("It is 12:00. Bye.", { trailing: true }), "farewell");
+  assert.equal(acknowledgmentIn("Es ist 12 Uhr. Tschüss.", { trailing: true }), "farewell");
   // Without trailing the echoed transcript is a real (merged) command, not
   // an acknowledgment.
   assert.equal(acknowledgmentIn("Done. Ok."), null);
@@ -306,9 +330,14 @@ test("a trailing acknowledgment inside an echoed transcript is recognized, comma
 test("the butler closing matches the language and kind and stays in its list", () => {
   // Deterministic: a fixed random source picks the first line of each list.
   assert.equal(pickClosing("en", "thanks", () => 0), CLOSING_LINES.en.thanks[0]);
+  assert.equal(pickClosing("en", "farewell", () => 0), CLOSING_LINES.en.farewell[0]);
   assert.equal(pickClosing("en", "general", () => 0), CLOSING_LINES.en.general[0]);
   assert.equal(pickClosing("de", "thanks", () => 0), CLOSING_LINES.de.thanks[0]);
+  assert.equal(pickClosing("de", "farewell", () => 0), CLOSING_LINES.de.farewell[0]);
   assert.equal(pickClosing("de", "general", () => 0), CLOSING_LINES.de.general[0]);
+  // The farewell closing actually ends the session, not just the turn.
+  for (const line of CLOSING_LINES.en.farewell) assert.match(line, /goodbye\.?$/i);
+  for (const line of CLOSING_LINES.de.farewell) assert.match(line, /auf wiedersehen\.?$/i);
   // Unknown languages fall back to English.
   assert.ok(CLOSING_LINES.en.thanks.includes(pickClosing("fr", "thanks", () => 0)));
   // The full range of the random source stays inside the list.

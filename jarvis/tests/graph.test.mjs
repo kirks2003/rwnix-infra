@@ -235,13 +235,13 @@ test("memory store: status, context, upsert, per-user scope and neighbourhood", 
   let sub = await store.subgraph({ user: "Mila" });
   assert.ok(sub.nodes.some((node) => node.name === "Amelie"));
   assert.ok(sub.edges.some((edge) => edge.type === "FRIEND_OF"));
-  assert.equal(sub.nodes.find((node) => node.name === "Rocky").isolated, false, "Rocky has a fact edge");
+  assert.equal(sub.nodes.find((node) => node.name === "Amelie").isolated, false, "Amelie has a fact edge");
   assert.equal(sub.nodes.find((node) => node.name === "Mila").isolated, false, "the :User node is never isolated");
-  // Berlin is a bare mention the demo world started with. The ingest check is
-  // scoped to the names the turn touched (so its cost cannot grow with the
-  // graph), and this turn was about Amelie — so Berlin survives, drawn but
-  // flagged for the UI to dim.
-  assert.equal(sub.nodes.find((node) => node.name === "Berlin").isolated, true, "an untouched pre-existing mention is left alone");
+  // Berlin was a bare mention the demo world started with — a legacy node
+  // with no path of fact edges to Mila's :User node. The stored policy
+  // removes it on this first ingest: an entity with no relation to the user
+  // does not belong in the world.
+  assert.ok(!sub.nodes.some((node) => node.name === "Berlin"), "the pre-existing isolated mention is swept by the policy");
   const amelieId = sub.nodes.find((node) => node.name === "Amelie").id;
   const centered = await store.subgraph({ user: "Mila", center: amelieId });
   assert.ok(centered.nodes.some((node) => node.name === "Mila"));
@@ -262,7 +262,8 @@ test("memory store: status, context, upsert, per-user scope and neighbourhood", 
   const romanSub = await store.subgraph({ user: "Roman" });
   assert.ok(romanSub.nodes.some((node) => node.name === "Amelie" && node.owner === "Roman"), "Roman has his own copy");
   assert.ok(!romanSub.nodes.some((node) => node.name === "Mila"), "no other user node");
-  assert.equal(romanSub.nodes.find((node) => node.name === "Coffee").isolated, true, "his own pre-existing mention is drawn and flagged");
+  // His starter's isolated Coffee was swept the same way on his first ingest.
+  assert.ok(!romanSub.nodes.some((node) => node.name === "Coffee"), "his pre-existing isolated mention was swept on his first ingest");
 });
 
 test("memory store: an entity no fact connects is never stored", async () => {
@@ -293,46 +294,45 @@ test("memory store: an entity no fact connects is never stored", async () => {
   assert.equal(vienna.isolated, false, "and it is not isolated");
 });
 
-test("memory store: the ingest check covers the names the turn touched, and only those", async () => {
+test("memory store: the policy sweeps every entity without a path of fact edges to the user", async () => {
   const store = graphdb.createMemoryStore(["Mila"]);
-  await store.upsertTurn({
+  // The starter world holds a pre-existing orphan: Berlin, a bare mention
+  // with no path of fact edges to Mila's :User node. A turn that never
+  // mentions it still removes it — the stored policy is global (no entity
+  // may float without a relation to the user), not scoped to the turn's own
+  // names, and the removal is reported.
+  const result = await store.upsertTurn({
     user: "Mila",
     entities: [{ name: "Vienna", type: "place", props: {} }],
     relations: [{ from: "Mila", to: "Vienna", type: "LIVES_IN" }],
   });
-  // Strip the entity's only fact by deleting its neighbour's edge: removing
-  // Mila is impossible (a :User node), so remove the fact by deleting the
-  // entity's partner in a second fact instead — here, delete Vienna's only
-  // link by removing the entity it was tied to.
-  await store.upsertTurn({
+  assert.ok(result.orphansRemoved.includes("Berlin"), `the pre-existing orphan is swept: ${JSON.stringify(result)}`);
+  let sub = await store.subgraph({ user: "Mila" });
+  assert.ok(!sub.nodes.some((node) => node.name === "Berlin"), "the orphan is gone");
+  assert.equal(sub.nodes.find((node) => node.name === "Vienna").isolated, false, "the connected entity survives");
+  // A fact between two entities neither of which touches the user is a
+  // disconnected cluster: removed on the very turn it is created. (The
+  // starter's own Rocky/Kokoro-82M pair is such a cluster, so it goes too.)
+  const cluster = await store.upsertTurn({
     user: "Mila",
     entities: [{ name: "Rocky", type: "thing", props: {} }, { name: "Kokoro", type: "thing", props: {} }],
     relations: [{ from: "Rocky", to: "Kokoro", type: "USES" }],
   });
-  let sub = await store.subgraph({ user: "Mila" });
-  const rocky = sub.nodes.find((node) => node.name === "Rocky");
-  assert.equal((await store.removeEntity({ user: "Mila", id: rocky.id })).deleted, 1);
-  // Kokoro is now an orphan: its only fact went with Rocky.
+  assert.ok(cluster.orphansRemoved.includes("Kokoro"), `the new cluster is swept: ${JSON.stringify(cluster)}`);
+  assert.ok(cluster.orphansRemoved.includes("Rocky"), "the starter's disconnected pair goes with it");
   sub = await store.subgraph({ user: "Mila" });
-  assert.equal(sub.nodes.find((node) => node.name === "Kokoro").isolated, true, "the delete left it bare");
-  // A turn that does not mention it leaves it alone — the check is scoped to
-  // the turn's own names so its cost cannot grow with the graph.
-  await store.upsertTurn({
+  assert.ok(!sub.nodes.some((node) => node.name === "Kokoro"), "the disconnected cluster is gone");
+  // A chain that reaches the user survives: Mila OWNS a tool, the tool
+  // USES a model — two hops away, still a relation to the user.
+  const chain = await store.upsertTurn({
     user: "Mila",
-    entities: [{ name: "Lego", type: "thing", props: {} }],
-    relations: [{ from: "Mila", to: "Lego", type: "LIKES" }],
+    entities: [{ name: "Jarvis", type: "thing", props: {} }, { name: "Whisper", type: "thing", props: {} }],
+    relations: [{ from: "Mila", to: "Jarvis", type: "OWNS" }, { from: "Jarvis", to: "Whisper", type: "USES" }],
   });
+  assert.deepEqual(chain.orphansRemoved, [], JSON.stringify(chain));
   sub = await store.subgraph({ user: "Mila" });
-  assert.ok(sub.nodes.some((node) => node.name === "Kokoro"), "an untouched orphan is out of scope");
-  // A turn that DOES mention it sweeps it, and reports what it removed.
-  const result = await store.upsertTurn({
-    user: "Mila",
-    entities: [{ name: "Kokoro", type: "thing", props: {} }],
-    relations: [],
-  });
-  assert.deepEqual(result.orphansRemoved, ["Kokoro"], JSON.stringify(result));
-  sub = await store.subgraph({ user: "Mila" });
-  assert.ok(!sub.nodes.some((node) => node.name === "Kokoro"), "the touched orphan is gone");
+  assert.equal(sub.nodes.find((node) => node.name === "Whisper").isolated, false, "a two-hop entity stays connected");
+  assert.equal(sub.nodes.find((node) => node.name === "Jarvis").isolated, false, "and so is the one-hop one");
 });
 
 test("memory store: a fact onto an entity stored in an earlier turn still links (and keeps both)", async () => {
@@ -421,9 +421,10 @@ test("memory store: introduced relation types are stored, malformed ones are dro
   });
   const sub = await store.subgraph({ user: "Mila" });
   const types = sub.edges.map((edge) => edge.type);
-  // The starter fact (Rocky USES Kokoro) plus the introduced type; the
-  // malformed type was dropped before the write.
-  assert.deepEqual(types, ["USES", "INTERESTED_IN"], `edges: ${JSON.stringify(types)}`);
+  // Only the introduced type: the starter fact (Rocky USES Kokoro) went with
+  // its disconnected cluster — the policy sweep removes both on this first
+  // ingest — and the malformed type was dropped before the write.
+  assert.deepEqual(types, ["INTERESTED_IN"], `edges: ${JSON.stringify(types)}`);
   assert.ok(!types.includes("RELATED_TO"), `no fallback type: ${JSON.stringify(types)}`);
   // The schema picks the new type up from the store itself.
   const schema = await store.schema();
@@ -535,10 +536,10 @@ test("memory store: per-user isolation — each user sees only their own world",
   // because of his statement about her (owner-keyed isolation).
   const milaAfter = await store.subgraph({ user: "Mila" });
   assert.ok(!milaAfter.nodes.some((node) => node.name === "Pizza"), `no other user's entity leaks: ${JSON.stringify(milaAfter.nodes.map((node) => node.name))}`);
-  // Status counts are scoped the same way: Mila owns more entities (Rocky,
-  // Berlin, Kokoro, Lego, Amelie, Car) than Roman (Coffee, Pizza, Amelie), so
-  // her node count is higher — isolated mentions (Berlin, Coffee) count too,
-  // since they are drawn (dimmed) now.
+  // Status counts are scoped the same way. The policy already swept the
+  // starter world's isolated mentions (Rocky/Berlin/Kokoro on Mila's first
+  // ingest, Coffee on Roman's), so each world holds its own facts' endpoints
+  // only — never the other user's.
   await store.upsertTurn({
     user: "Mila",
     entities: [{ name: "Car", type: "thing", props: {} }],
@@ -546,7 +547,12 @@ test("memory store: per-user isolation — each user sees only their own world",
   });
   const romanStatus = await store.status({ user: "Roman" });
   const milaStatus = await store.status({ user: "Mila" });
-  assert.notEqual(romanStatus.nodes, milaStatus.nodes, `node counts differ per user: ${JSON.stringify({ romanStatus, milaStatus })}`);
+  // Roman: his node, Pizza and Mila's account marker (his fact about her).
+  // Mila: her node, Lego, Car.
+  assert.equal(romanStatus.nodes, 3, JSON.stringify(romanStatus));
+  assert.equal(romanStatus.edges, 2, JSON.stringify(romanStatus));
+  assert.equal(milaStatus.nodes, 3, JSON.stringify(milaStatus));
+  assert.equal(milaStatus.edges, 2, JSON.stringify(milaStatus));
   // A centre the user cannot see (another user's node) comes back empty.
   const milaNodeId = mila.nodes.find((node) => node.name === "Mila").id;
   const foreign = await store.subgraph({ user: "Roman", center: milaNodeId });
@@ -562,7 +568,9 @@ test("memory store: per-user isolation — each user sees only their own world",
 
 test("memory store: the admin sees the whole graph (every user's nodes, owners and facts)", async () => {
   const store = graphdb.createMemoryStore(["Mila", "Roman", "admin"]);
-  // Roman adds a private fact on top of the starter world.
+  // Roman adds a private fact on top of the starter world. His first ingest
+  // sweeps his own isolated starter mention (Coffee); Mila never ingests, so
+  // her starter world (Rocky/Berlin/Kokoro) survives until one of her turns.
   await store.upsertTurn({
     user: "Roman",
     entities: [{ name: "Pizza", type: "thing", props: {} }],
@@ -571,12 +579,13 @@ test("memory store: the admin sees the whole graph (every user's nodes, owners a
   // The admin's panel view is the WHOLE graph: every account node, every
   // owner-keyed entity (isolated ones flagged) and every fact edge.
   const adminStatus = await store.status({ user: "admin", admin: true });
-  assert.equal(adminStatus.nodes, 7, JSON.stringify(adminStatus));
+  assert.equal(adminStatus.nodes, 6, JSON.stringify(adminStatus));
   assert.equal(adminStatus.edges, 2, JSON.stringify(adminStatus));
   const adminSub = await store.subgraph({ user: "admin", admin: true });
   const names = adminSub.nodes.map((node) => node.name);
   assert.ok(names.includes("Mila") && names.includes("Roman"), `every user's account node: ${JSON.stringify(names)}`);
-  assert.ok(names.includes("Rocky") && names.includes("Coffee") && names.includes("Pizza"), "every user's entities are drawn");
+  assert.ok(names.includes("Rocky") && names.includes("Pizza"), "every user's surviving entities are drawn");
+  assert.ok(!names.includes("Coffee"), "Roman's isolated mention was swept on his first ingest");
   // Same-named entities of different owners would both appear; here the
   // owner field is what keeps copies tellable apart.
   assert.equal(adminSub.nodes.find((node) => node.name === "Pizza").owner, "Roman");
@@ -602,22 +611,26 @@ test("memory store: removeEntity deletes only the caller's own entity, with its 
   const coffee = romanSub.nodes.find((node) => node.name === "Coffee");
   // A foreign entity id is indistinguishable from a nonexistent one: no
   // cross-user write, no enumeration.
-  assert.deepEqual(await store.removeEntity({ user: "Mila", id: coffee.id }), { deleted: 0, name: null });
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: coffee.id }), { deleted: 0, name: null, orphansRemoved: [] });
   assert.ok((await store.subgraph({ user: "Roman" })).nodes.some((node) => node.id === coffee.id), "Roman's Coffee survived Mila's attempt");
   // A :User account node is never deletable, not even by its own user.
-  assert.deepEqual(await store.removeEntity({ user: "Mila", id: milaNode.id }), { deleted: 0, name: null });
-  // The caller's own entity is gone, together with its edges (Rocky -USES-> Kokoro).
-  assert.deepEqual(await store.removeEntity({ user: "Mila", id: rocky.id }), { deleted: 1, name: "Rocky" });
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: milaNode.id }), { deleted: 0, name: null, orphansRemoved: [] });
+  // The caller's own entity is gone, together with its edges (Rocky -USES->
+  // Kokoro) — and the policy sweeps everything the removal left without a
+  // path of fact edges to Mila's node: the freed Kokoro-82M and the
+  // starter's isolated Berlin, which had none to begin with.
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: rocky.id }),
+    { deleted: 1, name: "Rocky", orphansRemoved: ["Berlin", "Kokoro-82M"] });
   const after = await store.subgraph({ user: "Mila" });
   assert.ok(!after.nodes.some((node) => node.id === rocky.id), "Rocky is gone from Mila's view");
   assert.equal(after.edges.length, 0, "the USES edge is deleted with its node");
-  assert.equal(after.nodes.find((node) => node.name === "Kokoro-82M").isolated, true, "Kokoro is isolated now that Rocky is gone");
+  assert.ok(!after.nodes.some((node) => node.name === "Kokoro-82M"), "the freed neighbour is swept by the policy");
   // The admin may delete any entity, whoever owns it.
-  assert.deepEqual(await store.removeEntity({ user: "admin", id: coffee.id, admin: true }), { deleted: 1, name: "Coffee" });
+  assert.deepEqual(await store.removeEntity({ user: "admin", id: coffee.id, admin: true }), { deleted: 1, name: "Coffee", orphansRemoved: [] });
   const adminAfter = await store.subgraph({ user: "admin", admin: true });
   assert.ok(!adminAfter.nodes.some((node) => node.id === coffee.id), "Coffee is gone from the global view");
   // Deleting again is a clean no-op.
-  assert.deepEqual(await store.removeEntity({ user: "Mila", id: rocky.id }), { deleted: 0, name: null });
+  assert.deepEqual(await store.removeEntity({ user: "Mila", id: rocky.id }), { deleted: 0, name: null, orphansRemoved: [] });
 });
 
 // --- neo4j store (mock driver) --------------------------------------------------
@@ -663,7 +676,15 @@ test("neo4j store: removeEntity pins the owner-scoped DETACH DELETE (admin: no o
   const fakeFactory = () => ({
     session() {
       return {
-        async run(cypher, params) { calls.push({ cypher, params }); return { records: [{ toObject: () => ({ name: "Lego", deleted: 1 }) }] }; },
+        async run(cypher, params) {
+          calls.push({ cypher, params });
+          // Only the delete itself (the elementId match) returns a row; the
+          // policy sweep that follows finds nothing to remove.
+          if (cypher.includes("elementId(e)")) {
+            return { records: [{ toObject: () => ({ name: "Lego", owner: "Mila", deleted: 1 }) }] };
+          }
+          return { records: [] };
+        },
         async close() {},
       };
     },
@@ -678,7 +699,7 @@ test("neo4j store: removeEntity pins the owner-scoped DETACH DELETE (admin: no o
     driverFactory: fakeFactory,
   });
   const userResult = await store.removeEntity({ user: "Mila", id: "4:abc" });
-  assert.deepEqual(userResult, { deleted: 1, name: "Lego" });
+  assert.deepEqual(userResult, { deleted: 1, name: "Lego", orphansRemoved: [] });
   const userCall = calls[0];
   // The delete matches :Entity ONLY (a :User id can never match) and is
   // pinned to owner = the session user, so a foreign id matches nothing.
@@ -686,13 +707,19 @@ test("neo4j store: removeEntity pins the owner-scoped DETACH DELETE (admin: no o
   assert.ok(userCall.cypher.includes("DETACH DELETE e"), "the node's edges go with the node");
   assert.equal(userCall.params.user, "Mila");
   assert.equal(userCall.params.id, "4:abc");
+  // The policy sweep runs after the delete, pinned to the deleted entity's
+  // owner (the same owner for a non-admin delete).
+  const userSweep = calls[1];
+  assert.ok(userSweep.cypher.includes("NOT EXISTS"), "the connectivity check runs after the delete");
+  assert.equal(userSweep.params.user, "Mila", "the sweep is pinned to the deleted entity's owner");
   // The admin variant drops the owner pin — the backend sets admin: true for
   // admin sessions only, never from client input.
   await store.removeEntity({ user: "admin", id: "4:abc", admin: true });
-  const adminCall = calls[1];
+  const adminCall = calls[2];
   assert.ok(adminCall.cypher.includes("MATCH (e:Entity) WHERE elementId(e) = $id"), adminCall.cypher);
-  assert.doesNotMatch(adminCall.cypher, /owner/, "no owner pinning in the admin delete");
+  assert.doesNotMatch(adminCall.cypher, /e\.owner = \$user/, "no owner PINNING in the admin delete");
   assert.deepEqual(adminCall.params, { id: "4:abc" });
+  assert.equal(calls[3].params.user, "Mila", "the admin delete still sweeps the entity's own owner");
   // A no-match result comes back as deleted: 0 (the endpoint maps that to 404).
   const empty = graphdb.createGraphStore({
     uri: "bolt://mock:7687",
@@ -703,7 +730,7 @@ test("neo4j store: removeEntity pins the owner-scoped DETACH DELETE (admin: no o
     writePassword: "w",
     driverFactory: () => ({ session: () => ({ run: async () => ({ records: [] }), close: async () => {} }) }),
   });
-  assert.deepEqual(await empty.removeEntity({ user: "Mila", id: "4:xyz" }), { deleted: 0, name: null });
+  assert.deepEqual(await empty.removeEntity({ user: "Mila", id: "4:xyz" }), { deleted: 0, name: null, orphansRemoved: [] });
 });
 
 test("neo4j store: an introduced relation type is merged under its own name (owner-scoped endpoints)", async () => {
@@ -791,12 +818,15 @@ test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", asy
   // The orphan check below does name KNOWS, but only to exclude it from what
   // counts as a connection — so the rule is about writing one, not mentioning it.
   assert.ok(!calls.some((cypher) => /(MERGE|CREATE) \([a-z]*\)-\[[a-z]*:KNOWS/.test(cypher)), JSON.stringify(calls));
-  // The end-of-ingest check: every entity of this owner that no fact edge
-  // touches is deleted, so a bare mention can never survive an ingest.
+  // The end-of-ingest policy check: every entity of this owner without a
+  // bounded path of fact edges to the owner's own :User node is deleted, so
+  // a disconnected cluster can never survive an ingest.
   const orphanCheck = calls.find((cypher) => cypher.includes("DETACH DELETE e") && cypher.includes("NOT EXISTS"));
   assert.ok(orphanCheck, `expected the orphan check: ${JSON.stringify(calls)}`);
   assert.ok(orphanCheck.includes("MATCH (e:Entity {owner: $user})"), "the check is pinned to the turn's owner");
-  assert.ok(orphanCheck.includes("type(r) <> 'KNOWS'"), "KNOWS does not count as a connection");
+  assert.ok(orphanCheck.includes("MATCH (u:User {name: $user})"), "the check connects to the owner's own :User node");
+  assert.ok(orphanCheck.includes("*1..6"), "the connectivity path is bounded");
+  assert.ok(orphanCheck.includes("type(edge) <> 'KNOWS'"), "KNOWS does not count as a connection");
   // The relation MERGE stores the negation flag; SET (not ON CREATE) is what
   // lets a later "I don't like X" flip an existing edge.
   const relationMerge = calls.find((cypher) => cypher.includes("r:LIKES"));
@@ -1385,14 +1415,18 @@ test("mentioning a registered user stores no entity and the feed says so", async
   assert.equal(ingest.entities, 0, JSON.stringify(ingest));
   assert.equal(ingest.relations, 0, JSON.stringify(ingest));
   assert.equal(ingest.skippedUsers, 1, JSON.stringify(ingest));
-  // Roman's world is unchanged: no new node, and no Mila marker either (with
-  // no fact edge there is no neighbour pulling her in). The ingest check had
-  // nothing to remove — it only looks at the names the turn touched, and this
-  // turn stored none.
+  // The user mention itself stored nothing: no new node, and no Mila marker
+  // either (with no fact edge there is no neighbour pulling her in). But the
+  // stored policy is global: this was Roman's first ingest on this server, so
+  // it swept his starter world's isolated mention (Coffee has no path of fact
+  // edges to his node), and the feed reports that removal.
   const after = await (await auth(origin, "/api/graph/subgraph?limit=60", romanCookie)).json();
   assert.ok(!after.nodes.some((node) => node.name === "Mila"), JSON.stringify(after.nodes));
-  assert.equal(ingest.orphansRemoved, 0, `nothing to sweep: ${JSON.stringify(ingest)}`);
-  assert.equal(after.nodes.length, before.nodes.length, JSON.stringify({ before, after }));
+  // The activity feed counts what the sweep removed (the store reports the
+  // names, the feed the number).
+  assert.equal(ingest.orphansRemoved, 1, `the pre-existing isolated mention is swept: ${JSON.stringify(ingest)}`);
+  assert.ok(!after.nodes.some((node) => node.name === "Coffee"), "the orphan is gone");
+  assert.equal(after.nodes.length, before.nodes.length - 1, JSON.stringify({ before, after }));
 });
 
 test("/api/graph/search is fuzzy, session-scoped and needs a session", async () => {
@@ -1509,17 +1543,19 @@ test("admin session: global panel, cross-owner brain tools, full activity feed",
   const backend = backends[1];
   const adminCookie = await login(origin, "admin");
   // The admin's panel is the WHOLE graph: every user's account node and
-  // entity, whoever owns them.
+  // entity, whoever owns them. (The starter world's isolated mentions were
+  // already swept by the stored policy on the users' first ingests earlier in
+  // this file, so the world holds the users' own facts only.)
   const status = await (await auth(origin, "/api/graph/status", adminCookie)).json();
-  assert.ok(status.nodes >= 6, `admin sees the whole graph: ${JSON.stringify(status)}`);
+  assert.ok(status.nodes >= 4, `admin sees the whole graph: ${JSON.stringify(status)}`);
   const subgraph = await (await auth(origin, "/api/graph/subgraph?limit=60", adminCookie)).json();
   const names = subgraph.nodes.map((node) => node.name);
   assert.ok(names.includes("Mila") && names.includes("Roman"), `every user's nodes: ${JSON.stringify(names)}`);
-  // Entities of both owners are drawn: Mila's starter Rocky, and what Roman's
-  // earlier turns stored.
-  assert.ok(names.includes("Rocky") && names.includes("Coffee"), `every user's entities: ${JSON.stringify(names)}`);
-  // Roman's pre-existing isolated mention is drawn but flagged in the admin view.
-  assert.equal(subgraph.nodes.find((node) => node.name === "Coffee").isolated, true, JSON.stringify(subgraph.nodes));
+  // Entities of both owners are drawn: Mila's ingested Amelie, and what
+  // Roman's earlier turns stored.
+  assert.ok(names.includes("Amelie") && names.includes("Home Assistant"), `every user's entities: ${JSON.stringify(names)}`);
+  // The stored policy already swept the disconnected starter mentions.
+  assert.ok(!names.includes("Rocky") && !names.includes("Coffee"), `no disconnected starter entities remain: ${JSON.stringify(names)}`);
   // A non-admin user is unaffected by the admin's presence in USERS.
   const milaCookie = await login(origin, "Mila");
   const milaStatus = await (await auth(origin, "/api/graph/status", milaCookie)).json();

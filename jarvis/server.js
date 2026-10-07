@@ -61,6 +61,15 @@ let ttsCursor = 0;
 // Per-user prompt history: authenticated username -> last 10 messages. Each
 // user's cache is fully isolated from every other user's.
 const conversations = new Map();
+// Per-user conversation log (the Prompt/Answer panels' scrollback):
+// authenticated username -> [{ ts, prompt, answer }]. The browser posts every
+// finished turn (brain answers and butler closings alike). The store keeps
+// everything; /api/conversation only serves the last 24 days — older entries
+// stay stored, just out of the panel's window. Capped per user so a chatty
+// account cannot grow the in-memory store without bound.
+const conversationLogs = new Map();
+const CONVERSATION_WINDOW_MS = 24 * 60 * 60 * 1000;
+const CONVERSATION_MAX_ENTRIES = 500;
 
 // --- Login sessions ---------------------------------------------------------
 // In-memory sessions: token -> { user, createdAt }. The token travels as an
@@ -471,6 +480,29 @@ const server = http.createServer(async (req, res) => {
         // exactly the owner of every entity in their view anyway).
         admin: isAdmin(req.user),
       });
+    }
+
+    // The Prompt/Answer panels' scrollback: this user's stored conversation,
+    // newest last, windowed to the last 24 days (the store keeps older
+    // entries; the panels only show the window). Same per-user isolation as
+    // the prompt history — a foreign user's conversation is unreachable.
+    if (req.method === "GET" && pathname === "/api/conversation") {
+      const log = conversationLogs.get(req.user) || [];
+      const floor = Date.now() - CONVERSATION_WINDOW_MS;
+      return json(res, 200, { requestId, entries: log.filter((entry) => Date.parse(entry.ts) >= floor) });
+    }
+
+    if (req.method === "POST" && pathname === "/api/conversation") {
+      const payload = JSON.parse((await readBody(req, 64 * 1024)).toString("utf8") || "{}");
+      const prompt = String(payload.prompt || "").trim().slice(0, 4000);
+      const answer = String(payload.answer || "").trim().slice(0, 8000);
+      if (!prompt || !answer) return json(res, 400, { error: "prompt_and_answer_required", requestId });
+      const log = conversationLogs.get(req.user) || [];
+      const entry = { ts: new Date().toISOString(), prompt, answer };
+      log.push(entry);
+      if (log.length > CONVERSATION_MAX_ENTRIES) log.splice(0, log.length - CONVERSATION_MAX_ENTRIES);
+      conversationLogs.set(req.user, log);
+      return json(res, 200, { requestId, entry });
     }
 
     // Per-user isolation: every graph endpoint is scoped to the signed-in

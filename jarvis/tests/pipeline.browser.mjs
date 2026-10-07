@@ -595,6 +595,26 @@ test("a thank-you after the answer gets a butler closing instead of a brain roun
   assert.match(await page.textContent("#log"), /Acknowledgment "Thank you"/);
 });
 
+test("a bye after the answer ends the turn with a butler farewell", { timeout: 40000 }, async (t) => {
+  // The same 4 s loop fixture, but burst 2 is "Bye" — a session-ending
+  // word. The butler answers with the farewell closing (goodbye, not just
+  // "standing by") and no brain round trip.
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : n === 3 ? "Bye" : "",
+  }));
+  // Deterministic closing: the fixed random source picks the first line.
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Utterance 1 is the answer; the farewell "It was my pleasure. Goodbye."
+  // speaks as a single clause (the one-word "Goodbye." merges into it), so
+  // the full farewell is utterance 2.
+  await page.waitForFunction(() => window.savedUtterances.length >= 2, null, { timeout: 30000 });
+  await page.click("#stopButton");
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  assert.equal(await page.evaluate(() => savedUtterances.slice(1).map((u) => u.text).join(" ")),
+    "It was my pleasure. Goodbye.");
+  assert.match(await page.textContent("#log"), /Acknowledgment "Bye"/);
+});
+
 test("an ok after the follow-up window closed still gets a butler closing in wake listening", { timeout: 40000 }, async (t) => {
   // One tone per 6 s loop: the wake cycle gets its command, the answer
   // speaks, the follow-up command window sees only silence and aborts after
@@ -1034,6 +1054,14 @@ test("the speed slider scales the request and persists per browser", { timeout: 
   assert.match(await page.textContent("#voiceStatus"), /1\.50x/);
 });
 
+// The Answer panel is a conversation list; read the body of its last entry.
+async function lastAnswerBody(page) {
+  return page.evaluate(() => {
+    const bodies = document.querySelectorAll("#answerText .transcript-body");
+    return bodies.length ? bodies[bodies.length - 1].textContent : null;
+  });
+}
+
 // page.fill is unstable in minimal containers (see the wake-word tests);
 // set the value directly.
 async function typeManualPrompt(page, text) {
@@ -1062,7 +1090,9 @@ test("a failed brain request is retried with the captured prompt", { timeout: 30
   const log = await page.textContent("#log");
   assert.match(log, /brain failed \(attempt 1\/3\): brain unavailable; retrying in 1000 ms/);
   assert.doesNotMatch(log, /Pipeline error/);
-  assert.equal(await page.textContent("#answerText"), "Done.");
+  // The Answer panel is the conversation history: the finished turn's body is
+  // the last entry.
+  assert.equal(await lastAnswerBody(page), "Done.");
 });
 
 test("a failed speech output is retried and still speaks the answer", { timeout: 30000 }, async (t) => {
@@ -1078,7 +1108,93 @@ test("a failed speech output is retried and still speaks the answer", { timeout:
   const log = await page.textContent("#log");
   assert.match(log, /speech output failed \(attempt 1\/3\): Speech output failed: synthesis-failed/);
   assert.doesNotMatch(log, /Pipeline error/);
-  assert.equal(await page.textContent("#answerText"), "Done.");
+  assert.equal(await lastAnswerBody(page), "Done.");
+});
+
+test("the hero switches sit left of Sign out, and the panels keep the conversation history", { timeout: 45000 }, async (t) => {
+  // The harness intercepts every /api route, so the conversation endpoint is
+  // intercepted too, backed by this test's own array (the in-memory backend
+  // store).
+  const { page } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  // The hero row, left to right: Jarvis on/off, Speak / Text only, Sign out.
+  assert.deepEqual(await page.evaluate(() =>
+    [...document.querySelectorAll(".user-row .user-controls button")].map((button) => button.id)),
+    ["enableSwitch", "speakSwitch", "signOutButton"]);
+  // The toggle mirrors the armed state: setup armed the session, so it reads
+  // "Jarvis on" (aria-checked true) and the Arm button is taken.
+  assert.equal(await page.getAttribute("#enableSwitch", "aria-checked"), "true");
+  assert.equal(await page.isDisabled("#armButton"), true);
+  // Disable: the normal stop path (mic released, Arm back).
+  await page.click("#enableSwitch");
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.getAttribute("#enableSwitch", "aria-checked"), "false");
+  // Enable: the normal arm path (mic unlocked, Arm taken while running).
+  await page.click("#enableSwitch");
+  await page.waitForFunction(() => document.getElementById("armButton").disabled);
+  assert.equal(await page.getAttribute("#enableSwitch", "aria-checked"), "true");
+  // Back to disarmed for the manual prompt below.
+  await page.click("#enableSwitch");
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  // The conversation store: POSTs append, GETs serve what was stored.
+  const stored = [];
+  await page.route("**/api/conversation", (route) => {
+    if (route.request().method() === "POST") {
+      const entry = route.request().postDataJSON();
+      stored.push(entry);
+      return route.fulfill({ json: { entry: { ts: new Date().toISOString(), ...entry } } });
+    }
+    return route.fulfill({ json: { entries: stored.map((entry) => ({ ts: new Date().toISOString(), ...entry })) } });
+  });
+  // A finished manual prompt (voice on) lands in BOTH panels with a
+  // date-time stamp, and in the backend store.
+  const spokenBeforeFirst = await page.evaluate(() => window.savedUtterances.length);
+  await typeManualPrompt(page, "What time is it?");
+  await page.waitForFunction(() => {
+    const bodies = document.querySelectorAll("#answerText .transcript-body");
+    return bodies.length >= 1 && bodies[bodies.length - 1].textContent === "Done.";
+  }, null, { timeout: 25000 });
+  // The answer's own utterance (the greeting's are already counted in the
+  // baseline).
+  await page.waitForFunction((baseline) => window.savedUtterances.length > baseline, spokenBeforeFirst,
+    { timeout: 15000 });
+  const spokenAfterFirst = await page.evaluate(() => window.savedUtterances.length);
+  assert.deepEqual(stored, [{ prompt: "What time is it?", answer: "Done." }], JSON.stringify(stored));
+  // Speak off: the next answer stays in the panel, and nothing is spoken.
+  assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "true");
+  await page.click("#speakSwitch");
+  assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "false");
+  await typeManualPrompt(page, "What is two plus two?");
+  await page.waitForFunction(() => {
+    const bodies = document.querySelectorAll("#answerText .transcript-body");
+    return bodies.length >= 2 && bodies[bodies.length - 1].textContent === "Done.";
+  }, null, { timeout: 25000 });
+  assert.equal(await page.evaluate(() => window.savedUtterances.length), spokenAfterFirst,
+    "text-only mode speaks nothing");
+  assert.deepEqual(stored, [
+    { prompt: "What time is it?", answer: "Done." },
+    { prompt: "What is two plus two?", answer: "Done." },
+  ], JSON.stringify(stored));
+  const panel = await page.evaluate(() => ({
+    prompts: [...document.querySelectorAll("#promptText .transcript-entry")].map((entry) => entry.textContent),
+    answers: [...document.querySelectorAll("#answerText .transcript-entry")].map((entry) => entry.textContent),
+    times: document.querySelectorAll("#promptText .transcript-time").length,
+  }));
+  assert.equal(panel.prompts.length, 2, JSON.stringify(panel));
+  assert.ok(panel.prompts[0].includes("What time is it?"), JSON.stringify(panel));
+  assert.ok(panel.prompts[1].includes("What is two plus two?"), JSON.stringify(panel));
+  assert.equal(panel.answers.length, 2, JSON.stringify(panel));
+  assert.ok(panel.answers[0].includes("Done."), JSON.stringify(panel));
+  assert.ok(panel.answers[1].includes("Done."), JSON.stringify(panel));
+  assert.equal(panel.times, 2, "every prompt entry carries its date-time");
+  // After a reload the panels come back from the stored conversation, and the
+  // per-browser voice-output setting stays off.
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "false");
+  assert.equal(await lastAnswerBody(page), "Done.", "the history survives the reload");
+  assert.deepEqual(await page.evaluate(() =>
+    [...document.querySelectorAll("#promptText .transcript-entry")].map((entry) => entry.textContent).length),
+    2, "the prompt history survives the reload");
 });
 
 test("the silence slider adjusts the live stop delay and persists per browser", { timeout: 75000 }, async (t) => {

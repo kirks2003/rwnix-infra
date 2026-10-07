@@ -25,7 +25,7 @@ const el = Object.fromEntries([
   "graphNodeSize", "graphNodeSizeValue", "graphTextSize", "graphTextSizeValue",
   "panelsToggle", "panelsBelow",
   "loginPanel", "loginForm", "loginUsername", "loginPassword", "loginButton", "loginStatus",
-  "userLine", "signOutButton",
+  "userLine", "enableSwitch", "signOutButton",
 ].map((id) => [id, document.getElementById(id)]));
 const steps = ["wake", "record", "vad", "whisper", "brain", "tts"];
 const sessionId = crypto.randomUUID();
@@ -726,6 +726,14 @@ async function withStepRetries(session, label, run) {
   throw lastError;
 }
 
+// The hero's enable/disable toggle mirrors the armed state: "Jarvis on"
+// while a session runs, "Jarvis off" once stopped. Every path that arms or
+// disarms (arm click, manual prompt, Stop, error, page hide) funnels through
+// newSession()/stop(), so syncing there covers all of them.
+function syncEnableSwitch() {
+  el.enableSwitch.setAttribute("aria-checked", current ? "true" : "false");
+}
+
 function stop(message = "Jarvis is disarmed.") {
   const old = current;
   current = null;
@@ -735,6 +743,7 @@ function stop(message = "Jarvis is disarmed.") {
   el.armButton.disabled = !config;
   el.sendManualButton.disabled = !config;
   el.stopButton.disabled = true;
+  syncEnableSwitch();
   for (const button of previewButtons) button.disabled = !config;
   el.micLevel.value = 0;
   el.micLevelValue.textContent = "0%";
@@ -758,6 +767,7 @@ function newSession() {
   el.armButton.disabled = true;
   el.sendManualButton.disabled = true;
   el.stopButton.disabled = false;
+  syncEnableSwitch();
   for (const button of previewButtons) button.disabled = true;
   resetSteps();
   el.pipelineStatus.textContent = pipelineStatus();
@@ -1231,28 +1241,129 @@ async function listen(session) {
   }
 }
 
+// The Prompt/Answer panels hold the conversation history, not just the
+// latest turn: every finished turn (brain answer, butler closing, manual
+// prompt) appends one entry per panel with a timestamp. The backend stores
+// the whole conversation under the signed-in user and serves the last 24
+// days (see /api/conversation in server.js); the panels are the scrollable
+// view over that. A turn in flight shows a pending answer entry until it
+// completes or fails.
+function formatTranscriptTime(ts) {
+  return new Date(ts).toLocaleString(language === "de" ? "de-DE" : "en-GB", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function transcriptEntry(text, ts) {
+  const entry = document.createElement("div");
+  entry.className = "transcript-entry";
+  const time = document.createElement("time");
+  time.className = "transcript-time";
+  time.dateTime = new Date(ts).toISOString();
+  time.textContent = formatTranscriptTime(ts);
+  const body = document.createElement("p");
+  body.className = "transcript-body";
+  body.textContent = text;
+  entry.append(time, body);
+  return entry;
+}
+
+function scrollTranscripts() {
+  for (const list of [el.promptText, el.answerText]) list.scrollTop = list.scrollHeight;
+}
+
+function beginTurn(prompt) {
+  for (const list of [el.promptText, el.answerText]) {
+    for (const empty of list.querySelectorAll(".transcript-empty")) empty.remove();
+  }
+  const ts = Date.now();
+  el.promptText.append(transcriptEntry(prompt, ts));
+  const pending = transcriptEntry("…", ts);
+  pending.querySelector(".transcript-body").classList.add("pending");
+  el.answerText.append(pending);
+  scrollTranscripts();
+  return pending;
+}
+
+function completeTurn(pending, answer) {
+  const body = pending.querySelector(".transcript-body");
+  body.classList.remove("pending");
+  body.textContent = answer;
+  scrollTranscripts();
+}
+
+function failTurn(pending, message) {
+  const body = pending.querySelector(".transcript-body");
+  body.classList.remove("pending");
+  body.textContent = `Failed: ${message}`;
+  scrollTranscripts();
+}
+
+// Fire-and-forget: the backend stores the turn under the signed-in user, so
+// the panels can show it after a reload; a failed post never blocks the
+// pipeline (the turn already happened).
+function recordTurn(prompt, answer) {
+  fetch("/api/conversation", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, answer }),
+    signal: AbortSignal.timeout(10000),
+    cache: "no-store",
+  }).catch(() => {});
+}
+
+async function loadConversationHistory() {
+  try {
+    const response = await fetch("/api/conversation", { cache: "no-store", signal: AbortSignal.timeout(10000) });
+    if (!response.ok) return;
+    const data = await response.json();
+    el.promptText.replaceChildren();
+    el.answerText.replaceChildren();
+    const entries = data.entries || [];
+    for (const entry of entries) {
+      const ts = Date.parse(entry.ts) || Date.now();
+      el.promptText.append(transcriptEntry(entry.prompt, ts));
+      el.answerText.append(transcriptEntry(entry.answer, ts));
+    }
+    if (!entries.length) {
+      for (const list of [el.promptText, el.answerText]) {
+        const empty = document.createElement("p");
+        empty.className = "transcript-empty";
+        empty.textContent = "No conversation yet.";
+        list.append(empty);
+      }
+    }
+    scrollTranscripts();
+  } catch {
+    // History is a convenience; a failed load leaves the panels empty.
+  }
+}
+
 async function answer(session, prompt) {
   check(session);
-  el.promptText.textContent = prompt;
-  el.answerText.textContent = "";
-  const result = await withStepRetries(session, "brain", async () => {
-    stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
-    const data = await request(session, "/api/chat", {
-      method: "POST", headers: { "content-type": "application/json" },
-      // The brain answers as the wake word's name, so the active phrase
-      // (server default or personal override) travels with every request.
-      body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase, brainProfile: aiProfileId }),
+  const pending = beginTurn(prompt);
+  try {
+    const result = await withStepRetries(session, "brain", async () => {
+      stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
+      const data = await request(session, "/api/chat", {
+        method: "POST", headers: { "content-type": "application/json" },
+        // The brain answers as the wake word's name, so the active phrase
+        // (server default or personal override) travels with every request.
+        body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase, brainProfile: aiProfileId }),
+      });
+      if (!data.answer) throw new Error("Brain returned no answer");
+      return data;
     });
-    if (!data.answer) throw new Error("Brain returned no answer");
-    return data;
-  });
-  log("brain", `Request ${result.requestId} completed`);
-  mark("brain", "done");
-  el.answerText.textContent = result.answer;
-  // Ingestion of this turn runs server-side after the response; give it a
-  // moment, then refresh the graph panel so the new facts show up.
-  if (mcpFlags.graph) setTimeout(() => loadGraph(), 4000);
-  await speakAnswer(session, result.answer);
+    log("brain", `Request ${result.requestId} completed`);
+    mark("brain", "done");
+    completeTurn(pending, result.answer);
+    recordTurn(prompt, result.answer);
+    // Ingestion of this turn runs server-side after the response; give it a
+    // moment, then refresh the graph panel so the new facts show up.
+    if (mcpFlags.graph) setTimeout(() => loadGraph(), 4000);
+    await speakAnswer(session, result.answer);
+  } catch (error) {
+    failTurn(pending, error.message);
+    throw error;
+  }
 }
 
 // The spoken part of a turn, shared by brain answers and the butler
@@ -1298,7 +1409,7 @@ async function speakAnswer(session, text) {
 // marked skipped and no brain request or graph ingestion happens.
 async function acknowledge(session, prompt) {
   check(session);
-  el.promptText.textContent = prompt;
+  const pending = beginTurn(prompt);
   // The prompt may be a full transcript whose last phrase is the
   // acknowledgment (echo-merged window), so the trailing match resolves the
   // kind when the full command is not one on its own.
@@ -1306,7 +1417,10 @@ async function acknowledge(session, prompt) {
   const closing = pickClosing(language, kind);
   log("brain", `Acknowledgment "${prompt}"; the brain is skipped — a polite closing is spoken instead.`);
   mark("brain", "skipped");
-  el.answerText.textContent = closing;
+  completeTurn(pending, closing);
+  // Butler closings are conversation too: the panels (and the 24-day backend
+  // history) keep them next to the brain's answers.
+  recordTurn(prompt, closing);
   await speakAnswer(session, closing);
 }
 
@@ -1519,6 +1633,17 @@ el.armButton.addEventListener("click", async () => {
   }
 });
 el.stopButton.addEventListener("click", () => stop());
+// The hero's enable/disable toggle: the second face of Arm/Stop. Disabling
+// while armed runs the normal stop path; enabling runs the normal arm path
+// (mic unlock, wake listening, error handling all stay in one place).
+el.enableSwitch.addEventListener("click", () => {
+  if (!config) return;
+  if (current) {
+    stop();
+    return;
+  }
+  el.armButton.click();
+});
 
 // Direct prompt input in the Prompt panel: same flow as the old manual prompt
 // dialog, available only while disarmed.
@@ -1703,6 +1828,7 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => stop());
 el.armButton.disabled = el.sendManualButton.disabled = true;
+el.enableSwitch.disabled = true;
 for (const button of previewButtons) button.disabled = true;
 el.languageSwitch.disabled = true;
 el.speakSwitch.disabled = true;
@@ -1874,6 +2000,9 @@ async function loadConfig(userFromLogin) {
     setGraphView("3d"); // the live 3D view is the default panel view
     loadGraph();
     setInterval(() => { if (!document.hidden) loadGraph(); }, 15000);
+    // The conversation history the Prompt/Answer panels scroll over (the
+    // backend's 24-day view of this user's stored conversation).
+    loadConversationHistory();
     let savedPanels = null;
     try {
       savedPanels = localStorage.getItem(panelsStorageKey);
@@ -1883,6 +2012,7 @@ async function loadConfig(userFromLogin) {
     setPanelsVisible(savedPanels === null ? true : savedPanels === "true", false);
     log("stt", `Configured STT profiles: ${config.whisperProfiles.map((profile) => `${profile.label} ${profile.endpoints.join(", ")}`).join(" | ")} (no request yet)`);
     el.armButton.disabled = el.sendManualButton.disabled = false;
+    el.enableSwitch.disabled = false;
     for (const button of previewButtons) button.disabled = false;
     stage("standby", "Standby", "Arm Jarvis to start wake listening. Microphone audio stays local until a probe or command is sent.");
     log("build", "PCM lifecycle v3");

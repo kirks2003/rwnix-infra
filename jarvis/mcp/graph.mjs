@@ -203,7 +203,7 @@ export const TOOLS = [
   },
   {
     name: "delete-entity",
-    description: "ADMIN ONLY: delete an entity of a user (owner, name) together with its links. :User account nodes can never be deleted.",
+    description: "ADMIN ONLY: delete an entity of a user (owner, name) together with its links. :User account nodes can never be deleted. Afterwards the stored graph policy removes any of the owner's entities left without a relation (a path of fact edges) to the user.",
     inputSchema: {
       type: "object",
       properties: {
@@ -546,7 +546,14 @@ function startServer() {
     const existing = await runWrite(QUERIES.findEntity, { name: params.name, owner: params.owner });
     if (!existing.length) return `No entity named "${params.name}" owned by ${params.owner} in the graph.`;
     await runWrite(QUERIES.deleteEntity, { name: params.name, owner: params.owner });
-    return `Deleted "${params.name}" (owner ${params.owner}) and its links.`;
+    // The stored graph policy runs after the removal, exactly like the
+    // backend's own delete path: deleting the middle of a chain can free the
+    // far side with no path to the owner's :User node left, and an entity
+    // with no relation to its user does not belong in the world.
+    const swept = await runWrite(graphdb.DISCONNECT_SWEEP, { user: params.owner });
+    const sweptNames = swept.map((row) => row.name);
+    return `Deleted "${params.name}" (owner ${params.owner}) and its links.`
+      + (sweptNames.length ? ` Also removed ${sweptNames.join(", ")}: the policy keeps only entities connected to the user.` : "");
   }
 
   const readLine = readline.createInterface({ input: process.stdin, terminal: false });

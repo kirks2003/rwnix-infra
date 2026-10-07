@@ -865,3 +865,33 @@ test("each user keeps an isolated prompt history", async () => {
   assert.ok(milaAgain.includes("Mila secret plan"), "Mila's own history is still hers");
   assert.ok(!milaAgain.includes("Roman weather question"), "still no cross-user leakage");
 });
+
+test("the conversation log stores finished turns per user, windowed to 24 days", async () => {
+  const mila = await login(origin, "Mila");
+  const roman = await login(origin, "Roman");
+  const post = (cookie, prompt, answer) => auth(origin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt, answer }),
+  }, cookie);
+  // A turn needs both sides: the panels show prompt AND answer.
+  const bad = await post(mila, "only a prompt", "");
+  assert.equal(bad.status, 400);
+  await bad.json();
+  // A stored turn comes back with a server timestamp...
+  const stored = await post(mila, "what time is it?", "It is 14:05.");
+  assert.equal(stored.status, 200);
+  const entry = (await stored.json()).entry;
+  assert.equal(entry.prompt, "what time is it?");
+  assert.ok(Date.parse(entry.ts) > 0, JSON.stringify(entry));
+  // ...and appears in the owner's GET, newest last.
+  const milaLog = await (await auth(origin, "/api/conversation", {}, mila)).json();
+  assert.deepEqual(milaLog.entries.at(-1), entry, JSON.stringify(milaLog.entries));
+  // ...and never in another user's view.
+  const romanLog = await (await auth(origin, "/api/conversation", {}, roman)).json();
+  assert.ok(!romanLog.entries.some((candidate) => candidate.prompt === "what time is it?"), "no cross-user leakage");
+  // The served view is windowed to the last 24 days (older entries stay
+  // stored, out of the panel's view): a fresh entry is inside the window and
+  // the only entry Mila has, so the served list is exactly it.
+  assert.ok(Date.now() - Date.parse(entry.ts) < 24 * 60 * 60 * 1000, "a fresh turn is inside the window");
+  assert.equal(milaLog.entries.length, 1, JSON.stringify(milaLog.entries));
+});

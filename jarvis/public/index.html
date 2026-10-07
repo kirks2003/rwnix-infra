@@ -37,7 +37,22 @@
           <p id="stageDetail">Click Arm Jarvis to unlock audio and start wake listening.</p>
           <div class="user-row">
             <span id="userLine" class="user-line"></span>
-            <button id="signOutButton" class="sign-out" type="button">Sign out</button>
+            <div class="user-controls">
+              <button id="enableSwitch" class="lang-switch enable-switch" type="button" role="switch" aria-checked="false"
+                      title="Enable or disable Jarvis: disabling stops the session and releases the microphone, enabling starts wake listening.">
+                <span class="lang-option">Jarvis off</span>
+                <span class="lang-option">Jarvis on</span>
+                <span class="lang-knob" aria-hidden="true"></span>
+              </button>
+              <button id="speakSwitch" class="lang-switch speak-switch" type="button" role="switch" aria-checked="true"
+                      title="Turn spoken answers off: the answer is written to the Answer panel as text only. Saved in this browser only."
+                      disabled>
+                <span class="lang-option">Text only</span>
+                <span class="lang-option">Speak</span>
+                <span class="lang-knob" aria-hidden="true"></span>
+              </button>
+              <button id="signOutButton" class="sign-out" type="button">Sign out</button>
+            </div>
           </div>
         </div>
       </section>
@@ -45,7 +60,7 @@
       <section class="transcript app-ui">
         <div>
           <h2>Prompt</h2>
-          <p id="promptText">—</p>
+          <div id="promptText" class="transcript-list" aria-live="polite"></div>
           <form id="manualPromptForm" class="manual-prompt">
             <textarea id="manualPrompt" rows="2" placeholder="Type a prompt here (when disarmed) and press Send..."></textarea>
             <button id="sendManualButton" type="submit" disabled>Send</button>
@@ -53,7 +68,7 @@
         </div>
         <div>
           <h2>Answer</h2>
-          <p id="answerText">—</p>
+          <div id="answerText" class="transcript-list" aria-live="polite"></div>
         </div>
       </section>
 
@@ -241,16 +256,7 @@
             <input id="voiceSpeed" type="range" min="0.6" max="1.6" step="0.05" value="1"
                    aria-describedby="voiceHelp voiceStatus" disabled>
           </div>
-          <div class="voice-output-control">
-            <button id="speakSwitch" class="lang-switch" type="button" role="switch" aria-checked="true"
-                    title="Turn spoken answers off: the answer is written to the Answer panel as text only. Saved in this browser only."
-                    disabled>
-              <span class="lang-option">Text only</span>
-              <span class="lang-option">Speak</span>
-              <span class="lang-knob" aria-hidden="true"></span>
-            </button>
-            <p id="speakStatus" role="status">Loading voice output settings.</p>
-          </div>
+          <p id="speakStatus" role="status">Loading voice output settings.</p>
           <p id="voiceStatus" role="status">Loading voice settings.</p>
         </form>
 

@@ -127,6 +127,12 @@ body:not(.authenticated) .app-ui {
   font-size: 0.85rem;
 }
 
+.user-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .sign-out {
   padding: 6px 14px;
   color: var(--muted);
@@ -476,15 +482,8 @@ button:disabled {
   margin: 4px 0 10px;
 }
 
-.voice-output-control {
-  display: grid;
-  gap: 4px;
-  justify-items: start;
-  margin-top: 12px;
-}
-
 #speakStatus {
-  margin: 0;
+  margin: 12px 0 0;
   color: var(--muted);
   font-size: 0.75rem;
 }
@@ -624,7 +623,9 @@ progress {
 
 .transcript > div {
   display: grid;
-  grid-template-rows: auto 1fr;
+  /* h2, the scrollable conversation list, and (in the Prompt panel only)
+     the manual prompt form. */
+  grid-template-rows: auto 1fr auto;
   gap: 10px;
   align-content: start;
   /* 250% taller than before (160px); the text area fills the panel. */
@@ -636,13 +637,44 @@ progress {
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
 }
 
-.transcript p {
+/* The conversation history: every finished turn of this browser session's
+   user, newest last, scrollable inside the panel. */
+.transcript-list {
   /* 250% taller than before (46px / 182px); the font size is unchanged. */
   min-height: 161px;
   max-height: 637px;
-  margin: 0;
-  overflow: auto;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  overflow-y: auto;
   overflow-wrap: anywhere;
+  padding: 2px;
+}
+
+.transcript-entry {
+  display: grid;
+  gap: 3px;
+}
+
+.transcript-time {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+}
+
+.transcript-body {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.transcript-body.pending {
+  color: var(--muted);
+}
+
+.transcript-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 /* Knowledge graph: second panel inside #panelsBelow, right under the

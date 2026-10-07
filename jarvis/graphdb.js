@@ -22,6 +22,29 @@ const MAX_ENTITIES = 12;
 const MAX_RELATIONS = 15;
 const PROP_KEYS = new Set(["name", "type", "common", "owner", "id", "elementId"]);
 
+// The stored graph policy, as one query: no entity node may exist without a
+// relation to its user. An entity is "connected" when a path of at most six
+// FACT edges (undirected, through :User account nodes or the owner's own
+// entities) links it to the owner's :User node — KNOWS is bookkeeping and
+// never counts, the same rule as the panel's `isolated` flag. The check runs
+// after every ingest and after every entity removal: a fact between two
+// entities neither of which touches the user (a disconnected cluster) is
+// removed in the same turn it is created, and a removal that frees an
+// entity's last path to the user sweeps the freed cluster. Six hops is the
+// bound: the world is small by construction, and a path longer than that is
+// not a relation anyone can state in one sentence. Exported so the MCP
+// server's admin delete runs the very same policy query.
+const DISCONNECT_SWEEP =
+  "MATCH (e:Entity {owner: $user}) " +
+  "WHERE NOT EXISTS { " +
+  "  MATCH (u:User {name: $user}) " +
+  "  MATCH (e)-[r *1..6]-(u) " +
+  "  WHERE ALL(edge IN r WHERE type(edge) <> 'KNOWS') " +
+  "} " +
+  "WITH e, e.name AS name " +
+  "DETACH DELETE e " +
+  "RETURN name";
+
 function sanitizeName(value) {
   return String(value == null ? "" : value).replace(/\s+/g, " ").trim().slice(0, 80);
 }
@@ -645,31 +668,17 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         );
         linked += list.length;
       }
-      // The check at the end of every ingest: nothing this turn touched may be
-      // left without a fact edge. The write above is built not to make one,
-      // but an orphan can still appear — a fact whose other endpoint failed to
-      // match, or a concurrent turn — so the invariant is verified against the
-      // database instead of trusted, and what it finds is removed and
-      // reported. KNOWS is bookkeeping, not a fact, so it does not count as a
-      // connection (the same rule the panel's `isolated` flag uses).
-      //
-      // Deliberately scoped to this turn's names, not to everything the owner
-      // has: the check must cost the same on a graph of millions as on one of
-      // ten, and "this ingest created no orphan" is the invariant an ingest
-      // can actually own. A pre-existing orphan (one an older write or a
-      // delete left behind) is a maintenance job, not this code path.
-      const touched = [...new Set([
-        ...otherEntities.map((entity) => lower(entity.name)),
-        ...writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]),
-      ])];
-      const orphanRows = touched.length ? rows(await run(writeClient,
-        "MATCH (e:Entity {owner: $user}) WHERE toLower(e.name) IN $names " +
-        "AND NOT EXISTS { MATCH (e)-[r]-() WHERE type(r) <> 'KNOWS' } " +
-        "WITH e, e.name AS name " +
-        "DETACH DELETE e " +
-        "RETURN name",
-        { user, names: touched },
-      )) : [];
+      // The policy check at the end of every ingest: no entity of this owner
+      // may be left without a path of fact edges to the owner's own :User
+      // node (DISCONNECT_SWEEP). The write above is built not to make a
+      // disconnected cluster — a fact between two entities neither of which
+      // touches the user — but one can still appear (a fact whose endpoint
+      // resolved against a copy the owner no longer has, a concurrent turn),
+      // and pre-existing orphans (older writes, admin maintenance) must be
+      // cleaned up by the same rule the user asked for: the invariant is
+      // verified against the database instead of trusted, and what it finds
+      // is removed and reported.
+      const orphanRows = rows(await run(writeClient, DISCONNECT_SWEEP, { user }));
       return {
         upserted,
         relations: linked,
@@ -690,12 +699,19 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       const cypher = (admin
         ? "MATCH (e:Entity) WHERE elementId(e) = $id "
         : "MATCH (e:Entity) WHERE elementId(e) = $id AND e.owner = $user ") +
-        "WITH e.name AS name, e " +
+        "WITH e.name AS name, e.owner AS owner, e " +
         "DETACH DELETE e " +
-        "RETURN name, 1 AS deleted";
+        "RETURN name, owner, 1 AS deleted";
       const resultRows = rows(await run(writeClient, cypher, admin ? { id } : { id, user }));
       const row = resultRows[0];
-      return { deleted: row ? 1 : 0, name: row ? row.name : null };
+      // The removal can orphan what the entity connected: deleting the middle
+      // of a chain frees the far side with no path to the user left, so the
+      // same policy sweep runs for the deleted entity's owner and reports
+      // what it took with it.
+      const orphansRemoved = row
+        ? rows(await run(writeClient, DISCONNECT_SWEEP, { user: row.owner })).map((orphanRow) => orphanRow.name)
+        : [];
+      return { deleted: row ? 1 : 0, name: row ? row.name : null, orphansRemoved };
     },
 
     async close() {
@@ -747,7 +763,11 @@ function createMemoryStore(users = []) {
   // first run of a memory-mode deployment: Mila owns Rocky, Berlin and Kokoro
   // (Rocky -USES-> Kokoro is her only drawn fact; Berlin is an isolated
   // mention) and Roman owns Coffee (also isolated — no fact edge touches it).
-  // Ownership is the provenance; no KNOWS edges exist in this model.
+  // The two isolated mentions are the legacy state the stored policy exists
+  // to clean up: they survive until the owner's first ingest or entity
+  // removal, when the connectivity sweep removes them (an entity with no
+  // path of fact edges to the owner's :User node does not belong in the
+  // world). Ownership is the provenance; no KNOWS edges exist in this model.
   addUser("Mila");
   addUser("Roman");
   const rocky = addNode({ name: "Rocky", type: "thing", owner: "Mila", props: { note: "the Jarvis voice assistant" } });
@@ -772,6 +792,44 @@ function createMemoryStore(users = []) {
 
   function userNodeOf(user) {
     return [...nodes.values()].find((node) => node.name === user && node.type === "person" && node.props.role === "user") || null;
+  }
+
+  // The stored graph policy, the memory-store twin of DISCONNECT_SWEEP: no
+  // entity of this owner may exist without a path of fact edges to the
+  // owner's own :User node. A bounded BFS over the undirected non-KNOWS
+  // edges (the same six-hop bound as the Cypher query) collects everything
+  // reachable, then every owned entity outside the set is removed with its
+  // edges and reported. Runs after every ingest and every removal.
+  function sweepDisconnected(user) {
+    const userNode = userNodeOf(user);
+    if (!userNode) return [];
+    const seen = new Set([userNode.id]);
+    let frontier = [userNode.id];
+    for (let hop = 0; hop < 6 && frontier.length; hop += 1) {
+      const next = [];
+      for (const edge of edges) {
+        if (edge.type === "KNOWS") continue;
+        if (frontier.includes(edge.source) && !seen.has(edge.target)) {
+          seen.add(edge.target);
+          next.push(edge.target);
+        } else if (frontier.includes(edge.target) && !seen.has(edge.source)) {
+          seen.add(edge.source);
+          next.push(edge.source);
+        }
+      }
+      frontier = next;
+    }
+    const removed = [];
+    for (const node of [...nodes.values()]) {
+      if (node.props.role === "user" || node.owner !== user) continue;
+      if (seen.has(node.id)) continue;
+      removed.push(node.name);
+      nodes.delete(node.id);
+      for (let i = edges.length - 1; i >= 0; i -= 1) {
+        if (edges[i].source === node.id || edges[i].target === node.id) edges.splice(i, 1);
+      }
+    }
+    return removed;
   }
 
   // Same visible-world rules as the Neo4j store: the user node, the entities
@@ -1045,26 +1103,14 @@ function createMemoryStore(users = []) {
           linked += 1;
         }
       }
-      // The same end-of-ingest check as the Neo4j store, over the same scope:
-      // the names this turn touched, so the cost does not grow with the graph.
-      const touched = new Set([
-        ...candidates.map((entity) => lower(entity.name)),
-        ...writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]),
-      ]);
-      const orphansRemoved = [];
-      for (const node of [...nodes.values()]) {
-        if (node.props.role === "user" || node.owner !== user) continue;
-        if (!touched.has(lower(node.name))) continue;
-        const connectedByFact = edges.some((edge) => edge.type !== "KNOWS" && (edge.source === node.id || edge.target === node.id));
-        if (connectedByFact) continue;
-        orphansRemoved.push(node.name);
-        nodes.delete(node.id);
-        for (let i = edges.length - 1; i >= 0; i -= 1) {
-          if (edges[i].source === node.id || edges[i].target === node.id) edges.splice(i, 1);
-        }
-      }
-      return { upserted, relations: linked, skippedUsers, skippedUnconnected, orphansRemoved };
-    },
+    // The same policy check as the Neo4j store: after the ingest, no entity
+       // of this owner may be left without a path of fact edges to the owner's
+       // own :User node — a disconnected cluster (a fact between two entities
+       // neither of which touches the user) is removed in the same turn it is
+       // created, and pre-existing orphans are cleaned up by the same rule.
+       const orphansRemoved = sweepDisconnected(user);
+       return { upserted, relations: linked, skippedUsers, skippedUnconnected, orphansRemoved };
+     },
 
     // Mirrors the Neo4j store's explicit delete path: the id must be an
     // entity owned by the signed-in user (admin: any entity). :User account
@@ -1072,13 +1118,16 @@ function createMemoryStore(users = []) {
     // from a nonexistent one.
     async removeEntity({ user, id, admin = false } = {}) {
       const node = nodes.get(id);
-      if (!node || node.props.role === "user") return { deleted: 0, name: null };
-      if (!admin && node.owner !== user) return { deleted: 0, name: null };
+      if (!node || node.props.role === "user") return { deleted: 0, name: null, orphansRemoved: [] };
+      if (!admin && node.owner !== user) return { deleted: 0, name: null, orphansRemoved: [] };
       nodes.delete(id);
       for (let i = edges.length - 1; i >= 0; i -= 1) {
         if (edges[i].source === id || edges[i].target === id) edges.splice(i, 1);
       }
-      return { deleted: 1, name: node.name };
+      // Like the Neo4j store: the removal can orphan the rest of the chain
+      // the entity connected, so the policy sweep runs for its owner.
+      const orphansRemoved = sweepDisconnected(node.owner);
+      return { deleted: 1, name: node.name, orphansRemoved };
     },
 
     async close() {},
@@ -1125,6 +1174,7 @@ module.exports = {
   RELATION_TYPES,
   MAX_ENTITIES,
   MAX_RELATIONS,
+  DISCONNECT_SWEEP,
   parseExtraction,
   parseToolCallsFromContent,
   isRelationType,
