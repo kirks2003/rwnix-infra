@@ -96,10 +96,10 @@ const STOP_AFTER_SPEECH_MS = 10000;
 const COMMAND_WAIT_SILENCE_MS = 3000;
 let commandWaitMs = COMMAND_WAIT_SILENCE_MS;
 // How many days of the stored conversation the Prompt/Answer panels show. The
-// backend keeps everything; the History slider (1..90) picks the window the
+// backend keeps everything; the History slider (1..31) picks the window the
 // panels render, per browser.
 const HISTORY_DAYS_MIN = 1;
-const HISTORY_DAYS_MAX = 90;
+const HISTORY_DAYS_MAX = 31;
 const HISTORY_DAYS_DEFAULT = 24;
 let historyDays = HISTORY_DAYS_DEFAULT;
 
@@ -311,7 +311,7 @@ el.commandWait.addEventListener("change", () => applyCommandWait(el.commandWait.
 
 // History days slider: how far back the Prompt/Answer panels reach into the
 // stored conversation. The backend keeps every turn; the slider picks the
-// window (1..90 days) the panels render, saved per browser. Moving it
+// window (1..31 days) the panels render, saved per browser. Moving it
 // re-fetches the window and re-renders both panels.
 function normalizeHistoryDays(value) {
   const days = Number(value);

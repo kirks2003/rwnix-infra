@@ -3613,3 +3613,20 @@ database (previously an in-memory map, lost on every restart).
 
 Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
 where the old UI is cached.
+
+## 2026-10-07: the History slider is capped at 31 days
+
+Requested: the Prompt/Answer panels keep the full scrollback with
+date-times (already the case since the entry above — there is no separate
+history panel, the two panels *are* the history), and the day slider
+should limit the window to **1 to 31 days** instead of 1 to 90.
+
+- `public/index.html`: `#historyDays` is now `min="1" max="31"`.
+- `public/app.js`: `HISTORY_DAYS_MAX = 31` (the clamp in
+  `normalizeHistoryDays`, so a stale `jarvis.historyDays` of e.g. `90` in
+  localStorage snaps back to 31 on load). Default stays 24.
+- The backend is deliberately left tolerant (`/api/conversation?days=N`
+  still accepts 1..365): nothing is deleted, the cap is only how far the
+  panels look.
+- `tests/pipeline.browser.mjs` now pins the slider's `min`/`max`/`step`
+  (`1`/`31`/`1`) in the hero/panels test.

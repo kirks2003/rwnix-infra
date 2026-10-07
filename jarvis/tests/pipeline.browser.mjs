@@ -1204,9 +1204,14 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   assert.deepEqual(await page.evaluate(() =>
     [...document.querySelectorAll("#promptText .transcript-entry")].map((entry) => entry.textContent).length),
     2, "the prompt history survives the reload");
-  // The History slider: the panels' day window is per browser (24 default),
-  // and moving it re-fetches the window with ?days=N and re-renders both
-  // panels (the windowing itself is server-side, over the stored db).
+  // The History slider: the panels' day window is per browser (1..31 days,
+  // 24 default), and moving it re-fetches the window with ?days=N and
+  // re-renders both panels (the windowing itself is server-side, over the
+  // stored db).
+  assert.deepEqual(await page.evaluate(() => {
+    const slider = document.getElementById("historyDays");
+    return { min: slider.min, max: slider.max, step: slider.step };
+  }), { min: "1", max: "31", step: "1" }, "the day window is a 1..31 slider");
   assert.equal(await page.inputValue("#historyDays"), "24");
   assert.equal(await page.textContent("#historyDaysValue"), "24 days");
   await page.evaluate(() => {
