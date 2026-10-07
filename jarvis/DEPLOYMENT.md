@@ -3863,3 +3863,29 @@ instead of reading them as fact.
   regression test stores 8 turns at once and demands 8 vectors; against the
   old guard it gets 1.
 - Unit suite 163/163, browser suite 53 pass + 2 opt-in skips.
+
+**Rolled out 2026-10-07 ~21:57, corrected ~22:05.**
+
+- Backups: `jarvis-code.bak-20261007_215654.tgz` plus `.env.bak-*` under
+  `/home/ubuntu/docker/`. Added `EMBEDDING_MODEL=bge-m3` and
+  `EMBEDDING_MIN_SCORE` to the live `.env` (the URL and key fall back to
+  the OVHcloud profile, so no new secret).
+- First build: the startup backfill embedded the existing **22 turns**.
+- The live end-to-end check is what found both defects above — "Did I ever
+  mention a problem with my pet appetite?" against a stored "the cat
+  refuses to eat the new food" came back "nothing came up". After the fix
+  the same question answers: *"Yes, Roman — earlier today you mentioned
+  that your cat refuses to eat the new food. I suggested trying the old
+  brand again."* Zero words in common; the log confirms the tool call
+  (`"query":"pet appetite problem"`).
+- The restart's backfill also picked up the **6 turns the old guard had
+  dropped**: the store went to 30/30 embedded.
+- **Cleanup:** the 8 turns injected into Roman's real conversation to test
+  with (ids 23-30: the Tesla, cat and six "filler" turns) were deleted
+  afterwards; 22 real turns remain, `PRAGMA integrity_check` ok. Note for
+  next time: this db is in **WAL mode**, so `cp conversations.db` copies an
+  almost-empty file — the data sits in `-wal`. Use
+  `VACUUM INTO '/data/<name>.db'` (as `conversations.backup-20261007.db`
+  now is), never a plain file copy.
+
+Backend change only: no browser refresh needed.
