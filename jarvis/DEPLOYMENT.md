@@ -3630,3 +3630,40 @@ should limit the window to **1 to 31 days** instead of 1 to 90.
   panels look.
 - `tests/pipeline.browser.mjs` now pins the slider's `min`/`max`/`step`
   (`1`/`31`/`1`) in the hero/panels test.
+- Unit suite 155/155, browser suite 40 pass + 2 opt-in skips.
+
+**Rolled out 2026-10-07 ~21:10.**
+
+- Backup first: `jarvis-code.bak-20261007_210917.tgz` under
+  `/home/ubuntu/docker/` (code only, `node_modules` and the `*.db*` files
+  excluded). The live `public/index.html` and `public/app.js` matched the
+  repo's previous commit byte for byte beforehand (md5
+  `5150ea66…` / `cb7ced27…`), so the repo was the source of truth and this
+  change was the only delta.
+- **The jarvis code is baked into the image, not bind-mounted** — only
+  `jarvis_data:/data` and `neo4j_data:/data` are volumes (see the
+  `volumes:` blocks in `docker-compose.yml`). A static-asset-only change
+  therefore still needs `docker compose up -d --build`; a plain
+  `restart` serves the old assets from the old image layer.
+- Synced `public/index.html` + `public/app.js` to
+  `/home/ubuntu/docker/jarvis/public/`, then
+  `docker compose up -d --build jarvis` on vm104 (only the `COPY public`
+  layer rebuilt; every npm/apt layer was cached, so no `better-sqlite3`
+  recompile).
+- Verified against the container's own published address
+  (`http://192.168.54.111:8094` — the port is bound to the host's mesh IP,
+  *not* `127.0.0.1`, so a loopback curl returns nothing): container
+  `healthy`, `/api/health` `ok: true`, the md5s served over HTTP for
+  `/index.html` (`46db9917…`) and `/app.js` (`2c22bc54…`) both match the
+  committed source, the served HTML carries
+  `id="historyDays" type="range" min="1" max="31"`, the served `app.js`
+  carries `HISTORY_DAYS_MAX = 31`, `?days=0` → 400 and `?days=31` → 200.
+- The conversation history survived the rebuild: `/data/conversations.db`
+  is untouched on the `jarvis_data` volume and a fresh login read back the
+  turns stored earlier today.
+- Note for future verification: the image has **no `wget` and no `curl`**,
+  so probe the service from the host with `curl`, not with
+  `docker exec … wget`.
+
+Static assets changed: a browser hard refresh (Ctrl+Shift+R) is needed
+where the old UI is cached.
