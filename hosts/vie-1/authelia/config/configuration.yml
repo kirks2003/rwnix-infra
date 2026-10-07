@@ -1,0 +1,133 @@
+###############################################################################
+# Authelia — SSO / 2FA for every service exposed through Nginx Proxy Manager.
+#
+# Secrets are NOT in this file. They are injected from files under /secrets/
+# via the AUTHELIA_*_FILE environment variables set on the container.
+# VIE-1 mirror of the NBG reference config (2026-09-15): domains rewritten to
+# *.gw-1-vie-1-at-netcup.rwnix.net, log level info, VIE-1 two-factor host set.
+###############################################################################
+
+theme: auto
+
+log:
+  level: info
+  format: text
+
+server:
+  address: tcp://:9091/
+
+  endpoints:
+    authz:
+      # NPM/nginx uses the auth_request module, so the AuthRequest implementation.
+      # Strategies are pinned to CookieSession ONLY. This matters: the wg and
+      # wetty vhosts sit behind an additional nginx HTTP Basic Auth layer, and
+      # the browser sends that `Authorization: Basic` header on every request.
+      # If a header strategy were enabled here, Authelia would try to
+      # authenticate those basic credentials as an Authelia user and reject the
+      # request instead of falling through to the session cookie.
+      auth-request:
+        implementation: AuthRequest
+        authn_strategies:
+          - name: CookieSession
+
+totp:
+  issuer: gw-1-vie-1-at-netcup.rwnix.net
+  algorithm: sha1
+  digits: 6
+  period: 30
+  # Accept one period either side of now, to tolerate client clock drift.
+  skew: 1
+
+authentication_backend:
+  # No SMTP notifier is configured, so self-service password reset cannot
+  # deliver its email. Reset passwords with the `authelia` CLI instead.
+  password_reset:
+    disable: true
+  file:
+    path: /config/users_database.yml
+    watch: false
+    password:
+      algorithm: argon2
+
+access_control:
+  default_policy: deny
+  rules:
+    # The portal itself must be reachable unauthenticated, or login is
+    # impossible. This is the only bypass rule.
+    - domain: auth.gw-1-vie-1-at-netcup.rwnix.net
+      policy: bypass
+
+    - domain:
+        - npm.gw-1-vie-1-at-netcup.rwnix.net
+        - portainer.gw-1-vie-1-at-netcup.rwnix.net
+        - wetty.gw-1-vie-1-at-netcup.rwnix.net
+        - glances.gw-1-vie-1-at-netcup.rwnix.net
+        - vikunja.gw-1-vie-1-at-netcup.rwnix.net
+        - kuma.gw-1-vie-1-at-netcup.rwnix.net
+        - wg.gw-1-vie-1-at-netcup.rwnix.net
+        - kandev.gw-1-vie-1-at-netcup.rwnix.net
+        - owrt001.gw-1-vie-1-at-netcup.rwnix.net
+        - owrt002.gw-1-vie-1-at-netcup.rwnix.net
+        - owrt003.gw-1-vie-1-at-netcup.rwnix.net
+        - owrt011.gw-1-vie-1-at-netcup.rwnix.net
+        - owrt018.gw-1-vie-1-at-netcup.rwnix.net
+        - owrt031.gw-1-vie-1-at-netcup.rwnix.net
+        - 'ha1070.gw-1-vie-1-at-netcup.rwnix.net'
+        - owrt032.gw-1-vie-1-at-netcup.rwnix.net
+        - owrt033.gw-1-vie-1-at-netcup.rwnix.net
+        - grafana.gw-1-vie-1-at-netcup.rwnix.net
+        - 'owrt-fsn-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-hel-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-gra-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-eri-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-lim-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-waw-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-pve103.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-pve104.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-pve101.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'owrt-pve102.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'pve103.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'pve104.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'fsn-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'hel-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'gra-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'lim-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'eri-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'waw-1.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'pve1070.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'pve101.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'pve102.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'kandev104.gw-1-vie-1-at-netcup.rwnix.net'
+        - 'jarvis.gw-1-vie-1-at-netcup.rwnix.net'
+      policy: two_factor
+
+session:
+  name: authelia_session
+  same_site: lax
+  expiration: 1h
+  inactivity: 5m
+  remember_me: 1M
+  cookies:
+    # `authelia_url` is what makes the modern redirect flow work: Authelia
+    # returns 401 with a Location header pointing here, and nginx turns that
+    # into a 302. No hardcoded portal URL in the nginx snippets.
+    - domain: gw-1-vie-1-at-netcup.rwnix.net
+      authelia_url: https://auth.gw-1-vie-1-at-netcup.rwnix.net
+      default_redirection_url: https://npm.gw-1-vie-1-at-netcup.rwnix.net/
+
+regulation:
+  max_retries: 5
+  find_time: '10m'
+  ban_time: '1h'
+
+storage:
+  local:
+    path: /config/db.sqlite3
+
+notifier:
+  # Filesystem notifier: password-reset and 2FA-registration links are written
+  # to this file rather than emailed. Read it with:
+  #   docker exec authelia cat /config/notifications.yml
+  disable_startup_check: true
+  filesystem:
+    filename: /config/notifications.yml

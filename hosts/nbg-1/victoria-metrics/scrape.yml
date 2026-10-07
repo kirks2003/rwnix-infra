@@ -1,0 +1,25 @@
+scrape_configs:
+  - job_name: node
+    static_configs:
+      - targets: ['172.27.0.1:9100']
+  - job_name: openrouter
+    static_configs:
+      - targets: ['172.27.0.3:8000']
+  - job_name: ovhcloud
+    static_configs:
+      - targets: ['172.27.0.4:8001']
+  - job_name: claude-code
+    static_configs:
+      - targets: ['172.27.0.1:8002']
+  - job_name: gpu
+    # rw_mesh scripts/gpu fork of the GPU OpenSearch collector; NPM path is
+    # IP-restricted to the NBG/VIE-1 public IPs
+    scrape_interval: 1s
+    scrape_timeout: 1s
+    scheme: https
+    metrics_path: /gpu-metrics
+    static_configs:
+      - targets: ['qwen38-27b-mtp.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at:443']
+        labels: {host: gpu-1}
+      - targets: ['ds4-flash.gpu-2-de-fra-1-exo.csdc-nm.at:443']
+        labels: {host: gpu-2}

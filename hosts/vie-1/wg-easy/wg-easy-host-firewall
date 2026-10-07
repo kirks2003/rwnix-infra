@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+# VIE-1's Docker/UFW rules use nft; the wg-easy image defaults to legacy.
+iptables() {
+  command iptables-nft "$@"
+}
+
+chain=WG-EASY-HOST
+case "${1:-}" in
+  apply)
+    # DOCKER-USER precedes Docker's forwarding accepts and source NAT.
+    iptables -w -S DOCKER-USER >/dev/null
+    if ! iptables -w -S "$chain" >/dev/null 2>&1; then
+      iptables -w -N "$chain"
+    fi
+    # Allow mesh transit through the hub: wg-easy clients <-> site LANs
+    # (10.2.1.0/24 <-> gateway site LANs, e.g. 192.168.15.0/24). Everything
+    # else involving wg0 still hits the isolation drops below.
+    if ! iptables -w -C "$chain" -i wg0 -o wg0 -j ACCEPT 2>/dev/null; then
+      iptables -w -I "$chain" 1 -i wg0 -o wg0 -j ACCEPT
+    fi
+    # NPM (host-net) proxies these LuCI endpoints behind Authelia — NBG
+    # parity (2026-09-28). Source scope is the docker bridge subnet
+    # (172.20.0.0/16, the VIE-1 equivalent of NBG's authelia_shared
+    # 172.22.0.0/16). Keep owrt001 first to preserve the NBG pair order.
+    # Replies are un-masqueraded and forwarded back to the docker bridge.
+    position=2
+    for gateway in 10.2.1.3 10.2.1.2 10.2.1.8 10.2.1.5 10.2.1.4 10.2.1.7 10.2.1.6 10.2.1.9; do
+      if ! iptables -w -C "$chain" -s 172.20.0.0/16 -d "$gateway/32" -o wg0 -p tcp --dport 80 -j ACCEPT 2>/dev/null; then
+        iptables -w -I "$chain" "$position" -s 172.20.0.0/16 -d "$gateway/32" -o wg0 -p tcp --dport 80 -j ACCEPT
+      fi
+      position=$((position + 1))
+      if ! iptables -w -C "$chain" -i wg0 -s "$gateway/32" -d 172.20.0.0/16 -p tcp --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null; then
+        iptables -w -I "$chain" "$position" -i wg0 -s "$gateway/32" -d 172.20.0.0/16 -p tcp --sport 80 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+      fi
+      position=$((position + 1))
+    done
+    for direction in -i -o; do
+      if ! iptables -w -C "$chain" "$direction" wg0 -j DROP 2>/dev/null; then
+        iptables -w -A "$chain" "$direction" wg0 -j DROP
+      fi
+    done
+    if ! iptables -w -C DOCKER-USER -j "$chain" 2>/dev/null; then
+      # Append (2026-09-23, was -I ... 1): the kandev-mesh ACCEPT rules
+      # (172.26.0.0/16 -> 10.2.1.0/24 / 192.168.15.0/24 / 192.168.53.0/24 /
+      # 192.168.54.0/24, managed by /usr/local/sbin/kandev-mesh-routing) sit
+      # at positions 2-5 and must be evaluated before -j WG-EASY-HOST.
+      iptables -w -A DOCKER-USER -j "$chain"
+    fi
+    ;;
+  remove)
+    if iptables -w -C DOCKER-USER -j "$chain" 2>/dev/null; then
+      iptables -w -D DOCKER-USER -j "$chain"
+    fi
+    if iptables -w -S "$chain" >/dev/null 2>&1; then
+      iptables -w -F "$chain"
+      iptables -w -X "$chain"
+    fi
+    ;;
+  *)
+    echo "usage: $0 apply|remove" >&2
+    exit 2
+    ;;
+esac

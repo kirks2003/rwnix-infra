@@ -49,14 +49,31 @@ mariadb, phpmyadmin, grafana-1; both gateways' authelia uses a bind-mounted
 `secrets/` dir). The same rule applies to any new service: no literal
 credentials in a compose file, ever.
 
-## Bind-mounted files stay on the host
+## Bind-mounted code and config
 
-Some services bind-mount code or config that is **not** in the repo
-(exporter code, mosquitto.conf, glance index.html, SSH keys for the wetty
-gateways, gitlab config): those remain host-local. Candidates to pull into
-the repo later: `ovhcloud-exporter/exporter.py`, `openrouter-exporter/exporter.py`
-(both gateways). (nbg-1 also has a `claude-code-exporter/` dir with
-`exporter.py` and logs but no container — dormant code, not deployed.)
+The non-data bind mounts of each compose file live in the same service
+directory here (pulled 2026-10-07): `exporter.py` (openrouter- and
+ovhcloud-exporter on both gateways), `mosquitto.conf` + `telegraf.conf`
+(tasmota-relay), `scrape.yml` (victoria-metrics), `wg-easy-host-firewall`
+(wg-easy, from `/usr/local/sbin/`), `configuration.yml` (authelia),
+`provisioning/` (grafana), `glances.conf` (gpu-1 glances), `index.html` +
+`nginx.conf` (glance / glances-gw1 on vm103 + vm104), `app.py`
+(vm103 voice-gpu), `gitlab.rb` (vm104 gitlab — root-owned on the host,
+pull it with `ssh vm104 "sudo -n cat …"`).
+
+Still **host-local by design** (never committed):
+
+- Runtime data dirs (grafana/data, NPM data+letsencrypt, portainer,
+  uptime-kuma, wg-easy, kandev, ollama models, huggingface caches,
+  gitlab data+logs, tftp, authelia `db.sqlite3`).
+- Credential files: `authelia/secrets/`, `authelia/config/users_database.yml`
+  (argon2 hash of the gateway admin user — sits in the rw-mounted
+  `config/` dir on purpose, the `authelia` CLI writes it),
+  `gitlab/config/gitlab-secrets.json` + the `ssh_host_*` keys, the SSH
+  keys under `wetty-gw1/` (both gateways + vm104).
+
+(nbg-1 also has a `claude-code-exporter/` dir with `exporter.py` and logs
+but no container — dormant code, not deployed, not tracked here.)
 
 ## Containers without a compose file
 

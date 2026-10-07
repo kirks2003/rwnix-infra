@@ -1,0 +1,929 @@
+{
+ "id": 1762972674711552,
+ "panels": [
+  {
+   "collapsed": false,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "title": "OpenRouter Credits",
+   "type": "row"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 5
+       },
+       {
+        "color": "green",
+        "value": 10
+       }
+      ]
+     },
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 1
+   },
+   "targets": [
+    {
+     "expr": "openrouter_account_balance",
+     "legendFormat": "Balance"
+    }
+   ],
+   "title": "Account Balance",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 1
+   },
+   "targets": [
+    {
+     "expr": "openrouter_account_total_credits",
+     "legendFormat": "Total"
+    }
+   ],
+   "title": "Total Purchased",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 1
+   },
+   "targets": [
+    {
+     "expr": "openrouter_account_total_usage",
+     "legendFormat": "Used"
+    }
+   ],
+   "title": "Total Used (account)",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 5
+   },
+   "targets": [
+    {
+     "expr": "openrouter_credits_used_monthly",
+     "legendFormat": "This month"
+    }
+   ],
+   "title": "Monthly Usage",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 5
+   },
+   "targets": [
+    {
+     "expr": "openrouter_credits_used_weekly",
+     "legendFormat": "This week"
+    }
+   ],
+   "title": "Weekly Usage",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 5
+   },
+   "targets": [
+    {
+     "expr": "openrouter_credits_used_daily",
+     "legendFormat": "Today"
+    }
+   ],
+   "title": "Daily Usage",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 3
+       },
+       {
+        "color": "yellow",
+        "value": 5
+       },
+       {
+        "color": "green",
+        "value": 10
+       }
+      ]
+     },
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 5
+   },
+   "targets": [
+    {
+     "expr": "openrouter_credit_remaining",
+     "legendFormat": "Key remaining"
+    }
+   ],
+   "title": "Key Remaining",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 12,
+    "x": 0,
+    "y": 9
+   },
+   "targets": [
+    {
+     "expr": "openrouter_credit_limit",
+     "legendFormat": "Key limit"
+    }
+   ],
+   "title": "Key Limit",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 12,
+    "x": 12,
+    "y": 9
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "openrouter_credits_used_total",
+     "legendFormat": "Used"
+    }
+   ],
+   "title": "Key Used Total",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 100
+       },
+       {
+        "color": "yellow",
+        "value": 300
+       },
+       {
+        "color": "green",
+        "value": 500
+       }
+      ]
+     },
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 17
+   },
+   "targets": [
+    {
+     "expr": "openrouter_free_model_daily_requests_used",
+     "legendFormat": "Used"
+    },
+    {
+     "expr": "openrouter_free_model_daily_requests_remaining",
+     "legendFormat": "Remaining"
+    }
+   ],
+   "title": "Free Model Usage",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 17
+   },
+   "targets": [
+    {
+     "expr": "openrouter_free_model_daily_requests_limit",
+     "legendFormat": "Daily limit"
+    }
+   ],
+   "title": "Free Model Limit",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "P8B7DE2EB3699DDB2"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    }
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 13
+   },
+   "targets": [
+    {
+     "expr": "openrouter_is_free_tier",
+     "legendFormat": "Free tier"
+    }
+   ],
+   "title": "Free Tier",
+   "type": "stat"
+  },
+  {
+   "collapsed": false,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "OVHCLOUD0000001"
+   },
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 21
+   },
+   "title": "OVHcloud Costs",
+   "type": "row"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "OVHCLOUD0000001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "unit": "currencyEUR"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 22
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "ovhcloud_current_month_total_eur",
+     "legendFormat": "{{month}}"
+    }
+   ],
+   "title": "Current Month Total",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "OVHCLOUD0000001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     },
+     "unit": "currencyEUR"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 22
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "ovhcloud_ai_live_total_eur",
+     "legendFormat": "{{model}}"
+    }
+   ],
+   "title": "AI Endpoints Cost",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "OVHCLOUD0000001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 22
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "ovhcloud_ai_live_input_total",
+     "legendFormat": "{{model}}"
+    }
+   ],
+   "title": "AI Input Tokens",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "OVHCLOUD0000001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "purple",
+        "value": null
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 22
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "auto",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "ovhcloud_ai_live_output_total",
+     "legendFormat": "{{model}}"
+    }
+   ],
+   "title": "AI Output Tokens",
+   "type": "stat"
+  },
+  {
+   "collapsed": false,
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 26
+   },
+   "title": "Claude Code Usage",
+   "type": "row"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 80
+       },
+       {
+        "color": "red",
+        "value": 95
+       }
+      ]
+     },
+     "unit": "percent"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 27
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "claude_code_session_usage_percent",
+     "legendFormat": "Session "
+    }
+   ],
+   "title": "Session Usage",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 60
+       },
+       {
+        "color": "red",
+        "value": 85
+       }
+      ]
+     },
+     "unit": "percent"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 27
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "claude_code_week_usage_percent",
+     "legendFormat": "Week Usa"
+    }
+   ],
+   "title": "Week Usage",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 27
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "claude_code_last_24h_requests",
+     "legendFormat": "24h Requ"
+    }
+   ],
+   "title": "24h Requests",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 27
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "claude_code_last_24h_sessions",
+     "legendFormat": "24h Sess"
+    }
+   ],
+   "title": "24h Sessions",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 31
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "claude_code_last_7d_requests",
+     "legendFormat": "7d Reque"
+    }
+   ],
+   "title": "7d Requests",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 31
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "claude_code_last_7d_sessions",
+     "legendFormat": "7d Sessi"
+    }
+   ],
+   "title": "7d Sessions",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "CLAUDE_CODE_001"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 50
+       },
+       {
+        "color": "red",
+        "value": 80
+       }
+      ]
+     },
+     "unit": "percent"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 12,
+    "x": 12,
+    "y": 31
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    },
+    "textMode": "auto"
+   },
+   "targets": [
+    {
+     "expr": "claude_code_high_context_24h_percent",
+     "legendFormat": "High Con"
+    }
+   ],
+   "title": "High Context (>150k)",
+   "type": "stat"
+  }
+ ],
+ "refresh": "5m",
+ "schemaVersion": 39,
+ "tags": [
+  "openrouter",
+  "ovhcloud",
+  "claude",
+  "credits",
+  "ai"
+ ],
+ "timezone": "browser",
+ "title": "Cloud & AI Credits",
+ "uid": "openrouter-credits",
+ "version": 12
+}
