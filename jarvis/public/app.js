@@ -415,9 +415,12 @@ function setPanelsVisible(value, persist) {
 el.panelsToggle.addEventListener("click", () => setPanelsVisible(!panelsVisible, true));
 
 // --- Knowledge graph panel ---------------------------------------------------
-// Its own panel below the Prompt/Answer row (always visible, like the
-// transcript). Display only: the backend is read-only against the graph, and
-// the brain can only run read-only Cypher through the MCP graph server.
+// Second panel inside #panelsBelow, right under the pipeline panel (the
+// pipeline sits directly below the panels toggle) — shown and hidden with the
+// other panels (the 3D stage resizes via ResizeObserver when the panel
+// becomes visible again). Display only: the backend is read-only against the
+// graph, and the brain can only run read-only Cypher through the MCP graph
+// server.
 
 let graphCenter = null;
 let graphView = "3d"; // "3d" is the default; "2d" is the static SVG view.

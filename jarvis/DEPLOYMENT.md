@@ -3264,3 +3264,122 @@ Unit **152/152**, browser **51 pass** (2 skipped: the opt-in live tests).
 
 It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
 required for clients to pick it up.
+
+## 2026-10-07: layout — graph and pipeline below the panels toggle, 250% taller Prompt/Answer
+
+User request: move the Knowledge graph panel below the panels on/off button,
+move the Pipeline section to the top below the panels on/off, and make the
+Prompt/Answer panel 250% taller vertically — without touching the text size.
+
+Implementation:
+
+- `public/index.html`: the `.graph-panel` section moved from between the
+  Prompt/Answer row and the panels toggle to right below the panels toggle
+  (kept outside `#panelsBelow`, so it stays visible when the panels are off,
+  exactly like before). The `.pipeline-panel` section moved from after the
+  meter panel to the top of `#panelsBelow`. New visible order: hero,
+  Prompt/Answer, panels toggle, Knowledge graph, Pipeline, meter panel,
+  controls, settings, animation preview, wake word, voice, live log.
+- `public/style.css`: `.transcript > div` min-height 160px → 560px (160 +
+  250%) with `grid-template-rows: auto 1fr` so the text area fills the taller
+  panel; `.transcript p` min-height 46px → 161px and max-height 182px → 637px
+  (same 3.5× factor). No font-size or any other text-size property changed.
+- `tests/graph.browser.mjs`: the 3D-overlap test asserted the panels toggle
+  row starts below the graph panel (the old layout); it now asserts the
+  panels area (`#panelsBelow`) starts below it — same intent (the canvas wrap
+  must reserve the stage height), new element below.
+
+Unit **152/152**, browser **51 pass** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~16:03.**
+
+- Backup first: `jarvis-code.bak-20261007_160254.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/index.html`, `public/style.css`, `public/app.js` and
+  `tests/graph.browser.mjs` to `/home/ubuntu/docker/jarvis`, then
+  `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served
+  `index.html` / `style.css` / `app.js` md5s match the source.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
+
+## 2026-10-07: taller panels toggle, knowledge graph joined the panels toggle
+
+User report: the Panels off/on button's text overlaps its border, and the
+Panels on/off toggle should hide/show the knowledge graph panel too.
+
+Root cause (button): the pill switch was 122px wide with two 57px label
+columns — "Panels off" (and "Text only" on the speak switch) wrapped to two
+lines (~30px of text) inside a 27px box, so the second line painted over the
+bottom border. Measured with a Playwright probe against the live CSS.
+
+Implementation:
+
+- `public/style.css`: `.lang-switch` width 122px → 148px (longest labels —
+  "Panels off", "Text only" — stay on one line) and height 27px → 32px
+  (vertical headroom for the line box). Applies to all three pill switches
+  (panels, language, speak), which share the class and had the same latent
+  wrap. Re-measured after the change: all labels single-line, text box fully
+  inside the border with 4px clearance.
+- `public/index.html`: the `.graph-panel` section moved from between the
+  panels toggle and `#panelsBelow` into `#panelsBelow` as its first child
+  (right below the toggle, still above the pipeline), so the Panels on/off
+  toggle now hides and shows the knowledge graph with the other panels.
+  Toggle title updated to list the knowledge graph.
+- Safety: the 3D renderer already handles a hidden panel — `resize()` clamps
+  to 1px, a `ResizeObserver` on the stage re-sizes it when the panel becomes
+  visible again, and `tick()` skips rendering while `stage.hidden` — so a
+  page that loads with panels off (persisted) renders correctly once panels
+  are switched on.
+- `tests/graph.browser.mjs`: the 3D-overlap assertion now checks the element
+  actually below the graph panel (the pipeline panel) instead of `#panelsBelow`.
+- `tests/audio.test.mjs`: pre-existing flaky assertion, found while running
+  the suite for this change — "the capture clock still resolves on its timer"
+  asserted elapsed >= 30 ms, but the timer's deadline is armed from tick's
+  own later clock sample, so a near-zero-delay timer reads up to ~1-2 ms
+  short (probe: 4/200 below 30, floor 29.08 ms). Lowered the bound to 25 ms
+  with an explanatory comment; the assertion still discriminates the timer
+  path (~30 ms) from an immediate resolve (~0 ms).
+
+Unit **152/152**, browser **51 pass** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~16:26.**
+
+- Backup first: `jarvis-code.bak-20261007_162542.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/index.html`, `public/style.css`, `public/app.js`,
+  `tests/graph.browser.mjs` and `tests/audio.test.mjs` to
+  `/home/ubuntu/docker/jarvis`, then `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served
+  `index.html` / `style.css` / `app.js` md5s match the source.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
+
+## 2026-10-07: pipeline panel directly below the panels toggle
+
+User request: the pipeline panel must sit at the top, directly below the
+Panels on/off button (the knowledge graph goes below it).
+
+Implementation: `public/index.html` — the two sections inside `#panelsBelow`
+swapped; the pipeline panel is now the first panel (directly below the
+toggle), the knowledge graph panel the second, then the meter panel and the
+rest. Toggle title, the `graph-panel` CSS comment, the app.js graph comment
+and the graph browser test's "element below the graph panel" assertion
+(now the meter panel) updated to match.
+
+Unit **152/152**, browser **51 pass** (2 skipped: the opt-in live tests).
+
+**Rolled out 2026-10-07 ~16:39.**
+
+- Backup first: `jarvis-code.bak-20261007_163839.tgz` under
+  `/home/ubuntu/docker/` (code only, `.env` untouched).
+- Synced `public/index.html`, `public/style.css`, `public/app.js` and
+  `tests/graph.browser.mjs` to `/home/ubuntu/docker/jarvis`, then
+  `docker compose up -d --build` on vm104.
+- Verified: container `healthy`, `/api/health` `ok: true`, served
+  `index.html` / `style.css` / `app.js` md5s match the source.
+
+It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
+required for clients to pick it up.
