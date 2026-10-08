@@ -1,7 +1,7 @@
 # Kandev on gpu-1 — clone of kandev104 (vm104), fresh data.
 #
 # Deltas vs kandev104 (hosts/vm104/kandev104/docker-compose.yml):
-# - container kandev-gpu-2 on the shared `kandev` 10.75.0.0/24 external
+# - container kandev-gpu-1 on the shared `kandev` 10.75.0.0/24 external
 #   network (created on the host), same fixed IP 10.75.0.2.
 # - UI port 127.0.0.1:38429 (the host-networked NPM proxies
 #   kandev.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at to it) instead of the LAN IP.
