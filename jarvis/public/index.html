@@ -45,7 +45,7 @@
                 <span class="lang-knob" aria-hidden="true"></span>
               </button>
               <button id="speakSwitch" class="lang-switch speak-switch" type="button" role="switch" aria-checked="true"
-                      title="Turn spoken answers off: the answer is written to the Answer panel as text only. Saved in this browser only."
+                      title="Turn spoken answers off: the answer is written to the Conversation panel as text only. Saved in this browser only."
                       disabled>
                 <span class="lang-option">Text only</span>
                 <span class="lang-option">Speak</span>
@@ -58,25 +58,19 @@
       </section>
 
       <section class="transcript app-ui">
-        <div class="transcript-controls">
-          <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>
-          <div class="wake-word-controls">
-            <input id="historyDays" type="range" min="1" max="31" step="1" value="24"
-                   aria-describedby="historyDaysStatus" disabled>
-          </div>
-          <p id="historyDaysStatus" role="status">Loading history settings.</p>
-        </div>
-        <div class="transcript-panel">
-          <h2>Prompt</h2>
-          <div id="promptText" class="transcript-list" aria-live="polite"></div>
+        <div class="transcript-panel conversation-panel">
+          <h2>Conversation</h2>
+          <div id="conversationText" class="transcript-list" aria-live="polite"></div>
           <form id="manualPromptForm" class="manual-prompt">
             <textarea id="manualPrompt" rows="2" placeholder="Type a prompt here (when disarmed) and press Send..."></textarea>
+            <div class="transcript-controls">
+              <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>
+              <input id="historyDays" type="range" min="1" max="31" step="1" value="24"
+                     aria-describedby="historyDaysStatus" disabled>
+              <p id="historyDaysStatus" role="status">Loading history settings.</p>
+            </div>
             <button id="sendManualButton" type="submit" disabled>Send</button>
           </form>
-        </div>
-        <div class="transcript-panel">
-          <h2>Answer</h2>
-          <div id="answerText" class="transcript-list" aria-live="polite"></div>
         </div>
       </section>
 

@@ -12,7 +12,7 @@ const el = Object.fromEntries([
   "clearLogButton", "micLevel", "micLevelValue", "silenceLevel", "silenceValue",
   "silenceDelay", "silenceDelayValue", "silenceDelayStatus",
   "commandWait", "commandWaitValue", "commandWaitStatus",
-  "promptText", "answerText",
+  "conversationText",
   "historyDays", "historyDaysValue", "historyDaysStatus",
   "log", "steps", "pipelineStatus", "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
@@ -103,9 +103,9 @@ const STOP_AFTER_SPEECH_MS = 10000;
 // per browser.
 const COMMAND_WAIT_SILENCE_MS = 3000;
 let commandWaitMs = COMMAND_WAIT_SILENCE_MS;
-// How many days of the stored conversation the Prompt/Answer panels show. The
+// How many days of the stored conversation the Conversation panel shows. The
 // backend keeps everything; the History slider (1..31) picks the window the
-// panels render, per browser.
+// panel renders, per browser.
 const HISTORY_DAYS_MIN = 1;
 const HISTORY_DAYS_MAX = 31;
 const HISTORY_DAYS_DEFAULT = 24;
@@ -317,10 +317,10 @@ el.commandWait.addEventListener("input", () => {
 });
 el.commandWait.addEventListener("change", () => applyCommandWait(el.commandWait.value, true));
 
-// History days slider: how far back the Prompt/Answer panels reach into the
+// History days slider: how far back the Conversation panel reaches into the
 // stored conversation. The backend keeps every turn; the slider picks the
-// window (1..31 days) the panels render, saved per browser. Moving it
-// re-fetches the window and re-renders both panels.
+// window (1..31 days) the panel renders, saved per browser. Moving it
+// re-fetches the window and re-renders the panel.
 function normalizeHistoryDays(value) {
   const days = Number(value);
   return Number.isInteger(days) ? Math.min(HISTORY_DAYS_MAX, Math.max(HISTORY_DAYS_MIN, days)) : HISTORY_DAYS_DEFAULT;
@@ -337,13 +337,13 @@ function applyHistoryDays(value, persist) {
   if (persist) {
     try {
       localStorage.setItem(historyDaysStorageKey, String(historyDays));
-      el.historyDaysStatus.textContent = `Saved: the panels show the last ${historyDaysLabel(historyDays)} of conversation.`;
+      el.historyDaysStatus.textContent = `Saved: the panel shows the last ${historyDaysLabel(historyDays)} of conversation.`;
     } catch (error) {
       el.historyDaysStatus.textContent = `History ${historyDaysLabel(historyDays)} for this tab only; browser storage is unavailable.`;
       log("settings", "Could not save history days", { message: error.message });
     }
   } else {
-    el.historyDaysStatus.textContent = `Active: the panels show the last ${historyDaysLabel(historyDays)} of conversation.`;
+    el.historyDaysStatus.textContent = `Active: the panel shows the last ${historyDaysLabel(historyDays)} of conversation.`;
   }
   log("settings", `History ${historyDaysLabel(historyDays)}`);
   loadConversationHistory();
@@ -519,7 +519,7 @@ function setMcpFlag(id, value, persist) {
   log("settings", `${server.label} (MCP): ${state}`);
 }
 
-// Speak answers on/off. Off means the answer is written to the Answer panel
+// Speak answers on/off. Off means the answer is written to the Conversation panel
 // as text only; the wake pipeline itself keeps running.
 function setSpeakEnabled(value, persist) {
   speakEnabled = Boolean(value);
@@ -538,6 +538,7 @@ function setSpeakEnabled(value, persist) {
     el.speakStatus.textContent = `Active: answers ${speakEnabled ? "are spoken" : "are text only"}.`;
   }
   log("settings", `Voice output: ${speakEnabled ? "on" : "off (text only)"}`);
+  if (!speakEnabled) stopCurrentSpeech("Voice output switched to text only; current speech stopped.");
 }
 el.speakSwitch.addEventListener("click", () => {
   if (el.speakSwitch.disabled) return;
@@ -551,7 +552,15 @@ function syncVoiceControls() {
   el.voiceSpeed.disabled = !enabled;
 }
 
-// Show/hide every panel below the Prompt/Answer row. Refused while a session
+function stopCurrentSpeech(message) {
+  const speech = current?.speech;
+  if (!speech || speech.signal.aborted) return;
+  log("tts", message);
+  speech.abort(speechStopped);
+  speechSynthesis.cancel();
+}
+
+// Show/hide every panel below the Conversation row. Refused while a session
 // runs, because the Stop button lives in the hidden area.
 function setPanelsVisible(value, persist) {
   if (!value && current) {
@@ -1399,7 +1408,7 @@ async function listen(session) {
   }
 }
 
-// The Prompt/Answer panels hold the conversation history, not just the
+// The Conversation panel holds the conversation history, not just the
 // latest turn: every finished turn (brain answer, butler closing, manual
 // prompt) appends one entry per panel with a timestamp. The backend stores
 // the whole conversation in SQLite under the signed-in user and serves it
@@ -1411,13 +1420,13 @@ function formatTranscriptTime(ts) {
   return new Date(ts).toLocaleString(language === "de" ? "de-DE" : "en-GB", { dateStyle: "medium", timeStyle: "short" });
 }
 
-function transcriptEntry(text, ts) {
+function transcriptEntry(text, ts, role) {
   const entry = document.createElement("div");
-  entry.className = "transcript-entry";
+  entry.className = `transcript-entry transcript-entry-${role}`;
   const time = document.createElement("time");
   time.className = "transcript-time";
   time.dateTime = new Date(ts).toISOString();
-  time.textContent = formatTranscriptTime(ts);
+  time.textContent = `${formatTranscriptTime(ts)} · ${role === "prompt" ? "You" : "Jarvis"}`;
   const body = document.createElement("p");
   body.className = "transcript-body";
   body.textContent = text;
@@ -1426,18 +1435,16 @@ function transcriptEntry(text, ts) {
 }
 
 function scrollTranscripts() {
-  for (const list of [el.promptText, el.answerText]) list.scrollTop = list.scrollHeight;
+  el.conversationText.scrollTop = el.conversationText.scrollHeight;
 }
 
 function beginTurn(prompt) {
-  for (const list of [el.promptText, el.answerText]) {
-    for (const empty of list.querySelectorAll(".transcript-empty")) empty.remove();
-  }
+  for (const empty of el.conversationText.querySelectorAll(".transcript-empty")) empty.remove();
   const ts = Date.now();
-  el.promptText.append(transcriptEntry(prompt, ts));
-  const pending = transcriptEntry("…", ts);
+  el.conversationText.append(transcriptEntry(prompt, ts, "prompt"));
+  const pending = transcriptEntry("…", ts, "answer");
   pending.querySelector(".transcript-body").classList.add("pending");
-  el.answerText.append(pending);
+  el.conversationText.append(pending);
   scrollTranscripts();
   return pending;
 }
@@ -1474,21 +1481,18 @@ async function loadConversationHistory() {
     const response = await fetch(`/api/conversation?days=${historyDays}`, { cache: "no-store", signal: AbortSignal.timeout(10000) });
     if (!response.ok) return;
     const data = await response.json();
-    el.promptText.replaceChildren();
-    el.answerText.replaceChildren();
+    el.conversationText.replaceChildren();
     const entries = data.entries || [];
     for (const entry of entries) {
       const ts = Date.parse(entry.ts) || Date.now();
-      el.promptText.append(transcriptEntry(entry.prompt, ts));
-      el.answerText.append(transcriptEntry(entry.answer, ts));
+      el.conversationText.append(transcriptEntry(entry.prompt, ts, "prompt"));
+      el.conversationText.append(transcriptEntry(entry.answer, ts, "answer"));
     }
     if (!entries.length) {
-      for (const list of [el.promptText, el.answerText]) {
-        const empty = document.createElement("p");
-        empty.className = "transcript-empty";
-        empty.textContent = "No conversation yet.";
-        list.append(empty);
-      }
+      const empty = document.createElement("p");
+      empty.className = "transcript-empty";
+      empty.textContent = "No conversation yet.";
+      el.conversationText.append(empty);
     }
     scrollTranscripts();
   } catch {
@@ -1499,6 +1503,7 @@ async function loadConversationHistory() {
 async function answer(session, prompt) {
   check(session);
   const pending = beginTurn(prompt);
+  let answerShown = false;
   try {
     const result = await withStepRetries(session, "brain", async () => {
       stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
@@ -1514,13 +1519,14 @@ async function answer(session, prompt) {
     log("brain", `Request ${result.requestId} completed`);
     mark("brain", "done");
     completeTurn(pending, result.answer);
+    answerShown = true;
     recordTurn(prompt, result.answer);
     // Ingestion of this turn runs server-side after the response; give it a
     // moment, then refresh the graph panel so the new facts show up.
     if (mcpFlags.graph) setTimeout(() => loadGraph(), 4000);
     await speakAnswer(session, result.answer);
   } catch (error) {
-    failTurn(pending, error.message);
+    if (!answerShown) failTurn(pending, error.message);
     throw error;
   }
 }
@@ -1804,7 +1810,7 @@ el.enableSwitch.addEventListener("click", () => {
   el.armButton.click();
 });
 
-// Direct prompt input in the Prompt panel: same flow as the old manual prompt
+// Direct prompt input in the Conversation panel: same flow as the old manual prompt
 // dialog, available only while disarmed.
 el.manualPromptForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2116,7 +2122,7 @@ async function loadConfig(userFromLogin) {
       log("settings", "Could not load history days");
     }
     // The saved per-browser value wins over the 24-day default; applying it
-    // also fetches the window and renders both panels.
+    // also fetches the window and renders the panel.
     applyHistoryDays(savedHistoryDays ?? historyDays, false);
     el.historyDays.disabled = false;
     // The History search panel's sliders are built from the backend's own
@@ -2175,7 +2181,7 @@ async function loadConfig(userFromLogin) {
     setGraphView("3d"); // the live 3D view is the default panel view
     loadGraph();
     setInterval(() => { if (!document.hidden) loadGraph(); }, 15000);
-    // The conversation history the Prompt/Answer panels scroll over is loaded
+    // The conversation history the Conversation panel scrolls over is loaded
     // by applyHistoryDays above (the saved window wins over the 24-day
     // default); the History slider re-fetches on every change.
     let savedPanels = null;

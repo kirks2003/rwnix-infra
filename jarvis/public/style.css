@@ -618,21 +618,18 @@ progress {
 }
 
 .transcript {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
 }
 
-/* The two conversation panels (Prompt, Answer). Deliberately NOT
+/* The conversation panel. Deliberately NOT
    `.transcript > div`: that also matched the History slider's own
-   `.transcript-controls` div and gave the slider the panels' border and
-   560px min-height, which pushed both panels off the first screen. */
+   `.transcript-controls` div and gave the slider the panel's border and
+   min-height, which pushed the conversation off the first screen. */
 .transcript-panel {
   display: grid;
-  /* h2, the scrollable conversation list, and (in the Prompt panel only)
-     the manual prompt form. */
   grid-template-rows: auto 1fr auto;
   gap: 10px;
   align-content: start;
-  /* 250% taller than before (160px); the text area fills the panel. */
   min-height: 560px;
   padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
@@ -641,16 +638,24 @@ progress {
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.24);
 }
 
-/* The History days slider: spans both panel columns above the transcript;
-   the same label/slider/status pattern as the other settings sliders. */
+/* The History days slider lives beside Send so the conversation itself stays
+   one continuous panel. */
 .transcript-controls {
-  grid-column: 1 / -1;
   display: grid;
   gap: 4px;
+  min-width: min(260px, 100%);
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
-.transcript-controls .wake-word-controls {
-  margin-top: 0;
+.transcript-controls input[type="range"] {
+  width: 100%;
+  accent-color: var(--cyan);
+}
+
+.transcript-controls p {
+  margin: 0;
+  font-size: 0.72rem;
 }
 
 /* The conversation history: every finished turn of this user, oldest
@@ -700,6 +705,12 @@ progress {
 .transcript-entry {
   display: grid;
   gap: 3px;
+  max-width: min(860px, 100%);
+}
+
+.transcript-entry-answer {
+  justify-self: end;
+  text-align: right;
 }
 
 .transcript-time {
@@ -1160,10 +1171,13 @@ html.graph-full {
 
 .manual-prompt {
   display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: end;
   gap: 8px;
 }
 
 .manual-prompt textarea {
+  grid-column: 1 / -1;
   width: 100%;
   border: 1px solid rgba(66, 217, 255, 0.35);
   border-radius: 12px;
@@ -1175,6 +1189,7 @@ html.graph-full {
 }
 
 .manual-prompt button {
+  grid-column: 2;
   justify-self: end;
   padding: 8px 16px;
   font-size: 0.9rem;
@@ -1389,6 +1404,14 @@ menu {
 
   .hero, .transcript {
     grid-template-columns: 1fr;
+  }
+
+  .manual-prompt {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-prompt button {
+    grid-column: 1;
   }
 
   .graph-body {

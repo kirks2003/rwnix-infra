@@ -270,6 +270,43 @@ test("wake word plus stop cuts a speaking answer before it finishes", { timeout:
   await page.click("#stopButton");
 });
 
+test("Jarvis off stops speech without overwriting the shown answer", { timeout: 30000 }, async (t) => {
+  const answer = "It is 14:05. I am completely operational.";
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : "background noise",
+  }), { hangTTS: true, answer });
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  assert.match(await page.textContent("#conversationText"), new RegExp(answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  await page.click("#enableSwitch");
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped");
+  assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
+  const transcript = await page.textContent("#conversationText");
+  assert.match(transcript, new RegExp(answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(transcript, /Failed: Session stopped/);
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+});
+
+test("Text only remains clickable while speaking and cuts current speech", { timeout: 30000 }, async (t) => {
+  const answer = "It is 14:05. I am completely operational.";
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : "background noise",
+  }), { hangTTS: true, answer });
+  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "true");
+  assert.equal(await page.$eval("#speakSwitch", (button) => button.disabled), false);
+  await page.click("#speakSwitch");
+  await page.waitForFunction(() => document.getElementById("steps").querySelector('[data-step="tts"]').className === "done",
+    null, { timeout: 10000 });
+  assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "false");
+  assert.equal(await page.evaluate(() => ttsEvents.at(-1)), "cancel");
+  const transcript = await page.textContent("#conversationText");
+  assert.match(transcript, new RegExp(answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(transcript, /Failed:/);
+  assert.match(await page.textContent("#log"), /Voice output switched to text only; current speech stopped/);
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  await page.click("#stopButton");
+});
+
 test("a bare stop word without the wake phrase cuts a speaking answer", { timeout: 30000 }, async (t) => {
   // The escape hatch for answers that run too long: the user says just the
   // stop word (no wake phrase) while the answer is still speaking, and the
@@ -1059,10 +1096,10 @@ test("the speed slider scales the request and persists per browser", { timeout: 
   assert.match(await page.textContent("#voiceStatus"), /1\.50x/);
 });
 
-// The Answer panel is a conversation list; read the body of its last entry.
+// The merged conversation panel is a prompt/answer list; read the last answer.
 async function lastAnswerBody(page) {
   return page.evaluate(() => {
-    const bodies = document.querySelectorAll("#answerText .transcript-body");
+    const bodies = document.querySelectorAll("#conversationText .transcript-entry-answer .transcript-body");
     return bodies.length ? bodies[bodies.length - 1].textContent : null;
   });
 }
@@ -1095,7 +1132,7 @@ test("a failed brain request is retried with the captured prompt", { timeout: 30
   const log = await page.textContent("#log");
   assert.match(log, /brain failed \(attempt 1\/3\): brain unavailable; retrying in 1000 ms/);
   assert.doesNotMatch(log, /Pipeline error/);
-  // The Answer panel is the conversation history: the finished turn's body is
+  // The Conversation panel is the conversation history: the finished turn's body is
   // the last entry.
   assert.equal(await lastAnswerBody(page), "Done.");
 });
@@ -1169,7 +1206,7 @@ test("the History search panel builds its sliders from the backend limits and se
   assert.equal(await page.textContent("#historySearchDaysValue"), "30 days");
   assert.equal(await page.textContent("#historySearchMinScoreValue"), "0.62");
   await typeManualPrompt(page, "hello");
-  await page.waitForFunction(() => document.querySelectorAll("#answerText .transcript-entry").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll("#conversationText .transcript-entry-answer").length > 0);
   assert.equal(chats.at(-1).historySearch.days, 30, JSON.stringify(chats.at(-1).historySearch));
   assert.equal(chats.at(-1).historySearch.minScore, 0.62);
   // Untouched knobs still ride along at their backend defaults.
@@ -1231,7 +1268,7 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   const spokenBeforeFirst = await page.evaluate(() => window.savedUtterances.length);
   await typeManualPrompt(page, "What time is it?");
   await page.waitForFunction(() => {
-    const bodies = document.querySelectorAll("#answerText .transcript-body");
+    const bodies = document.querySelectorAll("#conversationText .transcript-entry-answer .transcript-body");
     return bodies.length >= 1 && bodies[bodies.length - 1].textContent === "Done.";
   }, null, { timeout: 25000 });
   // The answer's own utterance (the greeting's are already counted in the
@@ -1246,7 +1283,7 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "false");
   await typeManualPrompt(page, "What is two plus two?");
   await page.waitForFunction(() => {
-    const bodies = document.querySelectorAll("#answerText .transcript-body");
+    const bodies = document.querySelectorAll("#conversationText .transcript-entry-answer .transcript-body");
     return bodies.length >= 2 && bodies[bodies.length - 1].textContent === "Done.";
   }, null, { timeout: 25000 });
   assert.equal(await page.evaluate(() => window.savedUtterances.length), spokenAfterFirst,
@@ -1256,9 +1293,9 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     { prompt: "What is two plus two?", answer: "Done." },
   ], JSON.stringify(stored));
   const panel = await page.evaluate(() => ({
-    prompts: [...document.querySelectorAll("#promptText .transcript-entry")].map((entry) => entry.textContent),
-    answers: [...document.querySelectorAll("#answerText .transcript-entry")].map((entry) => entry.textContent),
-    times: document.querySelectorAll("#promptText .transcript-time").length,
+    prompts: [...document.querySelectorAll("#conversationText .transcript-entry-prompt")].map((entry) => entry.textContent),
+    answers: [...document.querySelectorAll("#conversationText .transcript-entry-answer")].map((entry) => entry.textContent),
+    times: document.querySelectorAll("#conversationText .transcript-time").length,
   }));
   assert.equal(panel.prompts.length, 2, JSON.stringify(panel));
   assert.ok(panel.prompts[0].includes("What time is it?"), JSON.stringify(panel));
@@ -1266,37 +1303,40 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   assert.equal(panel.answers.length, 2, JSON.stringify(panel));
   assert.ok(panel.answers[0].includes("Done."), JSON.stringify(panel));
   assert.ok(panel.answers[1].includes("Done."), JSON.stringify(panel));
-  assert.equal(panel.times, 2, "every prompt entry carries its date-time");
-  // After a reload the panels come back from the stored conversation, and the
+  assert.equal(panel.times, 4, "every prompt and answer entry carries its date-time");
+  // After a reload the panel comes back from the stored conversation, and the
   // per-browser voice-output setting stays off.
   await page.reload();
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
   assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "false");
   assert.equal(await lastAnswerBody(page), "Done.", "the history survives the reload");
   assert.deepEqual(await page.evaluate(() =>
-    [...document.querySelectorAll("#promptText .transcript-entry")].map((entry) => entry.textContent).length),
+    [...document.querySelectorAll("#conversationText .transcript-entry-prompt")].map((entry) => entry.textContent).length),
     2, "the prompt history survives the reload");
-  // The History slider: the panels' day window is per browser (1..31 days,
+  // The History slider: the panel's day window is per browser (1..31 days,
   // 24 default), and moving it re-fetches the window with ?days=N and
-  // re-renders both panels (the windowing itself is server-side, over the
+  // re-renders the panel (the windowing itself is server-side, over the
   // stored db).
   assert.deepEqual(await page.evaluate(() => {
     const slider = document.getElementById("historyDays");
     return { min: slider.min, max: slider.max, step: slider.step };
   }), { min: "1", max: "31", step: "1" }, "the day window is a 1..31 slider");
-  // The slider's own row must stay a compact control strip. It used to be
-  // styled by `.transcript > div`, which also matched the two panels and
-  // gave the strip their 560px min-height — a near-empty box that pushed
-  // both panels off the first screen. Pin it short, and pin that the
-  // panels keep the tall styling.
+  // The slider's own controls must stay compact beside Send. It used to be
+  // styled by `.transcript > div`, which matched the conversation controls
+  // and gave them the panel's min-height — a near-empty box that pushed
+  // the conversation off the first screen. Pin it short, and pin that the
+  // panel keeps the tall styling.
   const layout = await page.evaluate(() => {
     const strip = document.querySelector(".transcript-controls");
-    const panel = document.getElementById("promptText").closest(".transcript-panel");
-    const list = document.getElementById("promptText");
+    const panel = document.getElementById("conversationText").closest(".transcript-panel");
+    const list = document.getElementById("conversationText");
+    const button = document.getElementById("sendManualButton");
     return {
       stripHeight: strip.getBoundingClientRect().height,
       panelHeight: panel.getBoundingClientRect().height,
       panelTop: panel.getBoundingClientRect().top + window.scrollY,
+      historyRight: strip.getBoundingClientRect().right,
+      sendLeft: button.getBoundingClientRect().left,
       // A scrollbar that takes layout width, not a 0-width overlay bar that
       // fades out at rest: the bar is how you know you can scroll back.
       scrollbarGutter: list.offsetWidth - list.clientWidth,
@@ -1307,7 +1347,9 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   assert.ok(layout.panelHeight >= 400,
     `the conversation panels stay tall, got ${layout.panelHeight}px`);
   assert.ok(layout.panelTop < 500,
-    `the panels must start on the first screen, got top ${layout.panelTop}px`);
+    `the conversation panel must start on the first screen, got top ${layout.panelTop}px`);
+  assert.ok(layout.historyRight <= layout.sendLeft,
+    `the History slider must sit to the left of Send, got ${layout.historyRight}px > ${layout.sendLeft}px`);
   assert.ok(layout.scrollbarGutter > 0,
     `the history list needs a laid-out scrollbar, got ${layout.scrollbarGutter}px`);
   assert.equal(await page.inputValue("#historyDays"), "24");
@@ -1323,7 +1365,7 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   await page.waitForTimeout(400);
   assert.ok(gets.some((url) => url.includes("days=5")), JSON.stringify(gets));
   assert.equal(await page.evaluate(() =>
-    document.querySelectorAll("#promptText .transcript-entry").length),
+    document.querySelectorAll("#conversationText .transcript-entry-prompt").length),
     2, "the re-rendered window keeps the stored entries");
 });
 

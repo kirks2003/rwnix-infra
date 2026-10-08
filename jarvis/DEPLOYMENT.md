@@ -63,7 +63,7 @@ Findings while exposing the service:
 - Brain: backend proxy to the selected AI API endpoint profile. The UI's **AI API endpoint** selector is saved per browser; live vm104 has `a1-deepseek`, `a1-qwen`, `ovhcloud` and `openrouter` configured. `claudecode` is listed but disabled until a Claude Code OpenAI-compatible gateway is provided.
 - Output: the selected answer voice plus prompt/result text in the UI
 - Hero controls (2026-10-07): the **Jarvis on/off** switch (enable/disable the session) and the **Speak / Text only** switch (voice output; per browser) sit left of Sign out, in a `.user-controls` cluster.
-- Conversation history (2026-10-07): every finished turn (prompt + answer, server-stamped) is stored per user in **SQLite** (`CONVERSATION_DB_PATH`, the `jarvis_data` volume at `/data/conversations.db`, no entry cap — it survives container rebuilds). `GET /api/conversation?days=N` serves a window (backend clamp 1..365, default 24); the Prompt/Answer panels **are** the history — each a scrollable list of every stored turn with its date-time stamp — and one **History** slider (1-31 days) above them picks the window. There is no separate history panel.
+- Conversation history (2026-10-08): every finished turn (prompt + answer, server-stamped) is stored per user in **SQLite** (`CONVERSATION_DB_PATH`, the `jarvis_data` volume at `/data/conversations.db`, no entry cap — it survives container rebuilds). `GET /api/conversation?days=N` serves a window (backend clamp 1..365, default 24); the single **Conversation** panel is the history — prompts and answers appear in one scrollable list with date-time stamps — and the **History** slider (1-31 days) sits to the left of **Send** to pick the window. There is no separate history panel.
 - Conversation search (2026-10-07): the brain reaches past its in-context window with the **`search_history`** tool — **hybrid**, literal word matching unioned with **semantic** matching over per-turn embeddings (`conversation_embeddings`, `bge-m3` on the OVHcloud endpoint via `EMBEDDING_*`, floor `EMBEDDING_MIN_SCORE=0.50`), so "where did I park my car" finds a turn that only said "Tesla", in either language. Embedded on write plus a background backfill; a missing or failing endpoint degrades to keyword-only and says so. Short-term memory is rebuilt from the store on a cold process, so a restart no longer makes Jarvis claim it has never spoken to the user. Every parameter is a slider in the **History search** panel (last panel on the page, under the Panels switch); the backend owns the limits (`HISTORY_SETTINGS`, advertised in `/api/config`) and the window/max-results values are ceilings the brain cannot widen.
 - Testing against the live instance (2026-10-07): every answered `/api/chat` turn is ingested into the **signed-in user's knowledge graph**, so probe as the **`admin`** account — admin turns are deliberately not auto-ingested, so they write nothing into anyone's graph.
 - Graph policy (2026-10-07): no entity may exist without a bounded path of fact edges to its owner — after every ingestion and every entity removal, disconnected clusters are swept (`DISCONNECT_SWEEP` in `graphdb.js`), and every sweep is counted in the activity feed. The seed graph (Mila: Rocky/Berlin/Kokoro-82M; Roman: Coffee) is pre-policy legacy state, swept on that user's first ingestion or removal.
@@ -84,6 +84,14 @@ The frontend exposes progress at each small step:
 8. Error states and backend request IDs
 
 The backend intentionally proxies Whisper and brain requests so browser clients never receive service keys and do not need direct CORS access to internal endpoints.
+
+## 2026-10-08 UI findings: speech controls and conversation panel
+
+- Stopping a session while an answer was already printed but still speaking aborted the speech promise and let the `answer()` error handler rewrite the finished answer entry as `Failed: Session stopped`. The fix tracks whether the answer has already been shown and only marks the pending entry failed before that point. **Jarvis off** still stops speech and releases the microphone; it no longer destroys the visible answer text.
+- The **Text only** switch is intentionally available while an answer is speaking. Turning it off now aborts only the current speech controller, cancels browser speech synthesis, leaves the printed answer in place, and persists future answers as text-only. This gives the same "stop talking now" behavior without disarming Jarvis.
+- The old side-by-side Prompt and Answer columns duplicated each turn across two scroll areas. The UI now has one **Conversation** panel with prompt and answer entries in chronological order, labelled `You` and `Jarvis`. This keeps stored history readable as a single transcript and preserves the same `/api/conversation?days=N` backend window.
+- The **History** day slider moved into the prompt form, left of **Send**, so the history window control stays next to the direct prompt action instead of occupying a separate strip above the transcript. Browser tests pin this layout and the stored-history reload behavior.
+- Deployment 2026-10-08: backups were taken before each vm104 sync (`jarvis-code.bak-20261008_074737.tgz` for the speech-control fix and `jarvis-code.bak-20261008_075525.tgz` for the merged Conversation panel). After the final deploy the live container was `healthy`, `/api/health` returned OK, and served static assets matched source checksums: `app.js` `248bffbae64418f5aaff24dd651fcf60`, `index.html` `167b49f889ad83d07a64740a03729707`, `style.css` `bd15c1eb542d6f0ec8a4b5a5bc0ea7bb`. Browsers with cached static assets need a hard refresh (`Ctrl+Shift+R`).
 
 ## Endpoint selector rollout (2026-10-07)
 
@@ -194,7 +202,7 @@ The UI's **MCP web search** toggle (per browser, saved in local storage like the
 - The search itself needs no API key: **DuckDuckGo** (HTML endpoint with one retry; result links unwrapped from the `//duckduckgo.com/l/?uddg=…` redirect form, ad links dropped), **Bing** (HTML endpoint; `bing.com/ck/a` redirect links unwrapped to the real target) and the **Wikipedia** search API are queried in **parallel**, and the **DuckDuckGo Instant Answer API** (abstract/definition/direct answer + related topics) runs alongside as an "instant answer" block. The results are merged round-robin across engines, deduplicated by URL (scheme/www/trailing-slash insensitive) and each is tagged with its source engine. Top 5 merged results (title, URL, snippet) are added to the brain request as one extra system message — fresh per prompt, never stored in the per-session conversation history. A walled or down engine degrades to zero results without failing the search. Measured engine availability from server IPs: see "Multi-engine web search findings" below.
 - A failed or empty search degrades to a normal brain answer; the backend JSON logs record `websearch_success` (chars, ms), `websearch_failure`, and `websearch_skipped` (request aborted).
 - Requirement: outbound internet from the backend container (the container egresses to DuckDuckGo/Wikipedia; the browser is unaffected). No new `.env` entries — the toggle is the only control.
-- Spoken answers are sanitized in the browser before any TTS request or `speechSynthesis` utterance (`textForSpeech` in `public/voice.js`): markdown, links, code markers, URLs and special signs are stripped, so the speaker says normal language only. The printed Answer panel is unchanged.
+- Spoken answers are sanitized in the browser before any TTS request or `speechSynthesis` utterance (`textForSpeech` in `public/voice.js`): markdown, links, code markers, URLs and special signs are stripped, so the speaker says normal language only. The printed Conversation panel is unchanged.
 
 ## Browser limitations and next improvements
 
@@ -372,7 +380,7 @@ Features shipped:
   `Language override` directive, German spoken output via the browser voice because the
   Kokoro engine is English-only; `/api/speak` answers 503 `tts_language_unsupported` for
   non-English as a backstop.
-- Layout: Prompt/Answer above the mic-level controls; Live log is a full-width panel at the
+- Layout: Conversation panel above the mic-level controls; Live log is a full-width panel at the
   bottom; STT endpoint/request-ID detail appears only in the Live log.
 - Realtime level: a circular VU ring around the reactor plus a numeric `LEVEL %` readout
   under the core, driven at 60 fps by the analyser RMS (mic while armed, shaped TTS output
@@ -1097,8 +1105,8 @@ per-user knowledge (`(:User)-[:KNOWS]->(:Entity)`), entity-to-entity
 relations from a fixed allowlist of relation types, and a `common` flag for
 shared knowledge. The graph populates itself from every answered turn (web
 search results and brain answers) and is exposed to the brain as a second MCP
-server — **Knowledge graph** — with a read-only panel below the Prompt/Answer
-panels (see `README.md`, "Knowledge graph (Neo4j)").
+server — **Knowledge graph** — with a read-only panel below the Conversation
+panel (see `README.md`, "Knowledge graph (Neo4j)").
 
 **Guarantee that chat turns can never write to the graph (application
 layer).** During the rollout it turned out that Neo4j Community Edition has
