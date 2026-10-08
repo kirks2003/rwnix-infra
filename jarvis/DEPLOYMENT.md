@@ -92,6 +92,53 @@ The backend intentionally proxies Whisper and brain requests so browser clients 
 - The old side-by-side Prompt and Answer columns duplicated each turn across two scroll areas. The UI now has one **Conversation** panel with prompt and answer entries in chronological order, labelled `You` and `Jarvis`. This keeps stored history readable as a single transcript and preserves the same `/api/conversation?days=N` backend window.
 - The **History** day slider moved into the prompt form, left of **Send**, so the history window control stays next to the direct prompt action instead of occupying a separate strip above the transcript. Browser tests pin this layout and the stored-history reload behavior.
 - Deployment 2026-10-08: backups were taken before each vm104 sync (`jarvis-code.bak-20261008_074737.tgz` for the speech-control fix and `jarvis-code.bak-20261008_075525.tgz` for the merged Conversation panel). After the final deploy the live container was `healthy`, `/api/health` returned OK, and served static assets matched source checksums: `app.js` `248bffbae64418f5aaff24dd651fcf60`, `index.html` `167b49f889ad83d07a64740a03729707`, `style.css` `bd15c1eb542d6f0ec8a4b5a5bc0ea7bb`. Browsers with cached static assets need a hard refresh (`Ctrl+Shift+R`).
+- Conversation role colors (2026-10-08, user request): prompts (`You`) now render in a slightly bluer, darker shade (`--prompt-text: #9fc0f0` in `style.css`, applied via `.transcript-entry-prompt .transcript-body`) while answers (`Jarvis`) keep `--text`; timestamps stay muted. CSS-only change; unit suite 166/166. Deployed with backup `jarvis-code.bak-20261008_081048.tgz`; container `healthy`, `/api/health` OK, served `style.css` md5 `45bdccb913852200fdc6e2a4bd57bde2` matches source. Hard refresh (`Ctrl+Shift+R`) needed for the new colors.
+
+## 2026-10-08 UI findings: button sizes and panel spacing (open)
+
+Analysis of two UI inconsistencies reported on 2026-10-08. Neither is fixed yet; this
+section records the measurements and the planned fix so the follow-up does not re-derive
+them.
+
+### Buttons are not one size
+
+The base `button` rule in `public/style.css` (`padding: 8px 11px`, no `font-size`, so the
+UA button font — ~13.3px in Chromium — applies) is overridden in five places, producing
+three different heights and four different paddings:
+
+| Buttons | Selector | padding | font-size | height ≈ |
+|---|---|---|---|---|
+| Arm, Stop, Clear, Sign in, Apply wake word/voice, Reset | `button` | `8px 11px` | UA (~13.3px) | ~34px |
+| Stage preview (7 buttons), Send | `.stage-preview button`, `.manual-prompt button` | `8px 14px` / `8px 16px` | `0.9rem` | ~34px, wider |
+| 3D, 2D, Refresh | `.graph-views button`, `.graph-head button` | `6px 12px` / `6px 14px` | `0.85rem` | ~29px |
+| Sign out | `.sign-out` | `6px 14px` | `0.8rem` | ~28px |
+
+The `.lang-switch` toggles (Jarvis on/off, Speak, Panels, language, MCP) are a different
+control type — fixed 148×32px — and are consistent within that family; they are not part
+of the inconsistency.
+
+Planned fix: one scale — set `font-size` and a single `padding` on the base `button` rule
+and drop the per-selector padding/font-size overrides (keep `.lang-switch` as-is).
+
+### Panel vertical gaps are ad hoc
+
+`.shell` is plain block flow (no grid gap); every vertical space comes from individual
+margins, so the gaps down the page mix 0 / 4 / 10 / 11 / 18px:
+
+| Between | Space | Source |
+|---|---|---|
+| hero → conversation | 0px | neither has a margin |
+| conversation → Panels switch | 4px | `.panels-toggle-row { margin: 4px 0 10px }` |
+| Panels switch → pipeline | 10px | same rule |
+| pipeline → graph, graph → meters | 11px | `.graph-panel { margin: 11px 0 }` |
+| meters → controls | 0px | neither has a margin |
+| controls → endpoints → preview → wake word → voice | 11px each | `.wake-settings { margin: 11px 0 }` |
+| voice → live log | 18px | `.log-panel { margin-top: 18px }` |
+| log → history search | 11px | `.wake-settings` |
+
+Planned fix: one gap — make `#panelsBelow` (and the section flow around it) a grid with a
+single `gap: 11px` and remove the individual margins (`.graph-panel`, `.log-panel`,
+`.wake-settings`, `.panels-toggle-row`).
 
 ## Endpoint selector rollout (2026-10-07)
 

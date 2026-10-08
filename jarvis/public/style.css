@@ -5,6 +5,9 @@
   --text: #d8f3ff;
   --muted: #77a9bf;
   --cyan: #42d9ff;
+  /* Conversation prompts ("You"): a little bluer and darker than --text, so
+     the user's words read as a distinct role from Jarvis' answers. */
+  --prompt-text: #9fc0f0;
   --green: #2dffbf;
   --amber: #ffc04d;
   --blue: #4d8dff;
@@ -722,6 +725,13 @@ progress {
 .transcript-body {
   margin: 0;
   white-space: pre-wrap;
+}
+
+/* Prompts get the bluer --prompt-text shade; answers keep --text, so the two
+   roles are distinguishable at a glance in the history list. The timestamp
+   stays muted either way (its own rule). */
+.transcript-entry-prompt .transcript-body {
+  color: var(--prompt-text);
 }
 
 .transcript-body.pending {
