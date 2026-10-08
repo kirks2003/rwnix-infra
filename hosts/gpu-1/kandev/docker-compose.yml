@@ -1,0 +1,67 @@
+# Kandev on gpu-1 — clone of kandev104 (vm104), fresh data.
+#
+# Deltas vs kandev104 (hosts/vm104/kandev104/docker-compose.yml):
+# - container kandev-gpu-2 on the shared `kandev` 10.75.0.0/24 external
+#   network (created on the host), same fixed IP 10.75.0.2.
+# - UI port 127.0.0.1:38429 (the host-networked NPM proxies
+#   kandev.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at to it) instead of the LAN IP.
+# - extra_hosts trimmed: no pve*, no owrt*, no city PVE hosts (fsn-1/hel-1/
+#   gra-1/lim-1/eri-1/waw-1) — no PVE / no OpenWrt exposure (fleet policy).
+# - The Dockerfile + entrypoint.sh live in this directory (on vm104 they are
+#   host-local; here they are tracked — same build recipe, image tag
+#   kandev:v0.96.0-ssh).
+#
+# Workspace GitHub settings are provisioned in the fresh /data (a1-copilot /
+# romeowindi connection bound to A1-CDC-Enterprise/rw-kandev — see the
+# SETUP-PLAN.md in romeowindi/a1-jarvis); no kirks2003 credentials exist on
+# this instance.
+networks:
+  kandev:
+    external: true
+services:
+  kandev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kandev-gpu-1
+    environment:
+      KANDEV_AGENT_STANDALONE_PORT: '39429'
+      KANDEV_CONSOLE_LOG_LEVEL: info
+      KANDEV_HOME_DIR: /data
+      KANDEV_LOG_LEVEL: info
+      KANDEV_RESTART_ADAPTER: supervisor
+      KANDEV_SERVER_PORT: '38429'
+      KANDEV_SUPERVISOR_MANIFEST: /data/supervisor/launch.json
+      KANDEV_SUPERVISOR_SOCKET: /data/supervisor/control.sock
+      SHELL: /bin/bash
+      TZ: Europe/Vienna
+    hostname: kandev-gpu-1
+    image: kandev:v0.96.0-ssh
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    networks:
+      kandev:
+        ipv4_address: 10.75.0.2
+    ports:
+    - 127.0.0.1:38429:38429
+    - 127.0.0.1:2222:22
+    pull_policy: build
+    restart: unless-stopped
+    volumes:
+    - ./data:/data
+    extra_hosts:
+    - nbg:152.53.118.212
+    - nbg-1:152.53.118.212
+    - vie-1:152.53.35.177
+    - wg_vie-1:10.1.1.17
+    - wg_nbg-1:10.2.1.17
+    - vm103:192.168.53.111
+    - vm104:192.168.54.111
+    - gpu-1:194.182.188.115
+    - gpu-2:92.39.59.7
+    - ber-1:217.154.145.10
+    - ber-2:85.215.213.123
+    - vie-2:138.124.211.32

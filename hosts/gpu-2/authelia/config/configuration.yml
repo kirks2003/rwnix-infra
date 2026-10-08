@@ -1,0 +1,116 @@
+###############################################################################
+# Authelia — SSO / 2FA for every service exposed through Nginx Proxy Manager.
+# gpu-2 clone of the nbg-1 configuration (hosts/nbg-1/authelia): same access
+# model (CookieSession-only strategies, fail-closed deny, two_factor for the
+# service domains), same admin identity (config/users_database.yml +
+# db.sqlite3 + secrets/ travel host-to-host from nbg-1 — host-local, never in
+# the repo).
+#
+# Delta vs nbg-1: gpu-2's npm-ui already serves the POC proxy hosts, so the
+# Authelia gate is NOT a global NPM custom include (that would Authelia-gate
+# the POC rows and break their API-key clients). The same block lives per-row
+# in the advanced config of every service proxy host added on gpu-2 (tracked
+# template: ../nginx-proxy-manager/authelia-advanced-config.conf). The
+# upstream 172.22.0.3 is unchanged: authelia keeps the same fixed bridge IP
+# on the authelia_shared network.
+#
+# Secrets are NOT in this file. They are injected from files under ./secrets/
+# via the AUTHELIA_*_FILE environment variables set in docker-compose.yml.
+# See: https://www.authelia.com/configuration/methods/secrets/
+###############################################################################
+
+theme: 'auto'
+
+log:
+  level: 'info'
+  format: 'text'
+
+server:
+  address: 'tcp://:9091/'
+
+  endpoints:
+    authz:
+      # NPM/nginx uses the auth_request module, so the AuthRequest implementation.
+      # Strategies are pinned to CookieSession ONLY. This matters: the wetty,
+      # glances, kandev and jarvis vhosts sit behind an additional nginx HTTP
+      # Basic Auth layer, and the browser sends that `Authorization: Basic`
+      # header on every request. If a header strategy were enabled here,
+      # Authelia would try to authenticate those basic credentials as an
+      # Authelia user and reject the request instead of falling through to the
+      # session cookie.
+      auth-request:
+        implementation: 'AuthRequest'
+        authn_strategies:
+          - name: 'CookieSession'
+
+totp:
+  issuer: 'gpu-2'
+  algorithm: 'sha1'
+  digits: 6
+  period: 30
+  # Accept one period either side of now, to tolerate client clock drift.
+  skew: 1
+
+authentication_backend:
+  # No SMTP notifier is configured, so self-service password reset cannot
+  # deliver its email. Reset passwords with the `authelia` CLI instead.
+  password_reset:
+    disable: true
+  file:
+    path: '/config/users_database.yml'
+    watch: false
+    password:
+      algorithm: 'argon2'
+
+access_control:
+  default_policy: 'deny'
+  rules:
+    # The portal itself must be reachable unauthenticated, or login is
+    # impossible. This is the only bypass rule.
+    - domain: 'auth.gpu-2-de-fra-1-exo.csdc-nm.at'
+      policy: 'bypass'
+
+    # The ten service domains on gpu-2 (the POC proxy hosts are deliberately
+    # NOT gated — shared NPM, API-key clients).
+    - domain:
+        - 'npm.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'portainer.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'grafana.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'glances.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'kuma.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'wetty.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'vikunja.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'kandev.gpu-2-de-fra-1-exo.csdc-nm.at'
+        - 'jarvis.gpu-2-de-fra-1-exo.csdc-nm.at'
+      policy: 'two_factor'
+
+session:
+  name: 'authelia_session'
+  same_site: 'lax'
+  expiration: '1h'
+  inactivity: '5m'
+  remember_me: '1M'
+  cookies:
+    # `authelia_url` is what makes the modern redirect flow work: Authelia
+    # returns 401 with a Location header pointing here, and nginx turns that
+    # into a 302. No hardcoded portal URL in the nginx snippets.
+    - domain: 'gpu-2-de-fra-1-exo.csdc-nm.at'
+      authelia_url: 'https://auth.gpu-2-de-fra-1-exo.csdc-nm.at'
+      default_redirection_url: 'https://npm.gpu-2-de-fra-1-exo.csdc-nm.at'
+
+regulation:
+  max_retries: 5
+  find_time: '10m'
+  ban_time: '1h'
+
+storage:
+  local:
+    path: '/config/db.sqlite3'
+
+notifier:
+  # Filesystem notifier: password-reset and 2FA-registration links are written
+  # to this file rather than emailed. Read it with:
+  #   docker exec authelia cat /config/notifications.yml
+  disable_startup_check: true
+  filesystem:
+    filename: '/config/notifications.yml'

@@ -1,0 +1,54 @@
+services:
+  vikunja-db:
+    image: postgres:17.11-alpine3.24@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    container_name: vikunja-db
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    environment:
+      POSTGRES_USER: vikunja
+      POSTGRES_DB: vikunja
+      POSTGRES_PASSWORD: ${VIKUNJA_DB_PASSWORD:?set in .env}
+    volumes:
+      - vikunja_db:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      vikunja: {ipv4_address: 172.29.0.3}
+  vikunja:
+    image: vikunja/vikunja:2.6.0@sha256:417ada6f94e81f0267aa2f007d0a811fc82d38dd2aa58351e3ea520ca01c2ea5
+    container_name: vikunja
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    environment:
+      VIKUNJA_DATABASE_TYPE: postgres
+      VIKUNJA_DATABASE_HOST: vikunja-db
+      VIKUNJA_DATABASE_USER: vikunja
+      VIKUNJA_DATABASE_DATABASE: vikunja
+      VIKUNJA_DATABASE_PASSWORD: ${VIKUNJA_DB_PASSWORD:?set in .env}
+      VIKUNJA_SERVICE_SECRET: ${VIKUNJA_JWT_SECRET:?set in .env}
+      VIKUNJA_SERVICE_PUBLICURL: https://vikunja.${HOST_FQDN:?set in .env}
+      VIKUNJA_SERVICE_ENABLEREGISTRATION: ${VIKUNJA_REGISTRATION:-false}
+    volumes:
+      - vikunja_files:/app/vikunja/files
+    depends_on: [vikunja-db]
+    restart: unless-stopped
+    networks:
+      vikunja: {ipv4_address: 172.29.0.2}
+  vikunja-mcp:
+    build: .
+    image: vikunja-mcp:1.2.3-local
+    pull_policy: build
+    container_name: vikunja-mcp
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+    environment:
+      VIKUNJA_URL: http://vikunja:3456/api/v1
+      VIKUNJA_API_TOKEN: ${VIKUNJA_API_TOKEN:-}
+      VIKUNJA_MCP_ALLOW_WRITE: "1"
+    restart: unless-stopped
+    networks:
+      vikunja: {ipv4_address: 172.29.0.4}
+volumes:
+  vikunja_db:
+  vikunja_files:
+networks:
+  vikunja:
+    name: authelia_shared-vikunja
+    internal: false
+    ipam: {config: [{subnet: 172.29.0.0/24}]}

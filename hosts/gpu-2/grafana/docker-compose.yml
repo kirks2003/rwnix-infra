@@ -1,0 +1,35 @@
+services:
+  grafana:
+    image: grafana/grafana:13.0.10-ubuntu@sha256:1f36c12afb1496fb675d8c3250905262ed8f2b32ca848dbc588b15856b2142a0
+    container_name: grafana
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    user: 472:472
+    volumes:
+      - ./data:/var/lib/grafana
+      - ./provisioning:/etc/grafana/provisioning:ro
+    environment:
+      TZ: Europe/Berlin
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SERVER_DOMAIN: "grafana.gpu-2-de-fra-1-exo.csdc-nm.at"
+      GF_SERVER_ROOT_URL: "https://grafana.gpu-2-de-fra-1-exo.csdc-nm.at"
+      GF_SECURITY_ADMIN_USER: "roman.windpassinger@gmail.com"
+      # gpu-2 delta vs nbg-1: the admin password is generated once on the
+      # host and lives in the host-local .env (nbg-1's predates the
+      # no-inline-secrets rule and stays as-is there).
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:?set in .env}"
+      GF_AUTH_BASIC_AUTH_ENABLED: "true"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_INSTALL_PLUGINS: ""
+    restart: unless-stopped
+    networks:
+      grafana_private:
+        ipv4_address: 172.27.0.2
+
+networks:
+  grafana_private:
+    name: authelia_shared-grafana
+    external: true

@@ -1,0 +1,35 @@
+services:
+  uptime-kuma:
+    # Same pinned release as the generic template (see stacks/uptime-kuma for
+    # the pinning notes and digest). Under this profile the container joins
+    # the host network namespace like wg-easy, by operator decision on
+    # 14 Sept 2026: its monitors then probe with the host's own view. The
+    # WireGuard peer and the LAN behind it are reached as host-originated
+    # traffic sourced from the tunnel address (the DOCKER-USER guard filters
+    # only forwarded traffic, so no exception is needed), and every Docker
+    # bridge or loopback-bound backend is reachable directly.
+    image: louislam/uptime-kuma:2.5.4-rootless@sha256:049d372d2774022ddf6b261f9394372e1ffbe95cc741fb02a540bde69d5b71b7
+    container_name: uptime-kuma
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    network_mode: host
+    # Still the deploy user, no added capabilities: ping works through the
+    # image's cap_net_raw file capability on /usr/bin/ping.
+    user: node
+    volumes:
+      # Same data/ as the bridge template: kuma.db, db-config.json, uploads.
+      - ./data:/app/data
+    environment:
+      TZ: Europe/Berlin
+      UPTIME_KUMA_DB_TYPE: sqlite
+      # Host namespace: bind the UI to host loopback only, never 0.0.0.0. NPM
+      # reaches it through uptime-kuma-ui-relay.socket on
+      # 172.22.0.1:51833, which the host firewall opens for
+      # NPM's fixed address only. 127.0.0.1:3001 is also a trusted host-local
+      # administrative path, like wg-easy's 127.0.0.1:51821.
+      UPTIME_KUMA_HOST: "127.0.0.1"
+      UPTIME_KUMA_PORT: "3001"
+    restart: unless-stopped
