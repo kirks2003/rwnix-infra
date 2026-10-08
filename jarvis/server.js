@@ -628,12 +628,17 @@ function buildAiProfiles() {
   return profiles;
 }
 
+// `??`, not `||`, on the endpoint chains: an explicitly empty
+// WHISPER_*_ENDPOINTS must disable that profile (the gpu-2 deployment sets
+// WHISPER_VM103_ENDPOINTS=/WHISPER_OVHCLOUD_ENDPOINTS= to advertise only the
+// gpu-1 profile), while an unset variable still falls back to the default —
+// the same semantics as ttsEndpoints above.
 function buildWhisperProfiles() {
   const profiles = [
     {
       id: "gpu-1",
       label: "gpu-1",
-      endpoints: splitCsv(process.env.WHISPER_GPU1_ENDPOINTS || process.env.WHISPER_ENDPOINTS || "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions"),
+      endpoints: splitCsv(process.env.WHISPER_GPU1_ENDPOINTS ?? process.env.WHISPER_ENDPOINTS ?? "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions"),
       model: process.env.WHISPER_GPU1_MODEL || config.whisperModel,
       apiKey: process.env.WHISPER_GPU1_API_KEY || config.whisperApiKey,
       vadFilter: parseBoolean(process.env.WHISPER_GPU1_VAD_FILTER || String(config.whisperVadFilter)),
@@ -642,7 +647,7 @@ function buildWhisperProfiles() {
     {
       id: "vm103",
       label: "vm103 on pve103",
-      endpoints: splitCsv(process.env.WHISPER_VM103_ENDPOINTS || "http://192.168.53.111:8003/v1/audio/transcriptions"),
+      endpoints: splitCsv(process.env.WHISPER_VM103_ENDPOINTS ?? "http://192.168.53.111:8003/v1/audio/transcriptions"),
       model: process.env.WHISPER_VM103_MODEL || "deepdml/faster-whisper-large-v3-turbo-ct2",
       apiKey: process.env.WHISPER_VM103_API_KEY || "",
       vadFilter: parseBoolean(process.env.WHISPER_VM103_VAD_FILTER || "true"),
@@ -651,7 +656,7 @@ function buildWhisperProfiles() {
     {
       id: "ovhcloud",
       label: "OVHcloud Whisper",
-      endpoints: splitCsv(process.env.WHISPER_OVHCLOUD_ENDPOINTS || "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/audio/transcriptions"),
+      endpoints: splitCsv(process.env.WHISPER_OVHCLOUD_ENDPOINTS ?? "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/audio/transcriptions"),
       model: process.env.WHISPER_OVHCLOUD_MODEL || "whisper-large-v3",
       apiKey: process.env.WHISPER_OVHCLOUD_API_KEY || process.env.OVH_AI_ENDPOINTS_ACCESS_TOKEN || process.env.BRAIN_OVHCLOUD_API_KEY || "",
       vadFilter: false,

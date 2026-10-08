@@ -1027,6 +1027,19 @@ test("per-user passwords: name:password entries and legacy parity", async (t) =>
   assert.equal((await config403.json()).loginHint, "Enter your username and password.");
 });
 
+test("an explicitly empty WHISPER_*_ENDPOINTS disables that profile", async (t) => {
+  const { process: child, origin: localOrigin } = await startBackend({
+    WHISPER_VM103_ENDPOINTS: "",
+    WHISPER_OVHCLOUD_ENDPOINTS: "",
+  });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  const health = await (await fetch(`${localOrigin}/api/health`)).json();
+  assert.equal(health.whisperEndpoints, 1);
+  const cookie = await login(localOrigin, "Mila");
+  const config = await (await fetch(`${localOrigin}/api/config`, { headers: { cookie } })).json();
+  assert.deepEqual(config.whisperProfiles.map((profile) => profile.id), ["gpu-1"]);
+});
+
 test("loginHint advertises the legacy convention on the default deployment", async () => {
   const config403 = await fetch(`${origin}/api/config`);
   assert.equal(config403.status, 403);
