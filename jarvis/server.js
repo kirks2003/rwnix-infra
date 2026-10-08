@@ -10,6 +10,8 @@ const root = __dirname;
 const publicDir = path.join(root, "public");
 const port = Number(process.env.PORT || 8094);
 
+const parsedUsers = parseUsers(process.env.USERS || "Mila,Roman,admin");
+
 const config = {
   publicBasePath: normalizeBasePath(process.env.PUBLIC_BASE_PATH || "/"),
   wakePhrase: process.env.WAKE_PHRASE || "Hey Rocky",
@@ -30,11 +32,15 @@ const config = {
   ttsModel: process.env.TTS_MODEL || "speaches-ai/Kokoro-82M-v1.0-ONNX",
   ttsVoice: process.env.TTS_VOICE || "bm_george",
   ttsApiKey: process.env.TTS_API_KEY || "",
-  // Multi-user login: comma-separated user names. Each user's password is
-  // their own name (Mila signs in with "Mila"/"Mila", admin with "admin"/"admin").
-  // The default list includes the admin account so the default deployment's
-  // ADMIN_USERS default ("admin") is a subset of USERS, as required below.
-  users: splitCsv(process.env.USERS || "Mila,Roman,admin"),
+  // Multi-user login: comma-separated user entries. A bare name keeps the
+  // legacy convention that the password is the name itself (Mila signs in
+  // with "Mila"/"Mila", admin with "admin"/"admin"); "name:password" (split
+  // on the first colon) stores an explicit, case-sensitive password for that
+  // user — the gpu-2 single-admin deployment uses that form. The default
+  // list includes the admin account so the default deployment's ADMIN_USERS
+  // default ("admin") is a subset of USERS, as required below.
+  users: parsedUsers.users,
+  userPasswords: parsedUsers.passwords,
   // The admin session: signs in like any user (ADMIN_USERS must be a subset
   // of USERS) and sees every user's data — the panel shows the whole graph,
   // the brain's graph tools run across all owners, and the admin's session is
@@ -335,6 +341,29 @@ function canonicalUser(name) {
   const wanted = String(name || "").trim().toLowerCase();
   for (const user of config.users) if (user.toLowerCase() === wanted) return user;
   return null;
+}
+
+// Parse the USERS list (see config.users): a bare name (legacy — the stored
+// password is the name itself) or "name:password" (the first colon separates;
+// the password is case-sensitive and may contain colons).
+function parseUsers(value) {
+  const users = [];
+  const passwords = {};
+  for (const entry of splitCsv(value)) {
+    const index = entry.indexOf(":");
+    const name = (index === -1 ? entry : entry.slice(0, index)).trim();
+    if (!name) continue;
+    if (!users.includes(name)) users.push(name);
+    passwords[name] = index === -1 ? name : entry.slice(index + 1).trim();
+  }
+  return { users, passwords };
+}
+
+// The hint the login form shows: the legacy "password is your username" text
+// is only true while every account still uses that convention.
+function loginHint() {
+  const legacy = config.users.every((user) => config.userPasswords[user] === user);
+  return legacy ? "The password is your username." : "Enter your username and password.";
 }
 
 // The admin session is a session property, never client input: it is derived
@@ -695,14 +724,15 @@ const server = http.createServer(async (req, res) => {
       if (loginBlocked(address)) {
         return json(res, 429, { error: "too_many_attempts", requestId });
       }
-      // The password is the username itself; compare it constant-time.
+      // Compare against the password stored for that user (a bare-name USERS
+      // entry stores the name itself) constant-time.
       // 403, not 401: the app sits behind the gateway's Basic Auth layer, and
       // any 401 that arrives on a request carrying those credentials makes the
       // browser treat them as rejected and clear its cached Basic
       // credentials — the next request then triggers a second Basic Auth
       // prompt. A bare 403 never does that.
       const user = canonicalUser(username);
-      if (!user || !sameSecret(password, user)) {
+      if (!user || !sameSecret(password, config.userPasswords[user])) {
         recordLoginFailure(address);
         return json(res, 403, { error: "forbidden", requestId });
       }
@@ -722,9 +752,10 @@ const server = http.createServer(async (req, res) => {
     // /api/config as "show the login form". 403 (not 401) for the same reason
     // as the login failure above: a 401 would make the browser drop its cached
     // gateway Basic Auth credentials and re-prompt on the next request.
+    // loginHint tells the login form which convention this deployment uses.
     if (pathname.startsWith("/api/")) {
       const user = sessionUser(req);
-      if (!user) return json(res, 403, { error: "forbidden", requestId });
+      if (!user) return json(res, 403, { error: "forbidden", loginHint: loginHint(), requestId });
       req.user = user;
     }
 

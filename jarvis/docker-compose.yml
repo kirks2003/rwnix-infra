@@ -27,7 +27,10 @@ services:
     env_file:
       - .env
     ports:
-      - "192.168.54.111:8094:8094"
+      # JARVIS_BIND_IP: the host interface the UI listens on. vm104 keeps the
+      # LAN IP default; behind a host-networked reverse proxy (gpu-2 NPM) it
+      # is 127.0.0.1 so the app is only reachable through the proxy.
+      - "${JARVIS_BIND_IP:-192.168.54.111}:8094:8094"
     volumes:
       # The SQLite conversation database (CONVERSATION_DB_PATH points here):
       # the Prompt/Answer panels' history must survive container rebuilds.

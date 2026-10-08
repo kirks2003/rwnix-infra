@@ -1962,13 +1962,16 @@ function applyVoice(value, persist) {
 // (the backend answers 403, not 401, so the browser does not mistake it for a
 // rejection of the gateway's Basic Auth credentials).
 // Each user's prompt history is keyed by their account on the server, so
-// Mila and Roman never share a conversation.
+// Mila and Roman never share a conversation. The hint reflects the
+// deployment's convention (legacy password-is-name vs explicit per-user
+// passwords) as the backend reports it in the 403 body.
+let loginHintText = "The password is your username.";
 function showLogin(message) {
   authedUser = null;
   document.body.classList.remove("authenticated");
   el.loginPanel.hidden = false;
   el.loginStatus.classList.remove("error");
-  el.loginStatus.textContent = message || "The password is your username.";
+  el.loginStatus.textContent = message || loginHintText;
   el.userLine.textContent = "";
   stop("Signed out.");
   stage("standby", "Sign in", "Enter your name and password to open your shell.");
@@ -2070,6 +2073,8 @@ async function loadConfig(userFromLogin) {
   stage("standby", "Loading", "Loading runtime configuration.");
   const response = await fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) });
   if (response.status === 403) {
+    const notAuthed = await response.json().catch(() => ({}));
+    if (notAuthed.loginHint) loginHintText = notAuthed.loginHint;
     showLogin();
     return;
   }

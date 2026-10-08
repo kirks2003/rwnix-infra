@@ -991,6 +991,48 @@ test("login issues a session cookie and rejects wrong credentials", async () => 
   }
 });
 
+test("per-user passwords: name:password entries and legacy parity", async (t) => {
+  const { process: child, origin: localOrigin } = await startBackend({ USERS: "admin:sekrit,Mila" });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  // The explicit-password entry accepts only its own password (case-sensitive).
+  const ok = await fetch(`${localOrigin}/api/login`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "admin", password: "sekrit" }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).user, "admin");
+  for (const body of [
+    { username: "admin", password: "admin" },
+    { username: "admin", password: "SEKRIT" },
+    { username: "admin", password: "wrong" },
+    { username: "Stranger", password: "wrong" },
+  ]) {
+    const bad = await fetch(`${localOrigin}/api/login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(bad.status, 403, JSON.stringify(body));
+    await bad.json();
+  }
+  // A bare-name entry in the same list keeps the legacy password = name rule.
+  const legacy = await fetch(`${localOrigin}/api/login`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "Mila", password: "Mila" }),
+  });
+  assert.equal(legacy.status, 200);
+  assert.equal((await legacy.json()).user, "Mila");
+  // The hint reflects the explicit-password deployment.
+  const config403 = await fetch(`${localOrigin}/api/config`);
+  assert.equal(config403.status, 403);
+  assert.equal((await config403.json()).loginHint, "Enter your username and password.");
+});
+
+test("loginHint advertises the legacy convention on the default deployment", async () => {
+  const config403 = await fetch(`${origin}/api/config`);
+  assert.equal(config403.status, 403);
+  assert.equal((await config403.json()).loginHint, "The password is your username.");
+});
+
 test("api routes require the session cookie; health stays public", async () => {
   assert.equal((await fetch(`${origin}/api/config`)).status, 403);
   for (const [pathname, body] of [
