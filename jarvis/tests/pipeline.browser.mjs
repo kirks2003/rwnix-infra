@@ -1369,6 +1369,77 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     2, "the re-rendered window keeps the stored entries");
 });
 
+test("conversation entries are aligned per role and offer a markdown Copy button", { timeout: 30000 }, async (t) => {
+  // A fresh context with clipboard access (the 127.0.0.1 origin is a secure
+  // context, so navigator.clipboard works natively); the history comes from
+  // this test's own mocked conversation endpoint.
+  const context = await browser.newContext();
+  t.after(() => context.close());
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+  const page = await context.newPage();
+  t.after(() => page.close());
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  t.after(() => assert.deepEqual(errors, []));
+  const prompt = "What is **two** plus two?";
+  const answer = "It is **four**.\n\n- a\n- b";
+  await page.route("**/api/config", (route) => route.fulfill({ json: {
+    wakePhrase: "Rocky", silenceMs: 250, whisperLanguage: "en",
+    whisperEndpoints: ["http://vm103.test/v1/audio/transcriptions"],
+  } }));
+  await page.route("**/api/conversation*", (route) => route.fulfill({ json: { entries: [
+    { ts: new Date().toISOString(), prompt, answer },
+  ] } }));
+  await page.goto(origin);
+  await page.waitForFunction(() =>
+    document.querySelectorAll("#conversationText .transcript-entry").length === 2);
+  // The role layout: prompts sit right-aligned in the standard --text color,
+  // answers stay left-aligned in the bluer --accent-text shade.
+  const roles = await page.evaluate(() => {
+    const pick = (sel) => {
+      const entry = document.querySelector(sel);
+      const body = entry.querySelector(".transcript-body");
+      return { align: getComputedStyle(entry).textAlign, color: getComputedStyle(body).color };
+    };
+    return { prompt: pick(".transcript-entry-prompt"), answer: pick(".transcript-entry-answer") };
+  });
+  assert.equal(roles.prompt.align, "right");
+  assert.equal(roles.prompt.color, "rgb(216, 243, 255)", "prompts keep --text");
+  assert.equal(roles.answer.align, "start", "answers stay left-aligned (start in LTR)");
+  assert.equal(roles.answer.color, "rgb(159, 192, 240)", "answers carry --accent-text");
+  // Every entry carries its Copy button, and a click copies the raw markdown
+  // source (the panel prints it verbatim) to the clipboard, then reverts.
+  const buttons = await page.$$("#conversationText .transcript-copy");
+  assert.equal(buttons.length, 2);
+  // The button stays as wide as its label plus padding (not the entry's full
+  // width) and hugs the edge its text is aligned to.
+  const promptEntry = await page.locator(".transcript-entry-prompt").boundingBox();
+  const answerEntry = await page.locator(".transcript-entry-answer").boundingBox();
+  const promptBtn = await page.locator(".transcript-entry-prompt .transcript-copy").boundingBox();
+  const answerBtn = await page.locator(".transcript-entry-answer .transcript-copy").boundingBox();
+  assert.ok(promptBtn.width < 150 && answerBtn.width < 150,
+    `Copy buttons stay label-width, got ${promptBtn.width}px / ${answerBtn.width}px`);
+  assert.ok(Math.abs(promptBtn.x + promptBtn.width - (promptEntry.x + promptEntry.width)) < 2,
+    "the prompt's Copy button hugs the entry's right edge");
+  assert.ok(Math.abs(answerBtn.x - answerEntry.x) < 2,
+    "the answer's Copy button hugs the entry's left edge");
+  // The Copy button is 70% of the standard button scale (text AND graphic).
+  const stdBtn = await page.locator("#clearLogButton").boundingBox();
+  const scaleRatio = answerBtn.height / stdBtn.height;
+  assert.ok(Math.abs(scaleRatio - 0.7) < 0.08,
+    `the Copy button is 70% of the standard button height, ratio ${scaleRatio.toFixed(3)}`);
+  await buttons[0].click();
+  await page.waitForFunction(() =>
+    document.querySelector(".transcript-entry-prompt .transcript-copy").textContent === "Copied");
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), prompt);
+  await page.waitForTimeout(1600);
+  assert.equal(await page.textContent(".transcript-entry-prompt .transcript-copy"), "Copy");
+  await buttons[1].click();
+  await page.waitForFunction(() =>
+    document.querySelector(".transcript-entry-answer .transcript-copy").textContent === "Copied");
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), answer);
+});
+
 test("the silence slider adjusts the live stop delay and persists per browser", { timeout: 75000 }, async (t) => {
   // The fixture tone plays 1.2 s and pauses 2.8 s (4 s period). With the
   // 250 ms test default a recorded command ends at the first pause.

@@ -5,9 +5,10 @@
   --text: #d8f3ff;
   --muted: #77a9bf;
   --cyan: #42d9ff;
-  /* Conversation prompts ("You"): a little bluer and darker than --text, so
-     the user's words read as a distinct role from Jarvis' answers. */
-  --prompt-text: #9fc0f0;
+  /* The bluer role shade in the Conversation panel: a little bluer and
+     darker than --text so the two roles read apart at a glance. Answers
+     carry it, prompts keep --text. */
+  --accent-text: #9fc0f0;
   --green: #2dffbf;
   --amber: #ffc04d;
   --blue: #4d8dff;
@@ -137,10 +138,8 @@ body:not(.authenticated) .app-ui {
 }
 
 .sign-out {
-  padding: 6px 14px;
   color: var(--muted);
   background: rgba(2, 5, 11, 0.4);
-  font-size: 0.8rem;
 }
 
 .sign-out:hover {
@@ -340,10 +339,16 @@ h2 {
   background: var(--panel);
 }
 
+/* One button scale for every pill button: a shared font-size (without it the
+   UA button font applies) and one padding, so no button may be taller or
+   narrower than another. Deliberate exceptions: the `.lang-switch` toggles
+   (a different control type, fixed 148x32) and `.transcript-copy` (70%
+   scale, a compact per-entry action). */
 button {
   border: 1px solid rgba(66, 217, 255, 0.4);
   border-radius: 999px;
-  padding: 8px 11px;
+  padding: 8px 14px;
+  font-size: 0.9rem;
   color: var(--text);
   background: rgba(66, 217, 255, 0.1);
   cursor: pointer;
@@ -434,11 +439,6 @@ button:disabled {
   gap: 10px;
 }
 
-.stage-preview button {
-  padding: 8px 14px;
-  font-size: 0.9rem;
-}
-
 .stage-preview button.active {
   border-color: var(--cyan);
   background: rgba(66, 217, 255, 0.25);
@@ -479,10 +479,13 @@ button:disabled {
   text-align: center;
 }
 
+/* Equal space above and below the switch (11px, the page's standard
+   inter-panel gap): the old 4px/10px split left visibly more room under
+   the button than over it. */
 .panels-toggle-row {
   display: flex;
   justify-content: center;
-  margin: 4px 0 10px;
+  margin: 11px 0;
 }
 
 #speakStatus {
@@ -711,7 +714,9 @@ progress {
   max-width: min(860px, 100%);
 }
 
-.transcript-entry-answer {
+/* Prompts ("You") sit on the right in the standard --text color; answers
+   ("Jarvis") stay left-aligned and carry the bluer --accent-text shade. */
+.transcript-entry-prompt {
   justify-self: end;
   text-align: right;
 }
@@ -727,11 +732,35 @@ progress {
   white-space: pre-wrap;
 }
 
-/* Prompts get the bluer --prompt-text shade; answers keep --text, so the two
+/* Answers get the bluer --accent-text shade; prompts keep --text, so the two
    roles are distinguishable at a glance in the history list. The timestamp
    stays muted either way (its own rule). */
-.transcript-entry-prompt .transcript-body {
-  color: var(--prompt-text);
+.transcript-entry-answer .transcript-body {
+  color: var(--accent-text);
+}
+
+/* The per-entry Copy button: 70% of the standard button scale (font AND
+   padding, so the whole graphic scales: 0.9rem → 0.63rem, 8px 14px →
+   5.6px 9.8px), styled as a muted secondary action. It sits under its text
+   block — left for answers, right for prompts (matching the entry's
+   alignment) — and stays as wide as its own label plus padding (grid items
+   stretch by default, so the explicit justify-self keeps it from filling
+   the entry's full width). */
+.transcript-copy {
+  justify-self: start;
+  padding: 5.6px 9.8px;
+  font-size: 0.63rem;
+  border-color: rgba(66, 217, 255, 0.25);
+  background: transparent;
+  color: var(--muted);
+}
+
+.transcript-copy:hover {
+  color: var(--text);
+}
+
+.transcript-entry-prompt .transcript-copy {
+  justify-self: end;
 }
 
 .transcript-body.pending {
@@ -769,11 +798,6 @@ progress {
 
 .graph-head h2 {
   margin: 0;
-}
-
-.graph-head button {
-  padding: 6px 14px;
-  font-size: 0.85rem;
 }
 
 /* The entity/link-text size sliders: compact row under the panel head. The
@@ -853,8 +877,6 @@ progress {
 }
 
 .graph-views button {
-  padding: 6px 12px;
-  font-size: 0.85rem;
   opacity: 0.55;
 }
 
@@ -1201,8 +1223,6 @@ html.graph-full {
 .manual-prompt button {
   grid-column: 2;
   justify-self: end;
-  padding: 8px 16px;
-  font-size: 0.9rem;
 }
 
 .panel {

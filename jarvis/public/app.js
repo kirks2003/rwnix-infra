@@ -1430,8 +1430,55 @@ function transcriptEntry(text, ts, role) {
   const body = document.createElement("p");
   body.className = "transcript-body";
   body.textContent = text;
-  entry.append(time, body);
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "transcript-copy";
+  copy.textContent = "Copy";
+  copy.title = "Copy this text to the clipboard in markdown format";
+  copy.addEventListener("click", () => copyEntryText(copy, body));
+  entry.append(time, body, copy);
   return entry;
+}
+
+// The panel prints the brain's markdown verbatim, so the element's text IS
+// the markdown. navigator.clipboard needs a secure context (HTTPS); the
+// selection fallback covers plain-HTTP access.
+async function copyEntryText(button, body) {
+  if (button.disabled) return;
+  const text = body.textContent;
+  let ok = false;
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch {
+    ok = false;
+  }
+  if (!ok) ok = legacyClipboardCopy(text);
+  button.disabled = true;
+  button.textContent = ok ? "Copied" : "Copy failed";
+  setTimeout(() => {
+    button.textContent = "Copy";
+    button.disabled = false;
+  }, 1500);
+}
+
+function legacyClipboardCopy(text) {
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  area.remove();
+  return ok;
 }
 
 function scrollTranscripts() {

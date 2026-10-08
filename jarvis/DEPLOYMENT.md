@@ -93,18 +93,21 @@ The backend intentionally proxies Whisper and brain requests so browser clients 
 - The **History** day slider moved into the prompt form, left of **Send**, so the history window control stays next to the direct prompt action instead of occupying a separate strip above the transcript. Browser tests pin this layout and the stored-history reload behavior.
 - Deployment 2026-10-08: backups were taken before each vm104 sync (`jarvis-code.bak-20261008_074737.tgz` for the speech-control fix and `jarvis-code.bak-20261008_075525.tgz` for the merged Conversation panel). After the final deploy the live container was `healthy`, `/api/health` returned OK, and served static assets matched source checksums: `app.js` `248bffbae64418f5aaff24dd651fcf60`, `index.html` `167b49f889ad83d07a64740a03729707`, `style.css` `bd15c1eb542d6f0ec8a4b5a5bc0ea7bb`. Browsers with cached static assets need a hard refresh (`Ctrl+Shift+R`).
 - Conversation role colors (2026-10-08, user request): prompts (`You`) now render in a slightly bluer, darker shade (`--prompt-text: #9fc0f0` in `style.css`, applied via `.transcript-entry-prompt .transcript-body`) while answers (`Jarvis`) keep `--text`; timestamps stay muted. CSS-only change; unit suite 166/166. Deployed with backup `jarvis-code.bak-20261008_081048.tgz`; container `healthy`, `/api/health` OK, served `style.css` md5 `45bdccb913852200fdc6e2a4bd57bde2` matches source. Hard refresh (`Ctrl+Shift+R`) needed for the new colors.
+- Conversation role swap + markdown Copy button (2026-10-08, user request): alignment and color were swapped — prompts (`You`) are now **right-aligned** in `--text`, answers (`Jarvis`) **left-aligned** in the bluer shade (the variable was renamed `--prompt-text` → `--accent-text: #9fc0f0`). Every entry also gained a muted **Copy** button under its text (`transcriptEntry()` in `public/app.js`, styled as a secondary action on the standard button scale): it copies the entry's raw text to the clipboard — the panel prints the brain's markdown verbatim, so the copy is markdown, ready to paste elsewhere. `navigator.clipboard.writeText` with a `document.execCommand("copy")` fallback for non-secure contexts; the button shows "Copied" for 1.5 s. New browser test pins the per-role alignment/colors and the clipboard round-trip (markdown source, both roles). Unit suite 166/166, browser suite 57 pass / 2 opt-in skips. Deployed with backup `jarvis-code.bak-20261008_091609.tgz`; container `healthy`, `/api/health` OK, served `app.js` md5 `57e4dee55499d1f386e76454346d8746` and `style.css` md5 `b7d85f6e5de5572c7b050c7deeef3843` match source. A Chromium probe on the live instance (signed in as `Roman`, 66 stored entries) confirmed: prompt right/`rgb(216, 243, 255)`, answer left/`rgb(159, 192, 240)`, Copy click → "Copied" with clipboard equal to the entry's raw text. Hard refresh (`Ctrl+Shift+R`) needed.
+  - Follow-up (same day): the Copy button initially filled the entry's full width (grid items stretch by default; the answer side had no `justify-self`). It is now label-width plus padding (`.transcript-copy { justify-self: start }`, `end` for prompts), pinned by new test assertions (button width + hugging the aligned edge). Browser suite 57 pass / 2 opt-in skips; deployed with backup `jarvis-code.bak-20261008_101011.tgz`, served `style.css` md5 `6728aeeee713313213aa29357a83162d`, live button measured 61px against the 860px entry.
+  - Follow-up 2 (same day): the Copy button is a deliberate exception to the one-button-scale rule (noted in the base `button` comment), sized as a percentage of the standard scale with text AND graphic scaled together, pinned by a test that asserts the height ratio against a standard button. First set to 60% (`font-size: 0.54rem`, `padding: 4.8px 8.4px`; live 37.4×20.6px vs 61.7×33px, ratio 0.624; backup `jarvis-code.bak-20261008_101843.tgz`, served `style.css` md5 `1dfe22d026814026d5e2eaccefdc7b1d`), then moved to **110%** (`font-size: 0.99rem`, `padding: 8.8px 15.4px`) after the user's "1100%" request was confirmed as 110%, and finally settled at **70%** (`font-size: 0.63rem`, `padding: 5.6px 9.8px`; ratio assertion ≈0.7 ± 0.08). Browser suite 57 pass / 2 opt-in skips; final deploy with backup `jarvis-code.bak-20261008_122501.tgz`, served `style.css` md5 `ccdc7731719ca4ec7d2bd746071a7af0`, live button measured 43.2×23.2px against the standard 61.7×33px (ratio 0.703).
 
-## 2026-10-08 UI findings: button sizes and panel spacing (open)
+## 2026-10-08 UI findings: button sizes and panel spacing (fixed 2026-10-08)
 
-Analysis of two UI inconsistencies reported on 2026-10-08. Neither is fixed yet; this
-section records the measurements and the planned fix so the follow-up does not re-derive
-them.
+Two UI inconsistencies reported on 2026-10-08. The "before" measurements are kept below
+for the record; both are fixed (see the fix and verification notes at the end of each
+subsection).
 
-### Buttons are not one size
+### Buttons are not one size (fixed)
 
-The base `button` rule in `public/style.css` (`padding: 8px 11px`, no `font-size`, so the
-UA button font — ~13.3px in Chromium — applies) is overridden in five places, producing
-three different heights and four different paddings:
+**Before:** the base `button` rule in `public/style.css` (`padding: 8px 11px`, no
+`font-size`, so the UA button font — ~13.3px in Chromium — applies) was overridden in five
+places, producing three different heights and four different paddings:
 
 | Buttons | Selector | padding | font-size | height ≈ |
 |---|---|---|---|---|
@@ -117,13 +120,23 @@ The `.lang-switch` toggles (Jarvis on/off, Speak, Panels, language, MCP) are a d
 control type — fixed 148×32px — and are consistent within that family; they are not part
 of the inconsistency.
 
-Planned fix: one scale — set `font-size` and a single `padding` on the base `button` rule
-and drop the per-selector padding/font-size overrides (keep `.lang-switch` as-is).
+**Fix (applied):** one scale — the base `button` rule now sets `font-size: 0.9rem` and a
+single `padding: 8px 14px`, and every per-selector padding/font-size override
+(`.stage-preview button`, `.graph-head button`, `.graph-views button`,
+`.manual-prompt button`, `.sign-out`) was removed; `.graph-views button` keeps only its
+`opacity` dimming and `.sign-out` keeps its muted color/background. `.lang-switch` is
+untouched.
 
-### Panel vertical gaps are ad hoc
+**Verified in Chromium (1280×900):** every plain pill button now measures **33 px** tall
+(Arm, Stop, Send, Clear, Refresh, 3D/2D, Sign out, Reset, all seven stage-preview buttons)
+— previously 27/28/33/43/45. Two exceptions are by design: the **Apply wake word** and
+**Apply voice** buttons sit in a flex row with their input/select and stretch to the
+input's height (43/45 px) so button and field align — standard form pairing.
 
-`.shell` is plain block flow (no grid gap); every vertical space comes from individual
-margins, so the gaps down the page mix 0 / 4 / 10 / 11 / 18px:
+### Panel vertical gaps are ad hoc (toggle fixed, rest noted)
+
+**Before:** `.shell` is plain block flow (no grid gap); every vertical space comes from
+individual margins, so the gaps down the page mixed 0 / 4 / 10 / 11 / 18px:
 
 | Between | Space | Source |
 |---|---|---|
@@ -136,9 +149,46 @@ margins, so the gaps down the page mix 0 / 4 / 10 / 11 / 18px:
 | voice → live log | 18px | `.log-panel { margin-top: 18px }` |
 | log → history search | 11px | `.wake-settings` |
 
-Planned fix: one gap — make `#panelsBelow` (and the section flow around it) a grid with a
-single `gap: 11px` and remove the individual margins (`.graph-panel`, `.log-panel`,
-`.wake-settings`, `.panels-toggle-row`).
+**Fix (applied):** the reported asymmetry was the **Panels off/on** switch —
+`.panels-toggle-row { margin: 4px 0 10px }` left 4 px above the button and 10 px below.
+It is now `margin: 11px 0`, so the switch has **11 px above and 11 px below**, matching
+the page's standard 11 px inter-panel gap (conversation → switch → pipeline). The other
+uneven gaps in the table (0 px hero→conversation, 0 px meters→controls, 18 px
+voice→log) were not part of the report and are left as-is; if they ever get cleaned up,
+the move is a single `gap: 11px` grid over `#panelsBelow` plus removing the individual
+margins (`.graph-panel`, `.log-panel`, `.wake-settings`).
+
+**Deployment:** CSS-only change; unit suite 166/166 and the browser suite 56 pass / 2
+opt-in skips. Backed up as `jarvis-code.bak-20261008_085331.tgz` before the sync; after
+`docker compose up -d --build` the container was `healthy`, `/api/health` OK, and the
+served `style.css` md5 `46bac1fdfbd7bbab62abc1b20da02507` matched the source. A
+Chromium probe against the live instance (signed in as `admin`) confirmed the rendered
+result: all plain buttons 33 px, toggle gaps 11 px / 11 px. Hard refresh
+(`Ctrl+Shift+R`) needed for the new sizes/spacing.
+
+## 2026-10-08 verification notes: plain-HTTP probing of the live UI
+
+Findings from the live Chromium probes in this session (signed in as `admin` / `Roman`
+against `http://192.168.54.111:8094`):
+
+- **The app only boots in a secure context.** `app.js` calls `crypto.randomUUID()`
+  (session id) at load, and that API exists only in secure contexts (HTTPS or
+  localhost). Over plain HTTP the page throws `TypeError: crypto.randomUUID is not a
+  function` at `app.js:39`, the `/api/config` flow never finishes, `body.authenticated`
+  is never set and the whole app shell stays hidden. Real users are unaffected — both
+  public gateways are HTTPS — but direct HTTP access (LAN `:8094`) cannot be used to
+  verify the UI. Any plain-HTTP probe must polyfill `crypto.randomUUID` via an init
+  script before `app.js` runs.
+- **Playwright quirk:** `page.addInitScript` is silently lost when a `page.request`
+  call (e.g. the login POST) happens **before** the page's first navigation — the
+  polyfill never lands in the page (`typeof crypto.randomUUID === "undefined"` after
+  load). The working order is: `goto` first, then the login POST, then `page.reload`
+  (the init script applies to the reload). The browser test suite is unaffected
+  (127.0.0.1 is a secure context, and `setup()` navigates first).
+- The copy button's clipboard write was probed over plain HTTP by stubbing
+  `navigator.clipboard.writeText` in the init script and asserting the captured value
+  equals the entry's raw text (the in-app `execCommand` fallback covers non-secure
+  contexts for real users on plain HTTP, should that ever matter).
 
 ## Endpoint selector rollout (2026-10-07)
 
