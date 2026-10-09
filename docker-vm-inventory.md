@@ -164,11 +164,13 @@ compose files in [`hosts/`](hosts/).
 **5 containers** running on **3 Docker VMs**, all using the same stack:
 
 - **Image**: `lscr.io/linuxserver/webtop:ubuntu-xfce` (3.31 GB)
-- **Wine**: **10.0** installed (`wine64` + `wine32:i386`, packaged by Ubuntu)
+- **Wine**: **10.0** apt-installed at first run (`wine64` + `wine32:i386` +
+  `winbind`; verified live: `wine-10.0 (Ubuntu 10.0~repack-12ubuntu1)`)
 - **Desktop**: XFCE delivered in-browser via Selkies (WebRTC/JPEG encoder)
 - **Platform**: MetaTrader 5 (MT5) trading terminal
-- **Init**: An init container generates startup scripts that install Wine +
-  MT5 at first run via `custom-cont-init.d`
+- **Init**: A busybox init sidecar generates `custom-cont-init.d` startup
+  scripts (`01-install-wine.sh`, `02-install-mt5.sh`, `04-apply-config.sh`)
+  before the main container starts
 - **Auth**: Browser access requires password (set per-container in `.env`)
 
 | VM | Container | Broker | Web UI port | Status |
@@ -180,16 +182,71 @@ compose files in [`hosts/`](hosts/).
 | waw-1 docker-1 | `mt5-1-activtrades-1` | ActivTrades | **10101** → 3001 | Up 8 days |
 
 Each MT5 container has a companion `mt5-socket-api-bridge-1` (port 5555) that
-exposes a socket API, and a shared `mariadb-1` + `phpmyadmin-1` stack.
+exposes a socket API, and a shared `mariadb-1` + `phpmyadmin-1` stack (tick
+collection; the MariaDBs replicate to vm104 slaves, see
+[`hosts/vm104/`](hosts/vm104/)).
 
-### Port allocation pattern
+### Port allocation
 
-- **10101**: ActivTrades broker
-- **20101**: FxPro broker
-- **30101**: XM broker
+`HOST_PORT = BROKER_BASE + ACCOUNT * 100 + TERMINAL`, with
+`BROKER_BASE`: activtrades 10000, fxpro 20000, xm 30000 — so account 1,
+terminal 1 gives **10101** (ActivTrades), **20101** (FxPro), **30101** (XM).
+Terminal/account numbers allow multiple terminals or accounts per broker
+(e.g. `mt5-4-fxpro-1` → 20104). The pattern is consistent across VMs (e.g.
+eri-1 docker-1 and docker-2 both use 20101 for FxPro — each is a separate
+MT5 instance with its own config).
 
-This pattern is consistent across VMs (e.g. eri-1 docker-1 and docker-2 both
-use 20101 for FxPro — each is a separate MT5 instance with its own config).
+### MT5 exe installer setup (3 brokers)
+
+Each broker ships its own **branded MT5 setup exe**, stored in the untracked
+source tree and mounted read-only into each container at
+`/installer/<broker>/<broker>5setup.exe`:
+
+| Broker | Installer | Size | Installs as |
+|---|---|---|---|
+| ActivTrades | `activtrades5setup.exe` | 7.2 MB | `C:\Program Files\MetaTrader 5 - ActivTrades` |
+| FxPro | `fxpro5setup.exe` | 7.2 MB | FxPro-branded dir |
+| XM | `xm5setup.exe` | 5.0 MB | XM-branded dir |
+
+**Source of truth** (untracked in this repo by design):
+`vm104:/home/ubuntu/projects/docker/` — `setup-wine-mt5.sh` (deploy
+controller, run from vm104 over the mesh), `deploy-settings.sh` (polling-loop
+timeouts), `AGENTS.md` (design notes + fix history), and `docker/wine-mt5/`
+(canonical `docker-compose.yml`, init scripts, per-container
+`config/<container-name>/mt5.ini` + `experts/`, `installer/<broker>/`).
+Per-host copies live at `/home/ubuntu/docker/mt5-<T>-<B>-<A>/` on the Docker
+VMs; the `setup-wine-mt5.sh` copy scp'd into their `~/scripts/` is **stale**
+— run deploys from vm104.
+
+**Install flow** (first boot, `02-install-mt5.sh` inside the container):
+
+1. Start `Xvfb :99` (1440x900x16) + `wineboot -u`, then run
+   `wine "<broker>5setup.exe" /auto` in the background as user `abc`; the PID
+   is written to `/tmp/.mt5-markers/setup-pid` for the deploy script.
+2. Wait for setup.exe to exit, then for the install dir containing
+   `terminal64.exe` (broker-named; matched by `find -iname "*<broker>*"`,
+   fallbacks `*mt5*` / `*metatrader*`).
+3. Pin Wine DPI (`LogPixels=96`, `Win8DpiScaling=1`) to stop font-scaling
+   drift, and symlink the `x:` drive to the install dir.
+
+**Account config**: `config/<container-name>/mt5.ini` holds
+`[Common] Login/Server/Password` (e.g. `ActivTrades-Server`,
+`FxPro-MT5 Demo`, `XM.COM-MT5`); the `mt5.ini.prd` file holds the **live**
+account while `mt5.ini` holds the current demo/test one. The deploy renames
+it to `mt5-<T>-<B>-<A>.ini`; MT5's **first launch runs with `/config:`** so
+the ini credentials log in, then after a graceful exit a `.no-config` marker
+switches all future starts to no-`/config:` mode (MT5 reads saved binary
+state + `common.ini`).
+
+**EA + deploy pipeline** (`setup-wine-mt5.sh <container-name> --fresh|--compile`
+from vm104): scp compose/scripts/ini/experts/installer → `docker compose up -d`
+→ polling loops using the `deploy-settings.sh` timeouts (init ≤180s,
+setup.exe PID ≤180s, setup.exe exit ≤180s, MT5 dir ≤60s, start ≤120s, stop
+≤45s — no hardcoded sleeps) → copy `.mq5` experts (tick collectors +
+`mt5-socket-api-bridge.mq5`) → headless-compile with
+`MetaEditor64.exe /compile` under Xvfb :99 → 3-phase graceful stop
+(`xdotool` → `wine taskkill /IM terminal64.exe` → SIGTERM + `wineserver -k`)
+→ start without `/config:` → verify the PID alive 5s.
 
 ---
 
@@ -265,6 +322,6 @@ currently running:
 Active compose files live in `/home/ubuntu/docker/<service>/docker-compose.yml`
 on each Docker VM. The canonical copies are in this repo under
 [`hosts/<host>/<service>/`](hosts/) (see [`hosts/README.md`](hosts/README.md)
-for deploy procedure). The MT5/Wine compose files under
-`/home/ubuntu/projects/` and `/home/ubuntu/scripts/` are **not** tracked in the
-repo.
+for deploy procedure). The MT5/Wine compose files are **not** tracked in the
+repo — their canonical source tree is on vm104 (see
+[MT5 exe installer setup](#mt5-exe-installer-setup-3-brokers)).
