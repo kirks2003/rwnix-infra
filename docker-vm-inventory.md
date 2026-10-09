@@ -248,10 +248,12 @@ currently running:
   `owrt_waw-1` (`.114`), `owrt_lim-1` (`.115`), `owrt_gra-1` (`.116`) got
   their subnets added on both hubs on 2026-10-09 (wg-easy
   `server_allowed_ips`, see `kirks2003/rw_mesh` — `kandev-mesh-access.md`).
-- **PVE → docker VM (management):** the four OVH PVEs carry a persistent
-  `192.168.11x.254/24` on `vmbr1` (`post-up` in `/etc/network/interfaces`),
-  so the PVE host can reach its docker VMs directly. The Hetzner/internal
-  PVEs are on the same bridge as their OWRT VM and docker VMs.
+- **PVE → docker VM (management):** the OVH PVE `vmbr1` bridges have **no
+  host IP** (original state; a temporary `.254` management address added
+  2026-10-09 was reverted the same day). For direct PVE → docker VM access,
+  add a temporary IP: `ip addr add 192.168.11x.254/24 dev vmbr1` and remove
+  it afterwards. The Hetzner/internal PVEs are on the same bridge as their
+  OWRT VM and docker VMs.
 - **All 10 Docker VMs are in the mesh test:** `docker-fsn-1`, `docker-hel-1`,
   `docker-pve101`, `docker-pve102`, `docker-eri-1`, `docker-eri-2`,
   `docker-waw-1`, `docker-waw-2`, `docker-lim-1`, `docker-gra-1` in
