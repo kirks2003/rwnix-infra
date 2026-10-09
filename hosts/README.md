@@ -99,3 +99,23 @@ NPM database, so NPM's renewal timer does not touch them. A host cron
 `/etc/cron.d/letsencrypt-renew` runs `certbot renew` in the `npm-ui` container
 daily (added 2026-10-09). Roll back a host by deleting its server blocks and
 `nginx -s reload`.
+
+## StockSense gateway exposure (nbg-1 + vie-1, 2026-10-09)
+
+StockSense on vm104 is exposed publicly on both gateways, DB-managed NPM
+proxy hosts (wildcard LE cert, no per-host cert work):
+
+| Domain | Gateway | NPM host id |
+|---|---|---|
+| `stocksense.gw-1-nbg-1-de-netcup.rwnix.net` | nbg-1 | 45 |
+| `stocksense.gw-1-vie-1-at-netcup.rwnix.net` | vie-1 | 57 |
+
+Both forward to `192.168.54.111:5005` and use the same two-layer protection
+as `jarvis.*`/`kandev104.*`: the global Authelia `auth_request` gate (see each
+gateway's `nginx-proxy-manager` custom `server_proxy.conf`) **plus** nginx
+Basic Auth from the gateway's admin access list (nbg-1 list 1, vie-1 list 8
+"mesh-admin") — StockSense has no login of its own. Both domains are in the
+Authelia `two_factor` rule list in `authelia/config/configuration.yml`
+(fail-closed `default_policy: deny` otherwise). The per-host location
+(advanced config) includes the `/snippets/proxy.conf` + `websocket.conf`
+includes and strips `Authorization` before the backend.
