@@ -37,6 +37,24 @@ were retired on 2026-10-09. Any future service MCP should document whether it
 is vm104-local/shared or region-local before rollout; do not assume the old
 Vikunja per-gateway pattern still exists. Full context: `vikunja-mcp.md`.
 
+### Jarvis graph brain ingestion policy (added 2026-10-09)
+
+Every Jarvis prompt/answer turn is extracted — one structured LLM call,
+backend-side, fire-and-forget, never the brain — into entities and relation
+connectors in the Neo4j graph DB (the assistant's brain), owner-scoped to the
+signed-in user. **Binding policy: this automatic storage runs only when the
+turn's request carries the Knowledge graph MCP toggle on
+(`mcp.graph === true`).** With the toggle off the turn stores nothing (no
+entities, no relations, no ingest activity entry) and the brain is told so,
+so it does not promise to remember what it cannot store. Admin turns are
+never auto-ingested (service account). The explicit write paths (the brain's
+write tools with the toggle on, the panel's Remove button, the admin's
+cross-owner tools) are deliberate actions and stay unaffected. Enforced in
+`jarvis/server.js` (the `ingestTurn` gate in `chat()`); regression-tested in
+`tests/graph.test.mjs` and `tests/server.test.mjs`. Docs:
+`jarvis/README.md` ("Knowledge graph (Neo4j)" → "Stored policy: ingestion
+only while the toggle is on").
+
 See `kandev-opencode-dsv4f-setup.md` for the Kandev opencode setup details.
 See `kandev-opencode-qwen-setup.md` for the Kandev opencode a1-qwen38-27b setup details.
 See `kandev-credential-setup.md` for the Kandev GitHub PAT credential setup.

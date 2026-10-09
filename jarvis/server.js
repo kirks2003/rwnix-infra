@@ -1510,7 +1510,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
       mcpStates.push("The knowledge graph (MCP graph server) is ON in the user's browser but not configured on this server; do not claim graph access or stored memories.");
     }
   } else {
-    mcpStates.push("The knowledge graph (MCP graph server) is OFF in the user's browser for this request: no graph context and no graph tools are available for this turn, so answer from the conversation history and your own knowledge. Facts from this conversation are still stored in the graph after the answer; the user can enable the MCP knowledge graph toggle to let you read them in future conversations.");
+    mcpStates.push("The knowledge graph (MCP graph server) is OFF in the user's browser for this request: no graph context and no graph tools are available for this turn, so answer from the conversation history and your own knowledge. Nothing from this conversation is stored in the graph while the toggle is off — automatic storage of entities and facts runs only with the toggle on — so if the user asks you to remember, save or track something, say you cannot store it while the MCP knowledge graph toggle is off and that they can switch it on to let you store and read their facts.");
   }
   let vikunjaTools = null;
   let vikunjaClient = null;
@@ -1569,11 +1569,14 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
   conversations.set(user, nextHistory);
   // Store ordinary turns in the knowledge graph after the answer is handed
   // back: fire-and-forget so the spoken reply is never blocked by or fails on
-  // the graph. If this turn already used an explicit graph write tool, do not
-  // run extraction over the prompt/confirmation text: a delete confirmation
-  // such as "X was removed" can otherwise reintroduce X as a fresh negative
-  // fact immediately after deleting it.
-  if (graphStore && !isAdmin(user) && !graphWriteSucceeded) {
+  // the graph. Stored policy: the automatic storage runs only for turns whose
+  // request carries the Knowledge graph MCP toggle on — with it off the turn
+  // stores nothing (and the brain above is told so, so it does not promise to
+  // remember what it cannot store). If this turn already used an explicit
+  // graph write tool, do not run extraction over the prompt/confirmation
+  // text: a delete confirmation such as "X was removed" can otherwise
+  // reintroduce X as a fresh negative fact immediately after deleting it.
+  if (mcpFlags.graph && graphStore && !isAdmin(user) && !graphWriteSucceeded) {
     // The admin is a service account for graph maintenance: ingesting its
     // turns would mint owner=admin copies of every user's entities it touches
     // (renames, corrections), polluting the per-user world. The admin changes

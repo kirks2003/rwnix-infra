@@ -447,16 +447,18 @@ test("chat accepts the per-server mcp flag map, ignores unknown ids and defaults
   assert.match(brainPrompt(), /Web search \(MCP web-search server\) is OFF/);
 });
 
-test("finished chat turns are ingested into the knowledge graph", async (t) => {
+test("finished chat turns with the graph toggle on are ingested into the knowledge graph", async (t) => {
   mode = "graph-ingest";
   t.after(() => { mode = "success"; });
   // The global backend runs without a graph store; GRAPH_MEMORY=1 swaps in
-  // the in-memory graph so the ingest path is verifiable end to end.
+  // the in-memory graph so the ingest path is verifiable end to end. The
+  // automatic storage only runs with the Knowledge graph MCP toggle on
+  // (stored policy), so the turn sends it.
   const graphBackend = await startBackend({ GRAPH_MEMORY: "1" });
   t.after(async () => { graphBackend.process.kill(); await once(graphBackend.process, "exit"); });
   const chat = await auth(graphBackend.origin, "/api/chat", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt: "I like Lego." }),
+    body: JSON.stringify({ prompt: "I like Lego.", mcp: { graph: true } }),
   });
   assert.equal(chat.status, 200);
   // Ingestion is fire-and-forget: poll until the upsert has landed.

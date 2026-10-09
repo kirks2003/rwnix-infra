@@ -4447,3 +4447,38 @@ worth remembering: the `:User` node keys its name as **`name`**, not
 nothing and reports every entity as an orphan), and `/api/graph/subgraph`
 returns **`edges`**, not `links` (so a naive probe reports 0
 relationships). Both looked like data loss and were neither.
+
+## 2026-10-09: graph-brain ingestion only while the Knowledge graph MCP toggle is on
+
+Requested by the user: the automatic storage of prompt/answer entities and
+relation connectors in the graph DB (the brain) must run **only when the
+Knowledge graph MCP toggle is on** for the turn. Before, every answered turn
+was ingested regardless of the toggle, and the brain's system prompt said
+the opposite of the requested policy ("Facts from this conversation are
+still stored in the graph after the answer").
+
+- `server.js` `chat()`: the `ingestTurn` gate is now
+  `mcpFlags.graph && graphStore && !isAdmin(user) && !graphWriteSucceeded`
+  (was `graphStore && !isAdmin(user) && !graphWriteSucceeded`). The
+  graph-OFF brain state line now tells the brain nothing is stored while the
+  toggle is off, so it cannot promise to remember what it cannot store.
+- **Policy stored in MD** (as requested): `jarvis/README.md` — the
+  "populated automatically" bullet, the ingestion guarantee in the
+  per-user-isolation list, and the new "Stored policy: ingestion only while
+  the toggle is on" paragraph — plus the root `AGENTS.md`
+  ("Jarvis graph brain ingestion policy", binding).
+- **Tests:** new regression `tests/graph.test.mjs` "a chat with the graph
+  toggle off stores nothing: no extraction, no entities, no ingest entry"
+  (no extraction call, no activity entry, subgraph node/edge counts
+  unchanged, brain prompt states the policy); the `tests/server.test.mjs`
+  ingest test now sends `mcp: { graph: true }` (it previously relied on the
+  old unconditional ingestion). All other ingest tests already sent the
+  toggle on. Full unit suite 170/170, browser suite 57/57 (2 opt-in live
+  skips).
+- **Effect on live data:** none — no migration, already-stored entities and
+  facts are untouched. Only the auto-write path is gated: with the toggle
+  off, turns stop adding to the graph (and the brain says so when asked to
+  remember); with it on, behaviour is exactly as before.
+- **Rollout:** code-only change (`server.js` + tests + docs; `public/`
+  untouched, so no browser hard refresh). Back up → sync → `docker compose
+  up -d --build` on vm104 → verify (below).
