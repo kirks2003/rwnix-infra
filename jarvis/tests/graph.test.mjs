@@ -1408,6 +1408,33 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   assert.ok(subgraph.edges.some((edge) => edge.type === "FRIEND_OF"));
 });
 
+test("a chat with the graph toggle off stores nothing: no extraction, no entities, no ingest entry", async () => {
+  const origin = origins[1];
+  const cookie = await login(origin, "Roman");
+  const subBefore = await (await auth(origin, "/api/graph/subgraph?limit=60", cookie)).json();
+  const brainExtractionsBefore = extractionRequests;
+  // No mcp map at all: every MCP switch is off, like a default browser.
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ prompt: "I like Pizza very much." }),
+  });
+  assert.equal(response.status, 200);
+  // The brain was told the toggle is off and that nothing is stored while it
+  // is, so it cannot promise to remember what it cannot store.
+  const systemText = (receivedChat.messages || []).map((message) => String(message.content || "")).join("\n");
+  assert.match(systemText, /knowledge graph \(MCP graph server\) is OFF in the user's browser/);
+  assert.match(systemText, /Nothing from this conversation is stored in the graph while the toggle is off/);
+  // Ingestion is fire-and-forget: give it time to have run, then assert it did
+  // not — no extraction call, no ingest activity entry, no new node or edge.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(extractionRequests, brainExtractionsBefore, "no extraction call while the toggle is off");
+  const activity = await (await auth(origin, "/api/graph/activity", cookie)).json();
+  assert.ok(!activity.entries.some((entry) => entry.kind === "ingest" && entry.user === "Roman"), JSON.stringify(activity.entries));
+  const subAfter = await (await auth(origin, "/api/graph/subgraph?limit=60", cookie)).json();
+  assert.equal(subAfter.nodes.length, subBefore.nodes.length, JSON.stringify({ subBefore, subAfter }));
+  assert.equal(subAfter.edges.length, subBefore.edges.length, JSON.stringify({ subBefore, subAfter }));
+});
+
 test("mentioning a registered user stores no entity and the feed says so", async () => {
   const origin = origins[1];
   const romanCookie = await login(origin, "Roman");
