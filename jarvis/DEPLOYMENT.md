@@ -21,6 +21,109 @@ vm104 hosts Jarvis. vm103 hosts the active Whisper STT service. vm104 still has 
 
 Jarvis calls the vm103 Whisper service directly across the internal network at `192.168.53.111:8003`; the prior vm104-local `host.docker.internal:8001` endpoint is not the active Jarvis STT target.
 
+## From-scratch setup
+
+How to rebuild Jarvis on a fresh or replaced host (fatal crash, new VM).
+Everything except the live `.env` files lives in this repo (source of
+truth); the snapshot backups (below) carry the data and the secrets.
+
+1. **Host**: a docker host (canonical: vm104, `192.168.54.111`, on pve104)
+   with docker + compose v2 and a user in the `docker` group.
+2. **Code**: clone `kirks2003/rwnix-infra` and copy:
+   - `jarvis/` → `/home/ubuntu/docker/jarvis` (app, `Dockerfile`,
+     `docker-compose.yml`, `public/`, `mcp/`, tests)
+   - `hosts/vm104/vikunja/` → `/home/ubuntu/docker/vikunja` (the
+     vm104-local Vikunja instance Jarvis uses: `docker-compose.yml`,
+     `Dockerfile`, `mcp-token-owner.sh`)
+3. **Secrets**: from the latest snapshot (`env/jarvis.env` →
+   `/home/ubuntu/docker/jarvis/.env`, `env/vikunja.env` →
+   `/home/ubuntu/docker/vikunja/.env`, `env/vikunja-admin-login.txt` →
+   `/home/ubuntu/docker/vikunja/admin-login.txt`, all `chmod 600`) — this
+   is what `scripts/jarvis/restore-jarvis.sh` does automatically. Without
+   a snapshot, rebuild the `.env` files from `jarvis/.env.example` /
+   `hosts/vm104/vikunja` variables (`VIKUNJA_DB_PASSWORD`,
+   `VIKUNJA_JWT_SECRET`, …) — the stack then starts with **empty**
+   conversation/graph/Vikunja data and you must re-mint the Vikunja
+   per-user API tokens (see `vikunja-mcp.md`).
+4. **Data volumes**: the snapshot's `data/*.tar` parts are extracted into
+   the compose volumes `jarvis_jarvis_data`, `jarvis_neo4j_data`,
+   `vikunja_vikunja_db`, `vikunja_vikunja_files` (the restore script does
+   this; the names must match the compose project names `jarvis` /
+   `vikunja`, i.e. the directory names).
+5. **Start**: `cd /home/ubuntu/docker/vikunja && docker compose up -d`
+   then `cd /home/ubuntu/docker/jarvis && docker compose up -d --build`
+   (the jarvis image build installs Chromium for the web-search MCP, a few
+   minutes).
+6. **Verify**: container `healthy`;
+   `curl http://<host>:8094/api/health`; `curl http://172.17.0.1:34563/api/v1/info`;
+   sign in in the browser and hold one conversation (writes the
+   conversation DB + ingests the graph).
+7. **Public routes** (only if this host replaces vm104): both NPM proxy
+   hosts on the gateways must point at the new backend and the Authelia
+   allowlists must include both Jarvis domains — see "Public routes"
+   above. The voice services (Whisper STT + TTS) live on gpu-1
+   (`hosts/gpu-1/speaches`, `hosts/gpu-1/kokoro-tts`) and are independent
+   of the Jarvis host.
+
+## Snapshot backup (2026-10-09)
+
+A point-in-time snapshot of the whole Jarvis stack for the fatal-crash
+case. Current: **`jarvis-snapshot-v1-20261009T153748Z.tgz`** (8.2 MB,
+sha256 `8e4810f06bd88d19afe0de184f6354e9436b5d9a144a7fb3b361f675b21b1091`,
+taken 2026-10-09 15:37 UTC from vm104 at repo head `797136e`, services
+stopped during the volume tar so the data is crash-consistent).
+
+Contents: `MANIFEST.txt` (version, timestamp, source host, per-part
+sha256), `env/` (live `jarvis/.env`, `vikunja/.env`, Vikunja admin
+login), `data/` (tarballs of `jarvis_jarvis_data` = SQLite conversations,
+`jarvis_neo4j_data` = Neo4j graph, `vikunja_vikunja_db`,
+`vikunja_vikunja_files`), `source/` (deployed app + Vikunja source, no
+node_modules, no `.env*`). The file **contains secrets** — it is stored
+only on the backup hosts, never in git.
+
+Stored in four places (see `snapshot-backups.md` at the repo root for the
+generic policy, naming, retention and inventory):
+
+| Host | Path |
+|---|---|
+| vm104 (source) | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
+| nbg-1 | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
+| vie-1 | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
+| pve102 | `/local-zfs-1/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
+
+Take a new one (from a Kandev sandbox; stops the stack ~1 minute,
+distributes + sha256-verifies all copies, keeps the newest 5 per host):
+
+```
+bash scripts/jarvis/backup-jarvis.sh
+```
+
+## Restoring from a snapshot
+
+On the fresh/rebuilt host (docker + compose v2, user in the docker group),
+copy the snapshot (and its `.sha256`) over, then:
+
+```
+bash scripts/jarvis/restore-jarvis.sh /path/to/jarvis-snapshot-v1-<ts>.tgz
+```
+
+The script verifies the archive checksum and every part against the
+manifest, writes the env files + source to `~/docker/jarvis` and
+`~/docker/vikunja`, restores the four docker volumes, runs
+`docker compose up -d --build` / `up -d`, and blocks until `jarvis` is
+healthy and both `/api/health` and the Vikunja `/api/v1/info` answer. It
+refuses to overwrite an existing deployment without `--force`.
+
+Verified 2026-10-09 end to end on a scratch compose project on vm104
+(project names `jrtest`/`vrtest`, so the live service was untouched):
+checksum + all 50 manifest parts OK, image built from the snapshot source
+(all layers cached), `/api/health` OK, and the restored data is
+**byte-identical to the live service** — `conversations.db` (100
+conversations + 100 embeddings, per-table sha256 match,
+`integrity_check` ok), Neo4j (25 nodes: 22 Entity + 3 User; identical
+relationship type counts), Vikunja (4 users, 4 tasks, 3 API tokens).
+Scratch project torn down afterwards, live service unaffected.
+
 ## Public routes
 
 Both routes point to `http://192.168.54.111:8094` and are protected by the existing global Authelia NPM configuration plus the `mesh-admin` NPM Basic Auth access list.

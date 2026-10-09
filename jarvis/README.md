@@ -293,3 +293,16 @@ node --test --test-name-pattern='candidate backend' tests/pipeline.browser.mjs
 ```
 
 Use a localhost tunnel or HTTPS origin for microphone access. These opt-in checks send the fixture audio and prompt to the configured services.
+
+## Backup & restore
+
+The live deployment keeps crash-recovery **snapshot backups** (data volumes
++ live `.env` + deployed source, sha256-verified, versioned with date and
+time, e.g. `jarvis-snapshot-v1-20261009T153748Z.tgz`) on four hosts: vm104
+(source), nbg-1, vie-1 and pve102. Where they live, how to take a new
+snapshot (`scripts/jarvis/backup-jarvis.sh`) and how to restore from one
+(`scripts/jarvis/restore-jarvis.sh`), plus the from-scratch setup
+procedure, are documented in [`DEPLOYMENT.md`](DEPLOYMENT.md) ("Snapshot
+backup", "Restoring from a snapshot", "From-scratch setup") and
+[`snapshot-backups.md`](../snapshot-backups.md) at the repository root
+(generic policy + inventory).

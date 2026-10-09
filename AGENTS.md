@@ -13,6 +13,20 @@ Recurring mistake (user-reported repeatedly, 2026-10-04): a fix verified in the 
 
 Never report a fix as done based on worktree tests alone.
 
+### Snapshot backups (added 2026-10-09)
+
+Crash-recovery snapshots are versioned with date and time
+(`<service>-snapshot-v<N>-<YYYYMMDDTHHMMSSZ>.tgz` + `.sha256`), contain
+secrets (live `.env` files), so they live **only** on the backup hosts —
+never in git. Jarvis snapshot v1 (`jarvis-snapshot-v1-20261009T153748Z.tgz`)
+is stored on vm104 (`/home/ubuntu/backups/jarvis/`), nbg-1 and vie-1
+(same path) and pve102 (`/local-zfs-1/backups/jarvis/`), each copy
+sha256-verified. Take a new one with `scripts/jarvis/backup-jarvis.sh`
+(from a sandbox; stops the stack ~1 min, keeps newest 5 per host); restore
+a host from scratch with `scripts/jarvis/restore-jarvis.sh`. Policy,
+locations and inventory: `snapshot-backups.md`; Jarvis-specific
+from-scratch setup + verified restore results: `jarvis/DEPLOYMENT.md`.
+
 ### Jarvis service MCP topology (updated 2026-10-09)
 
 Jarvis now uses one vm104-local Vikunja service MCP target for both public

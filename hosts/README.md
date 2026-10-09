@@ -13,7 +13,7 @@ hosts/<host>/<service>/docker-compose.yml     (or compose.yaml where the host us
 |---|---|
 | `nbg-1`, `vie-1` (gateways) | authelia, glances, grafana, kandev, nginx-proxy-manager, openrouter-exporter, ovhcloud-exporter, portainer, tasmota-relay (mosquitto + telegraf), uptime-kuma, victoria-metrics, wetty, wg-easy, wg-easy-mcp |
 | `vm103` | glance, glances, glances-gw1, kandev-1, ollama, portainer, speaches, voice-gpu, vscode, wetty, wetty-gw1 |
-| `vm104` | gitlab, glance, glances, glances-gw1, grafana-1, kandev, kandev-2, kandev104, mariadb ×2, phpmyadmin ×2, portainer, tftp-1, vikunja, vscode, wetty-gw1 — **plus** `jarvis` (compose + Dockerfile live in [`jarvis/`](../jarvis/) at the repo root, not here) |
+| `vm104` | gitlab, glance, glances, glances-gw1, grafana-1, kandev, kandev-2, kandev104, mariadb ×2, phpmyadmin ×2, portainer, tftp-1, vikunja (compose + `Dockerfile` + `mcp-token-owner.sh`), vscode, wetty-gw1, whisper (legacy) — **plus** `jarvis` (compose + Dockerfile live in [`jarvis/`](../jarvis/) at the repo root, not here) |
 | `gpu-1` | cadvisor, fail2ban-exporter, glances, kokoro-tts, llamacpp, nginx-proxy-manager, portainer, speaches, wetty |
 | `gpu-2` | authelia, glances, grafana, kandev, nginx-proxy-manager, openrouter-exporter, ovhcloud-exporter, portainer, uptime-kuma, victoria-metrics, vikunja, wetty |
 
@@ -60,7 +60,10 @@ ovhcloud-exporter on both gateways), `mosquitto.conf` + `telegraf.conf`
 `provisioning/` (grafana), `glances.conf` (gpu-1 glances), `index.html` +
 `nginx.conf` (glance / glances-gw1 on vm103 + vm104), `app.py`
 (vm103 voice-gpu), `gitlab.rb` (vm104 gitlab — root-owned on the host,
-pull it with `ssh vm104 "sudo -n cat …"`).
+pull it with `ssh vm104 "sudo -n cat …"`), `Dockerfile` +
+`mcp-token-owner.sh` (vm104 vikunja — the parked `vikunja-mcp:1.2.3-local`
+sidecar image and the per-user token minting/rotation script; pulled
+2026-10-09).
 
 Still **host-local by design** (never committed):
 
@@ -71,16 +74,24 @@ Still **host-local by design** (never committed):
   (argon2 hash of the gateway admin user — sits in the rw-mounted
   `config/` dir on purpose, the `authelia` CLI writes it),
   `gitlab/config/gitlab-secrets.json` + the `ssh_host_*` keys, the SSH
-  keys under `wetty-gw1/` (both gateways + vm104).
+  keys under `wetty-gw1/` (both gateways + vm104), `vikunja/admin-login.txt`
+  (vm104 Vikunja admin credentials), `vikunja/.env` (DB password + JWT
+  secret + API token), `jarvis/.env` (all service keys — see
+  `jarvis/.env.example`).
 
 (nbg-1 also has a `claude-code-exporter/` dir with `exporter.py` and logs
 but no container — dormant code, not deployed, not tracked here.)
 
 ## Containers without a compose file
 
-Created via `docker run`, no compose on the host — not covered by this tree:
-vm104 `whisper` (legacy, unused by Jarvis), vm104 `mosquitto` + `telegraf`
-(gateway Tasmota stack). If one of these gets a compose file, add it here.
+vm104 `mosquitto` + `telegraf` (gateway Tasmota stack) were created via
+`docker run`, no compose on the host — not covered by this tree. If one of
+these gets a compose file, add it here.
+
+vm104 `whisper` (legacy, unused by Jarvis) was also created via `docker run`
+on the host; a compose file reproducing that setup now lives in the repo
+(`hosts/vm104/whisper/`) so the container definition has a source of truth.
+The live container is still the original `docker run` one.
 
 ## NPM custom proxy hosts (gpu-1)
 

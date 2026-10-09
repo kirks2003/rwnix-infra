@@ -1,0 +1,25 @@
+# Legacy faster-whisper STT server on vm104. Jarvis does NOT use this
+# container (active STT is the gpu-1 speaches service; see jarvis/DEPLOYMENT.md).
+# It was originally created with `docker run`; this compose reproduces that
+# setup so the container definition lives in the repo (source of truth).
+# The /models bind mount is host-local (HuggingFace model cache, ~1.6 GB,
+# re-downloadable — see /home/ubuntu/whisper-models on the host).
+services:
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu@sha256:760e5e43d427dc6cfbbc4731934b908b7de9c7e6d5309c6a1f0c8c923a5b6030
+    container_name: whisper
+    restart: unless-stopped
+    environment:
+      HF_HOME: /models
+      HF_HUB_CACHE: /models/hub
+      WHISPER__MODEL: deepdml/faster-whisper-large-v3-turbo-ct2
+      WHISPER__INFERENCE_DEVICE: cpu
+      UVICORN_HOST: 0.0.0.0
+      UVICORN_PORT: "8000"
+      TZ: Europe/Vienna
+    ports:
+      # Legacy endpoint http://192.168.54.111:8001 (container listens on 8000).
+      - "8001:8000"
+    volumes:
+      - /home/ubuntu/whisper-models:/models
+    command: ["uv", "run", "uvicorn", "--factory", "faster_whisper_server.main:create_app"]
