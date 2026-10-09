@@ -123,6 +123,34 @@
           </ol>
         </section>
 
+        <section class="panel meter-panel meter-panel-mic">
+          <div class="meter-head">
+            <h2>Mic level</h2>
+            <span id="micLevelValue" class="meter-value">0%</span>
+          </div>
+          <progress id="micLevel" max="100" value="0"></progress>
+          <div class="meter-head">
+            <h2>Silence</h2>
+            <span id="silenceValue" class="meter-value">0 ms</span>
+          </div>
+          <progress id="silenceLevel" max="1500" value="0"></progress>
+          <label for="silenceDelay">Silence stop <output id="silenceDelayValue">1.5 s</output></label>
+          <div class="wake-word-controls">
+            <input id="silenceDelay" type="range" min="100" max="5000" step="50" value="1500"
+                   aria-describedby="silenceDelayHelp silenceDelayStatus" disabled>
+          </div>
+          <p id="silenceDelayHelp">How long the microphone must stay quiet before a recorded command is sent to Whisper. Adjusts live, even mid-recording. Saved in this browser only.</p>
+          <p id="silenceDelayStatus" role="status">Loading silence settings.</p>
+          <label for="commandWait">Command wait <output id="commandWaitValue">3 s</output></label>
+          <div class="wake-word-controls">
+            <input id="commandWait" type="range" min="500" max="15000" step="500" value="3000"
+                   aria-describedby="commandWaitHelp commandWaitStatus" disabled>
+          </div>
+          <p id="commandWaitHelp">How long Jarvis waits for a command after the spoken greeting before returning to wake listening. Applies from the next greeting on. Saved in this browser only.</p>
+          <p id="commandWaitStatus" role="status">Loading command wait settings.</p>
+          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it. The green silence bar shows time since the last voice: while wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the configured silence stop point; while waiting for a command after the greeting it fills to the command-wait point.</p>
+        </section>
+
         <section class="graph-panel app-ui" id="graphPanel">
           <div class="graph-head">
             <h2>Knowledge graph</h2>
@@ -157,34 +185,6 @@
             </div>
           </div>
           <p class="graph-help">Read-only for the brain: it queries this graph through the read-only MCP graph server (toggle in the controls below) and can never write or delete. To remove one of your own entities, select it (click its node) and use the Remove button — the admin may remove any entity. Facts are stored automatically after every answered conversation turn.</p>
-        </section>
-
-        <section class="panel meter-panel meter-panel-mic">
-          <div class="meter-head">
-            <h2>Mic level</h2>
-            <span id="micLevelValue" class="meter-value">0%</span>
-          </div>
-          <progress id="micLevel" max="100" value="0"></progress>
-          <div class="meter-head">
-            <h2>Silence</h2>
-            <span id="silenceValue" class="meter-value">0 ms</span>
-          </div>
-          <progress id="silenceLevel" max="1500" value="0"></progress>
-          <label for="silenceDelay">Silence stop <output id="silenceDelayValue">1.5 s</output></label>
-          <div class="wake-word-controls">
-            <input id="silenceDelay" type="range" min="100" max="5000" step="50" value="1500"
-                   aria-describedby="silenceDelayHelp silenceDelayStatus" disabled>
-          </div>
-          <p id="silenceDelayHelp">How long the microphone must stay quiet before a recorded command is sent to Whisper. Adjusts live, even mid-recording. Saved in this browser only.</p>
-          <p id="silenceDelayStatus" role="status">Loading silence settings.</p>
-          <label for="commandWait">Command wait <output id="commandWaitValue">3 s</output></label>
-          <div class="wake-word-controls">
-            <input id="commandWait" type="range" min="500" max="15000" step="500" value="3000"
-                   aria-describedby="commandWaitHelp commandWaitStatus" disabled>
-          </div>
-          <p id="commandWaitHelp">How long Jarvis waits for a command after the spoken greeting before returning to wake listening. Applies from the next greeting on. Saved in this browser only.</p>
-          <p id="commandWaitStatus" role="status">Loading command wait settings.</p>
-          <p class="meter-help">Live microphone level while armed. The capture threshold sits near 1%, so speech only registers once the bar clearly rises above it. The green silence bar shows time since the last voice: while wake listening it fills after you stop talking (the probe fires once speech settles); while recording a command it fills to the configured silence stop point; while waiting for a command after the greeting it fills to the command-wait point.</p>
         </section>
 
         <section class="controls">

@@ -283,7 +283,7 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
     const wrap = document.querySelector(".graph-canvas-wrap");
     const stage = document.getElementById("graph3dStage");
     const section = document.querySelector(".graph-panel");
-    const next = document.querySelector(".meter-panel");
+    const next = document.querySelector(".controls");
     return {
       wrap: wrap.getBoundingClientRect().toJSON(),
       stage: stage.getBoundingClientRect().toJSON(),
@@ -293,7 +293,7 @@ test("the 3D view is the default: an animated live graph with labels", async (t)
   });
   assert.ok(boxes.wrap.height >= boxes.stage.height, `wrap reserves the stage height (wrap ${boxes.wrap.height}, stage ${boxes.stage.height})`);
   assert.ok(boxes.stage.bottom <= boxes.wrap.bottom + 1, "the 3D stage stays inside its wrap");
-  assert.ok(boxes.nextTop >= boxes.sectionBottom, "the meter panel starts below the graph panel");
+  assert.ok(boxes.nextTop >= boxes.sectionBottom, "the controls section starts below the graph panel");
 });
 
 test("the 3D view: clicking a node label re-centres the panel", async (t) => {

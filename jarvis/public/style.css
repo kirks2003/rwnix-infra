@@ -21,10 +21,11 @@
 }
 
 html {
-  /* Global text-size: two 20% shrink passes then two 20% grow passes
-     (0.8 * 0.8 * 1.2 * 1.2); every rem-based font-size in this sheet scales
-     off the root, so this one line covers them all. */
-  font-size: 92.16%;
+  /* Global text-size: two 20% shrink passes, two 20% grow passes, then one
+     10% shrink pass (0.8 * 0.8 * 1.2 * 1.2 * 0.9); every rem-based
+     font-size in this sheet scales off the root, so this one line covers
+     them all. */
+  font-size: 82.944%;
 }
 
 body {
@@ -636,7 +637,8 @@ progress {
   grid-template-rows: auto 1fr auto;
   gap: 10px;
   align-content: start;
-  min-height: 560px;
+  /* Two 80% shrink passes from the original 560px (560 * 0.8 * 0.8). */
+  min-height: 358px;
   padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
   border-radius: 11px;
@@ -668,9 +670,11 @@ progress {
    first, scrollable inside the panel with a visible scrollbar (the window
    is the History slider's day count, see /api/conversation in server.js). */
 .transcript-list {
-  /* 250% taller than before (46px / 182px); the font size is unchanged. */
-  min-height: 161px;
-  max-height: 637px;
+  /* 250% taller than before (46px / 182px), then two 80% shrink passes
+     (161/637 -> 129/510 -> 103/408) so the panel takes less of the
+     screen; the font size is unchanged. */
+  min-height: 103px;
+  max-height: 408px;
   display: grid;
   gap: 14px;
   align-content: start;
@@ -773,10 +777,10 @@ progress {
   font-size: 0.85rem;
 }
 
-/* Knowledge graph: second panel inside #panelsBelow, right under the
-   pipeline panel (the pipeline sits directly below the panels toggle),
-   shown and hidden with the other panels. Display only — the backend is
-   read-only against the graph. */
+/* Knowledge graph: third panel inside #panelsBelow, right under the
+   mic level panel (pipeline, then mic level, sit directly below the
+   panels toggle), shown and hidden with the other panels. Display only —
+   the backend is read-only against the graph. */
 .graph-panel {
   margin: 11px 0;
   padding: 11px;
@@ -995,7 +999,7 @@ progress {
    The root font-size is 1.5x the app's, and the entity/link-text sliders
    start at 150%, so both the chrome and the graph itself read larger here. */
 html.graph-full {
-  font-size: 138.24%;
+  font-size: 124.416%;
 }
 
 .graph-full-body {

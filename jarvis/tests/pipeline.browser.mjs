@@ -1344,8 +1344,8 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   });
   assert.ok(layout.stripHeight < 150,
     `the History strip must stay compact, got ${layout.stripHeight}px`);
-  assert.ok(layout.panelHeight >= 400,
-    `the conversation panels stay tall, got ${layout.panelHeight}px`);
+  assert.ok(layout.panelHeight >= 300,
+    `the conversation panels stay tall (358px min-height), got ${layout.panelHeight}px`);
   assert.ok(layout.panelTop < 500,
     `the conversation panel must start on the first screen, got top ${layout.panelTop}px`);
   assert.ok(layout.historyRight <= layout.sendLeft,

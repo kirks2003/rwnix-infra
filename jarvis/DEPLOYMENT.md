@@ -166,6 +166,104 @@ Chromium probe against the live instance (signed in as `admin`) confirmed the re
 result: all plain buttons 33 px, toggle gaps 11 px / 11 px. Hard refresh
 (`Ctrl+Shift+R`) needed for the new sizes/spacing.
 
+## 2026-10-09: knowledge graph panel moved below the mic level panel
+
+User request: the **Knowledge graph** panel (`#graphPanel` in `public/index.html`)
+now sits **below** the **Mic level** panel instead of above it. The order inside
+`#panelsBelow` is now: pipeline → mic level → knowledge graph → controls →
+endpoint selectors → animation preview → wake word → voice → live log →
+history search. Pure DOM reorder: the panels are plain block flow with
+per-panel margins (no grid, no sibling selectors), so the move touches only
+`index.html`; the 11 px gaps come with the graph panel
+(`.graph-panel { margin: 11px 0 }`) — pipeline→mic 0 px, mic→graph 11 px,
+graph→controls 11 px.
+
+Also updated: the position comments in `public/style.css` and `public/app.js`
+("third panel inside #panelsBelow, right under the mic level panel"), and one
+browser-test assertion in `tests/graph.browser.mjs` that pinned the *old*
+order — the 3D-stage overflow check now compares against the `.controls`
+section, which is the first panel below the graph panel again.
+
+Verified: unit suite 169/169, browser suite 57 pass / 2 opt-in skips
+(including the overflow test). Deployed to vm104 with backup
+`jarvis-code.bak-20261009_090638.tgz`; after `docker compose up -d --build`
+the container was `healthy`, `/api/health` OK (`brainConfigured: true`), and
+the served `index.html` md5 `3728d957cc3a0e55744836849258ef10`, `style.css`
+md5 `634b15e8cde1acacf6f26a657199d766` and `app.js` md5
+`0c6b954848f40331586e2471187430ce` all matched the source. Served DOM order
+confirmed: pipeline (line 87) → mic level (126) → knowledge graph (154) →
+controls (190). Hard refresh (`Ctrl+Shift+R`) needed to see the new order.
+
+## 2026-10-09: conversation panel cut to 80% of its height
+
+User request: the **Conversation** panel should take less vertical space —
+80% of its actual height. The panel height is fully CSS-driven
+(`.transcript-panel { min-height: 560px }` in `public/style.css`, plus the
+scrollable history's `.transcript-list { min-height: 161px; max-height: 637px }`),
+so each fixed value was scaled by 0.8: `min-height: 448px` on the panel,
+`min-height: 129px` / `max-height: 510px` on the list. The panel now renders
+448 px when the history is short and caps at ~690 px (was ~820 px) when it
+is full; fonts, entry layout and the always-visible scrollbar are unchanged.
+The browser test that pins the panel "stays tall" (`panelHeight >= 400` in
+`tests/pipeline.browser.mjs`) still holds.
+
+Verified: unit suite 169/169, browser suite 57 pass / 2 opt-in skips.
+Deployed to vm104 with backup `jarvis-code.bak-20261009_092859.tgz`; after
+`docker compose up -d --build` the container was `healthy`, `/api/health`
+OK (`brainConfigured: true`), and the served `style.css` md5
+`240f6f59d9ee3b727b0ee29aee7a18fd` matched the source (served CSS carries
+`min-height: 448px`, `min-height: 129px`, `max-height: 510px`). Hard refresh
+(`Ctrl+Shift+R`) needed to see the shorter panel.
+
+## 2026-10-09: all text 10% smaller (conversation-panel request round 2)
+
+User re-requested "conversation panel only 80% of actual vertical height"
+plus "the actual text size of all 10% less". The 80% height was already
+live from the deploy above (static assets are served `cache-control:
+no-store`, so any new load has it) — it was **not** re-applied on top of
+itself (that would have made the panel 64% of the original). The new part
+used the sheet's documented global text-size mechanism: `html { font-size }`
+scales every rem-based font-size in the page, so one pass covers all text —
+`92.16% → 82.944%` (× 0.9; the comment now reads
+`0.8 * 0.8 * 1.2 * 1.2 * 0.9`). The full-size graph page keeps its 1.5×
+relation: `html.graph-full` went `138.24% → 124.416%`. Everything in the
+conversation panel is rem-based or `font: inherit` (entries, timestamps,
+Copy buttons, the textarea, the History strip, Send), so the pass covers
+it; px-based bits (scrollbar, graph 2D/3D label calcs) are untouched by
+design, as in the earlier passes.
+
+Verified: unit suite 169/169, browser suite 57 pass / 2 opt-in skips.
+Deployed to vm104 with backup `jarvis-code.bak-20261009_093940.tgz`; after
+`docker compose up -d --build` the container was `healthy`, `/api/health`
+OK (`brainConfigured: true`), and the served `style.css` md5
+`a19af6545018c12398e4dc8af14bb2ad` matched the source (served CSS carries
+`font-size: 82.944%` and `font-size: 124.416%`). Hard refresh
+(`Ctrl+Shift+R`) needed to see the smaller text.
+
+## 2026-10-09: conversation panel cut to 80% of its (new) height, again
+
+The user asked for "conversation panel only 80% of actual vertical height"
+a third time. Asked which they meant, and they confirmed: they saw the
+first 80% version and wanted the same cut applied to the **new** height —
+i.e. 80% of what the panel actually renders now, not another re-do of the
+original. Each fixed value scaled by 0.8 again in `public/style.css`:
+`.transcript-panel` `min-height: 448px → 358px` (560 × 0.8 × 0.8),
+`.transcript-list` `min-height: 129px → 103px`, `max-height: 510px → 408px`.
+The panel now renders 358 px with a short history and caps at ~580 px with
+a full one (was ~820 px originally).
+
+The "stays tall" pin in `tests/pipeline.browser.mjs` (`panelHeight >= 400`)
+predated both cuts and would fail at 358 px, so it moved to `>= 300` with
+the 358px min-height noted in the message.
+
+Verified: unit suite 169/169, browser suite 57 pass / 2 opt-in skips.
+Deployed to vm104 with backup `jarvis-code.bak-20261009_095001.tgz`; after
+`docker compose up -d --build` the container was `healthy`, `/api/health`
+OK (`brainConfigured: true`), and the served `style.css` md5
+`52529281035e482e3b84a3c859ebfda0` matched the source (served CSS carries
+`min-height: 358px`, `min-height: 103px`, `max-height: 408px`). Hard
+refresh (`Ctrl+Shift+R`) needed to see the shorter panel.
+
 ## 2026-10-08 verification notes: plain-HTTP probing of the live UI
 
 Findings from the live Chromium probes in this session (signed in as `admin` / `Roman`
