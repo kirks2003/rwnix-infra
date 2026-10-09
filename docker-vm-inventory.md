@@ -229,9 +229,7 @@ currently running:
 | Host type | User | Auth method |
 |---|---|---|
 | PVE hosts (all) | `root` | SSH key (`~/.ssh/kandev`) |
-| Docker VMs (eri-1 docker-2, waw-1 docker-2) | `ubuntu` | Password: `*$Toor2003*$` |
-| Docker VMs (all others) | `ubuntu` | Password: `ubuntu` |
-| Docker VMs (pve101, pve102) | `ubuntu` | PVE host root key forwarded |
+| **All 10 Docker VMs** | `ubuntu` | **kandev mesh key** (installed 2026-10-09) — key auth from both kandev sandboxes and from the mesh; passwords still work: `ubuntu` (all) except eri-1/waw-1 docker-2: `*$Toor2003*$` |
 
 ### Network reachability
 
@@ -242,11 +240,23 @@ currently running:
 - **pve101, pve102** are behind `owrt011` and were originally only reachable
   via the mesh (through nbg-1/vie-1 → owrt011). Routes were added on
   2026-10-09 to make them reachable from vm104.
-- **OVH Docker VMs** are on isolated `vmbr1` bridges. The PVE host itself has
-  no IP on `vmbr1` — to SSH directly, a temporary IP must be added:
-  `ip addr add 192.168.xxx.254/24 dev vmbr1`.
-- **Hetzner Docker VMs** use a similar isolated bridge setup, but were
-  reachable from vm104 after the routing additions on 2026-10-09.
+- **Docker VMs are reachable from both kandev sandboxes via the WireGuard
+  mesh** (2026-10-09). The OWRT gateway VM on each PVE sits on the PVE's
+  docker bridge (`eth0 192.168.11x.1/24` on `vmbr1`) and advertises the
+  subnet in its hub `AllowedIPs` — fsn-1 (`.111`), hel-1 (`.112`), pve101/102
+  (`.51`/`.52` via owrt011) were already set up; `owrt_eri-1` (`.113`),
+  `owrt_waw-1` (`.114`), `owrt_lim-1` (`.115`), `owrt_gra-1` (`.116`) got
+  their subnets added on both hubs on 2026-10-09 (wg-easy
+  `server_allowed_ips`, see `kirks2003/rw_mesh` — `kandev-mesh-access.md`).
+- **PVE → docker VM (management):** the four OVH PVEs carry a persistent
+  `192.168.11x.254/24` on `vmbr1` (`post-up` in `/etc/network/interfaces`),
+  so the PVE host can reach its docker VMs directly. The Hetzner/internal
+  PVEs are on the same bridge as their OWRT VM and docker VMs.
+- **All 10 Docker VMs are in the mesh test:** `docker-fsn-1`, `docker-hel-1`,
+  `docker-pve101`, `docker-pve102`, `docker-eri-1`, `docker-eri-2`,
+  `docker-waw-1`, `docker-waw-2`, `docker-lim-1`, `docker-gra-1` in
+  `scripts/check-hosts/mesh-test-hosts.txt` (source of truth:
+  `kirks2003/rw_mesh`). Last run 2026-10-09: **50/50 + 50/50, exit 0**.
 
 ### Compose file source of truth
 
