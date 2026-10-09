@@ -29,6 +29,7 @@ See `kandev-credential-setup.md` for the Kandev GitHub PAT credential setup.
 See `kandev-ssh-ps1-setup.md` for the kandev104 SSH key and PS1/bash settings.
 See `scripts/check-hosts/` for the mesh-test script and host list (copies; source of truth is `kirks2003/rw_mesh`).
 See `pve-hosts.md` for the full Proxmox VE host inventory (public + internal, versions, OpenWrt gateway VMs), how to run `mesh-test.sh` from the gateway kandev containers, and the 2026-10-09 mesh test results.
+See `docker-vm-inventory.md` for every PVE Docker VM (IPs, containers, the 5 Wine+MetaTrader5 stacks), how all 10 docker VMs are routed into the mesh via the OWRT gateway VMs (2026-10-09), the kandev key on each, and the PVE `vmbr1 .254` management addresses.
 See `scripts/host/mesh-password-rotate.py` for the emergency password rotation tool (copy; source of truth is `kirks2003/rw_mesh`).
 See `jarvis/README.md` for the browser voice assistant (wake word, Whisper STT, brain, HAL 9000 answer voice, MCP web-search toggle) and `jarvis/DEPLOYMENT.md` for its live deployment, the gpu-1 Whisper/TTS service, the MCP web-search server and the measured voice-pipeline findings.
 See `ovhcloud-exporter.md` for the nbg-1 OVHcloud billing/AI-endpoint-cost exporter, the "Cloud & AI Credits" Grafana dashboard (provisioned-file workflow), the OVH in-arrears billing finding, and the live `usage/current` integration.
