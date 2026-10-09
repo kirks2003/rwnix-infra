@@ -93,6 +93,13 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   The legacy `?token=*** query parameter returns `"Invalid API key."` for
   them (verified: same key, header → 200, query param → invalid). The
   provider module (`app/utils/price_provider.py`) therefore uses header auth.
+- **Finnhub free feed excludes non-US exchanges (2026-10-09)**: `ASML.AS`
+  (Euronext Amsterdam) → `403 "You don't have access to this resource."`;
+  unknown symbols return all-zero quotes (`{"c":0,...}`). yfinance covers
+  `ASML.AS` fine (EUR). Solution: **per-symbol fallback** — the dispatch tries
+  Finnhub once, and for symbols it doesn't serve it silently falls through to
+  yfinance (one attempt only, to spare the 60 calls/min budget). NVDA stays on
+  Finnhub (US real-time), ASML.AS resolves via yfinance in EUR.
 - **`stock_quotes` empty — upstream ETL never ran (2026-10-09)**: the
   upstream ETL populates `stock_quotes` only from NSE/BSE (Indian) lists and
   never ran — the table had **0 rows**, so no stock ever got live price
@@ -136,6 +143,10 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   Corporation (local Indian control query unchanged); `stock_quotes` +
   `watchlists` rows seeded (NVDA @ 230.48 from Finnhub), visible through the
   app's own `Config.DB_PATH`.
+- Per-symbol fallback (2026-10-09): `get_quote_with_retry` with
+  `PRICE_PROVIDER=finnhub` → NVDA `230.48` via Finnhub; ASML.AS `1623.60`
+  (EUR) via yfinance after logged `403 ... falling back to yfinance`; ASML.AS
+  seeded in `stock_quotes` + `watchlists`.
 
 ## Notes / operations
 
@@ -154,21 +165,26 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   `INSERT OR REPLACE INTO stock_quotes (company_name, security_id, scrip_code,
   stock_symbol, current_value, change, p_change, day_high, day_low,
   previous_close, previous_open, updated_on, weighted_avg_price, stock_status)
-  VALUES (…)` with `security_id`/`stock_symbol` = the **plain US ticker**
-  (matches `watchlists.stock_symbol` and the Finnhub symbol). Then add the
-  watchlist row (UI or `INSERT INTO watchlists (user_id, stock_symbol,
-  company_name, added_at, display_order) …`). On the next dashboard reload the
-  `subscribe_watchlist` socket event starts streaming; no restart needed.
-  NVDA (NVIDIA Corporation) was seeded 2026-10-09.
+  VALUES (…)` with `security_id`/`stock_symbol` = the ticker the quote
+  provider will serve (plain US ticker for Finnhub, e.g. `NVDA`; exchange
+  suffixed for yfinance fallback, e.g. `ASML.AS` in EUR) — it must match
+  `watchlists.stock_symbol`. Then add the watchlist row (UI or `INSERT INTO
+  watchlists (user_id, stock_symbol, company_name, added_at, display_order)
+  …`). On the next dashboard reload the `subscribe_watchlist` socket event
+  starts streaming; no restart needed. NVDA and ASML.AS were seeded
+  2026-10-09.
 - **Live-quote provider (2026-10-09)**: live quotes go through
   `app/utils/price_provider.py`, selected by `PRICE_PROVIDER` in the host-local
-  `.env` (`yfinance` default, or `finnhub`). Finnhub free tier = 60 calls/min
-  and real-time US equities only; the 10 s price streamer can track ≈10
-  symbols concurrently on free. Use **plain US tickers** with Finnhub (`ASML`,
-  not `ASML.AS`). Scope: live quotes only — history/fundamentals endpoints
-  (`/api/av/*`, premium dashboard) still call yfinance directly. Flip back any
-  time with `PRICE_PROVIDER=yfinance` (+ container recreate: `docker compose
-  up -d`, a plain `restart` does not re-read `env_file`).
+  `.env` (`yfinance` default, or `finnhub`). With `finnhub`: Finnhub is tried
+  once per symbol, and symbols its feed doesn't serve (403 / zero quote, e.g.
+  Euronext `ASML.AS`) **automatically fall back to yfinance** — so the
+  watchlist can mix US tickers (Finnhub real-time) and non-US listings
+  (yfinance). Finnhub free tier = 60 calls/min; the 10 s streamer can track
+  ≈10 symbols concurrently on free (failed symbols cost one extra call each
+  before falling back). Scope: live quotes only — history/fundamentals
+  endpoints (`/api/av/*`, premium dashboard) still call yfinance directly.
+  Flip back any time with `PRICE_PROVIDER=yfinance` (+ container recreate:
+  `docker compose up -d`, a plain `restart` does not re-read `env_file`).
 - **Rollback**: vm104 `docker compose down` in `/home/ubuntu/docker/stocksense`;
   gpu-1 `docker compose down` in `/home/ubuntu/docker/ollama`; gateway hosts
   via NPM UI (ids 45 / 57); Authelia rule lines are marked
@@ -187,6 +203,10 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
     fallback (yfinance search, `indian_only=False`) so US/EU tickers are
     discoverable in the Add-Stock modal (backup
     `stock_routes.py.bak-20261009`).
+  - 2026-10-09: `price_provider.finnhub_get_quote` raises on zero-quote;
+    `get_quote_with_retry` dispatch changed to per-symbol Finnhub→yfinance
+    fallback (backups `price_provider.py.bak-20261009`,
+    `yfinance_utils.py.bak-20261009b`).
 
 ## Related files
 
