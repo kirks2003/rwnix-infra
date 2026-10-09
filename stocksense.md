@@ -1,5 +1,13 @@
 # StockSense — AI stock prediction (deployment record)
 
+> **REMOVED 2026-10-09** — the whole stack was torn down the same day it was
+> deployed (did not work as expected for the user): gateway NPM hosts deleted
+> (nbg-1 45 / vie-1 57), Authelia `two_factor` lines removed, vm104 app
+> container + volume removed, gpu-1 Ollama container + phi4-mini model data +
+> NPM front (server blocks, htpasswd, `npm-ollama` cert) removed. Compose
+> files dropped from `hosts/` (in git history). Everything below is kept as
+> the measurement/finding record.
+
 Deployed 2026-10-09. Upstream: `upamanyu92/stocksense` @ `470c50e` (see
 `llm_forecasting.md` for the original option comparison that led to this
 deployment).

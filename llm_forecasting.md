@@ -93,6 +93,10 @@ Soll ich eines der GitHub-Repos für dich öffnen oder ein Vikunja-Task zum Ausp
 
 ## Deployment results — StockSense live (2026-10-09)
 
+> **Hinweis:** Die ganze StockSense-Stack wurde am 2026-10-09 wieder
+> entfernt (hat nicht wie erwartet funktioniert). Alles unten ist der
+> Mess-/Findings-Record. Details: `stocksense.md`.
+
 StockSense ist deployed: App auf **vm104** (`http://192.168.54.111:5005` LAN-only,
 plus `stocksense.gw-1-nbg-1-de-netcup.rwnix.net` / `stocksense.gw-1-vie-1-at-netcup.rwnix.net`
 hinter Authelia 2FA + Basic Auth), LLM auf **gpu-1** (Ollama,
