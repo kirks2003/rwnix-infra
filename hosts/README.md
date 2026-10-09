@@ -13,8 +13,8 @@ hosts/<host>/<service>/docker-compose.yml     (or compose.yaml where the host us
 |---|---|
 | `nbg-1`, `vie-1` (gateways) | authelia, glances, grafana, kandev, nginx-proxy-manager, openrouter-exporter, ovhcloud-exporter, portainer, tasmota-relay (mosquitto + telegraf), uptime-kuma, victoria-metrics, vikunja (app + db + parked `vikunja-mcp` sidecar), wetty, wg-easy, wg-easy-mcp |
 | `vm103` | glance, glances, glances-gw1, kandev-1, ollama, portainer, speaches, voice-gpu, vscode, wetty, wetty-gw1 |
-| `vm104` | gitlab, glance, glances, glances-gw1, grafana-1, kandev, kandev-2, kandev104, mariadb ×2, phpmyadmin ×2, portainer, tftp-1, vscode, wetty-gw1 — **plus** `jarvis` (compose + Dockerfile live in [`jarvis/`](../jarvis/) at the repo root, not here) |
-| `gpu-1` | cadvisor, fail2ban-exporter, glances, kokoro-tts, llamacpp, nginx-proxy-manager, portainer, speaches, wetty |
+| `vm104` | gitlab, glance, glances, glances-gw1, grafana-1, kandev, kandev-2, kandev104, mariadb ×2, phpmyadmin ×2, portainer, tftp-1, vscode, wetty-gw1 — **plus** `jarvis` (compose + Dockerfile live in [`jarvis/`](../jarvis/) at the repo root, not here) and `stocksense` (upstream code cloned host-local at `/home/ubuntu/docker/stocksense`, LAN-only :5005; LLM backend is Ollama on gpu-1) |
+| `gpu-1` | cadvisor, fail2ban-exporter, glances, kokoro-tts, llamacpp, nginx-proxy-manager, ollama (phi4-mini q8_0 for StockSense; 127.0.0.1:11434 only, fronted by NPM), portainer, speaches, wetty |
 | `gpu-2` | authelia, glances, grafana, kandev, nginx-proxy-manager, openrouter-exporter, ovhcloud-exporter, portainer, uptime-kuma, victoria-metrics, vikunja, wetty |
 
 ## Deploy procedure (repo → host)
@@ -44,6 +44,7 @@ automatically. Services currently using this pattern (all externalized
 | vm103 / kandev-1 | `CLAUDE_CODE_OAUTH_TOKEN` |
 | gpu-1 / speaches | `API_KEY` |
 | gpu-1 / llamacpp | `LLAMACPP_API_KEY` |
+| vm104 / stocksense | `OLLAMA_HOST`, `OLLAMA_MODEL_NAME`, `OLLAMA_AUTH` (NPM basic-auth for the gpu-1 Ollama front), `FLASK_PORT`, `DEBUG`, `GEMINI_*` (numbers parsed at import; Gemini unused) |
 
 Other services already used `env_file`/`${VAR}` (e.g. vm104 gitlab,
 mariadb, phpmyadmin, grafana-1; both gateways' authelia uses a bind-mounted
@@ -81,3 +82,20 @@ but no container — dormant code, not deployed, not tracked here.)
 Created via `docker run`, no compose on the host — not covered by this tree:
 vm104 `whisper` (legacy, unused by Jarvis), vm104 `mosquitto` + `telegraf`
 (gateway Tasmota stack). If one of these gets a compose file, add it here.
+
+## NPM custom proxy hosts (gpu-1)
+
+Two gpu-1 public endpoints are **not** NPM database-managed proxy hosts; they
+live in a hand-maintained include at
+`nginx-proxy-manager/npm/data/nginx/custom/http.conf` (NPM never rewrites it):
+
+| Domain | Backend | Notes |
+|---|---|---|
+| `voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at` | `127.0.0.1:8003` (speaches) | Jarvis Whisper/TTS; auth is the speaches `API_KEY` in the `Authorization` header (set 2026-10-03) |
+| `ollama.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at` | `127.0.0.1:11434` (ollama) | StockSense LLM; **basic auth** at nginx (`/data/htpasswd/ollama`); LLM tuning (600 s timeouts, no buffering) mirrors the `qwen38-27b-mtp` proxy host (2026-10-09) |
+
+Their Let's Encrypt certs (`npm-voice`, `npm-ollama`) are also outside the
+NPM database, so NPM's renewal timer does not touch them. A host cron
+`/etc/cron.d/letsencrypt-renew` runs `certbot renew` in the `npm-ui` container
+daily (added 2026-10-09). Roll back a host by deleting its server blocks and
+`nginx -s reload`.
