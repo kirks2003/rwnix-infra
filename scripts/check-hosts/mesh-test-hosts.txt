@@ -83,3 +83,18 @@ pve101   root  192.168.101.2
 pve102   root  192.168.102.2
 owrt-pve101  root  192.168.51.1
 owrt-pve102  root  192.168.52.1
+
+# Docker VMs on the PVEs (routed via wg0: the OWRT gateway VM sits on each
+# PVE's docker bridge and advertises the subnet; OVH subnets added to the
+# owrt_eri-1/waw-1/lim-1/gra-1 hub AllowedIPs 2026-10-09; kandev key
+# installed on all 2026-10-09)
+docker-fsn-1  ubuntu  192.168.111.111
+docker-hel-1  ubuntu  192.168.112.111
+docker-pve101 ubuntu  192.168.51.111
+docker-pve102 ubuntu  192.168.52.111
+docker-eri-1  ubuntu  192.168.113.11
+docker-eri-2  ubuntu  192.168.113.12
+docker-waw-1  ubuntu  192.168.114.11
+docker-waw-2  ubuntu  192.168.114.12
+docker-lim-1  ubuntu  192.168.115.11
+docker-gra-1  ubuntu  192.168.116.11
