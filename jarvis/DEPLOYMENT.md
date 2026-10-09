@@ -3679,6 +3679,34 @@ and the 24-day history across a reload).
 It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
 required for clients to pick it up.
 
+## 2026-10-09 — Explicit graph delete no longer re-ingests its confirmation
+
+Symptom: Roman asked Jarvis to remove **StockSense** from his graph. The MCP
+`delete-entity` call succeeded, but the final assistant confirmation contained
+the same entity name ("StockSense ... removed"). The normal post-answer graph
+extractor then read that confirmation text and recreated the entity with
+negative facts (`Roman -INTERESTED_IN-> StockSense` negative,
+`StockSense -RELATED_TO-> phi-mini` negative), so the 3D graph panel still
+showed it.
+
+Fix: `runBrain` now returns whether a graph write tool succeeded during the
+turn. For non-admin users, a successful explicit graph write suppresses the
+automatic post-answer extraction pass for that turn. Ordinary turns still
+auto-ingest, and failed graph writes still do not suppress extraction.
+
+Validation:
+
+- Targeted tests:
+  `node --test tests/mcp-graph.test.mjs tests/graph.test.mjs tests/server.test.mjs`
+  → **114/114 pass**. The regression asserts a successful explicit graph write
+  does not trigger the extractor.
+- Rolled out to vm104 with backup `jarvis-code.bak-<ts>.tgz`,
+  `docker compose up -d --build`, container `healthy`, `/api/health` OK, and
+  live `server.js` md5 matching the source.
+- Cleaned up the live stale Roman-owned `StockSense` entity through
+  `delete-entity`; a follow-up Neo4j query for names containing `StockSense`
+  returned `[]`, so no cleanup/test data remains.
+
 ## 2026-10-09 — Graph self-writes and vm104-local Vikunja
 
 Requested: regular Jarvis users must be able to remove/write their own

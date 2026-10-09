@@ -1121,6 +1121,7 @@ const origins = [];
 let toolRequests = [];
 let finalRequests = [];
 let receivedChat;
+let extractionRequests = 0;
 const MOCK_MCP = fileURLToPath(new URL("./mock-graph-mcp.mjs", import.meta.url));
 const EXTRACT_JSON = JSON.stringify({
   entities: [{ name: "Amelie", type: "person", props: {} }],
@@ -1149,6 +1150,7 @@ before(async () => {
     const systemText = (body.messages || []).map(textOf).join("\n");
     res.setHeader("content-type", "application/json");
     if (systemText.includes("extract knowledge-graph entities")) {
+      extractionRequests += 1;
       const userMention = systemText.includes("user-account-mention");
       const interest = systemText.includes("interest-test");
       return res.end(JSON.stringify({ choices: [{ message: { content: userMention ? USER_MENTION_JSON : interest ? INTEREST_JSON : EXTRACT_JSON } }] }));
@@ -1638,6 +1640,7 @@ test("graph write tools: regular users are self-scoped, admin can target any reg
   // owner parameter: the backend/MCP layer forces owner to the signed-in user.
   toolRequests = [];
   finalRequests = [];
+  extractionRequests = 0;
   const milaLogStart = backend.logs.length;
   const milaResponse = await fetch(`${origin}/api/chat`, {
     method: "POST", headers: { "content-type": "application/json", cookie: milaCookie },
@@ -1662,6 +1665,8 @@ test("graph write tools: regular users are self-scoped, admin can target any reg
     milaActivity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "store-fact" && entry.ok),
     JSON.stringify(milaActivity.entries),
   );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(extractionRequests, 0, "a successful explicit graph write must not be re-ingested from its confirmation text");
 
   // A forged owner for another user still reaches only the guarded MCP
   // server, which returns an error and writes nothing.

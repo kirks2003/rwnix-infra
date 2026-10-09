@@ -1553,7 +1553,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
+  const { data, webResults, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -1567,10 +1567,13 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
   const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer })
     .slice(-Math.max(BRAIN_HISTORY_MESSAGES, historySettings.memoryTurns * 2));
   conversations.set(user, nextHistory);
-  // Store the turn in the knowledge graph after the answer is handed back:
-  // fire-and-forget so the spoken reply is never blocked by or fails on the
-  // graph. This is the app's only write path into the graph.
-  if (graphStore && !isAdmin(user)) {
+  // Store ordinary turns in the knowledge graph after the answer is handed
+  // back: fire-and-forget so the spoken reply is never blocked by or fails on
+  // the graph. If this turn already used an explicit graph write tool, do not
+  // run extraction over the prompt/confirmation text: a delete confirmation
+  // such as "X was removed" can otherwise reintroduce X as a fresh negative
+  // fact immediately after deleting it.
+  if (graphStore && !isAdmin(user) && !graphWriteSucceeded) {
     // The admin is a service account for graph maintenance: ingesting its
     // turns would mint owner=admin copies of every user's entities it touches
     // (renames, corrections), polluting the per-user world. The admin changes
@@ -1914,6 +1917,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
   // Web tool results collected for post-turn ingestion (the extractor reads
   // the search context the turn actually used), separate from the answer.
   const webResults = [];
+  let graphWriteSucceeded = false;
   // search_history is always in the tool set: it is the user's own stored
   // conversation and has no browser toggle, so the brain can always reach
   // back past its in-context window.
@@ -1958,7 +1962,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       toolCalls = graphdb.parseToolCallsFromContent(message?.content);
       fromXml = toolCalls.length > 0;
     }
-    if (!hasTools || !toolCalls.length) return { data, webResults };
+    if (!hasTools || !toolCalls.length) return { data, webResults, graphWriteSucceeded };
     if (round >= GRAPH_TOOL_ROUNDS) {
       // Tool budget spent: force a final answer without tools.
       local.push({ ...message, role: "assistant" }, { role: "system", content: "Tool budget reached. Answer now from what you have gathered." });
@@ -1968,7 +1972,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       });
       const fallbackText = await fallback.text();
       if (!fallback.ok) throw new Error(`Brain HTTP ${fallback.status}: ${fallbackText.slice(0, 500)}`);
-      return { data: JSON.parse(fallbackText), webResults };
+      return { data: JSON.parse(fallbackText), webResults, graphWriteSucceeded };
     }
     // For XML-parsed calls the raw message carries no tool_calls field, so
     // carry the parsed ones on the assistant turn: the tool results below
@@ -1991,6 +1995,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         try {
           const result = await withAbort(mcpGraph.call(name, { ...args, user, admin, users: config.users }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
           const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
+          if (GRAPH_WRITE_TOOL_NAMES.has(name) && !result.isError) graphWriteSucceeded = true;
           recordGraphActivity({ kind: GRAPH_WRITE_TOOL_NAMES.has(name) ? "brain_write" : "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
           local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
         } catch (error) {
