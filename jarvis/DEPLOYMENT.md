@@ -4480,5 +4480,20 @@ still stored in the graph after the answer").
   off, turns stop adding to the graph (and the brain says so when asked to
   remember); with it on, behaviour is exactly as before.
 - **Rollout:** code-only change (`server.js` + tests + docs; `public/`
-  untouched, so no browser hard refresh). Back up → sync → `docker compose
-  up -d --build` on vm104 → verify (below).
+  untouched, so no browser hard refresh).
+- **Verification (2026-10-09 ~21:50 UTC):** backed up as
+  `jarvis-code.bak-20261009_215000.tgz` (code only, the live `.env`
+  untouched), synced `server.js`, `tests/` and `README.md`, and appended
+  this section to the host's `DEPLOYMENT.md` (the host file already
+  carried the not-yet-merged snapshot `20261009T190532Z` docs). After
+  `docker compose up -d --build`: container `healthy`, `/api/health` OK
+  (`brainConfigured: true`), in-image `/app/server.js` md5
+  `cc83faac62a47dc7a33b8d7e9918361e` matches source, and the served
+  `app.js` `0c6b954848f40331586e2471187430ce` / `index.html`
+  `3728d957cc3a0e55744836849258ef10` are unchanged (backend-only change —
+  no browser hard refresh needed). Live probes: a Roman turn with
+  `mcp.graph=false` answered normally with **zero** `graph_ingest_*` log
+  lines (no extraction, no writes), and an admin turn with
+  `mcp.graph=true` answered "the toggle is on" from the ON state line,
+  again with zero ingest lines (admin gate intact); `/api/graph/status`
+  still answers with the live data (31 nodes / 45 edges).
