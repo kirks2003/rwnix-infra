@@ -67,20 +67,23 @@ async function handleMessage(message) {
         const filter = args.about ? ` mentioning "${args.about}"` : "";
         return respond(id, { content: [{ type: "text", text: `Facts about ${user}${filter}: likes -> Lego. (mock data)` }] });
       }
-      // The admin write/delete tools: the mock does not write anything — it
-      // just echoes what the brain's tool loop (with the backend-injected
-      // arguments) sent, so the assertions can pin the call shape.
+      // The write/delete tools: the mock does not write anything. It echoes
+      // allowed calls and mirrors the real MCP server's non-admin owner gate
+      // so tests can pin both self-scoped writes and cross-owner denial.
+      if (["store-entity", "store-fact", "rename-entity", "delete-entity"].includes(name) && args.admin !== true && args.owner && args.owner !== user) {
+        return respond(id, { content: [{ type: "text", text: `${name} can only modify ${user}'s own graph data.` }], isError: true });
+      }
       if (name === "store-entity") {
-        return respond(id, { content: [{ type: "text", text: `Stored ${args.name || "?"} (${args.type || "thing"}) under ${args.owner || "?"}. (mock data)` }] });
+        return respond(id, { content: [{ type: "text", text: `Stored ${args.name || "?"} (${args.type || "thing"}) under ${args.owner || user}. (mock data)` }] });
       }
       if (name === "store-fact") {
-        return respond(id, { content: [{ type: "text", text: `Stored ${args.type || "?"} from ${args.from || "?"} to ${args.to || "?"} under ${args.owner || "?"}. (mock data)` }] });
+        return respond(id, { content: [{ type: "text", text: `Stored ${args.type || "?"} from ${args.from || "?"} to ${args.to || "?"} under ${args.owner || user}. (mock data)` }] });
       }
       if (name === "rename-entity") {
-        return respond(id, { content: [{ type: "text", text: `Renamed ${args.name || "?"} to ${args.newName || "?"} (owner ${args.owner || "?"}); all links kept. (mock data)` }] });
+        return respond(id, { content: [{ type: "text", text: `Renamed ${args.name || "?"} to ${args.newName || "?"} (owner ${args.owner || user}); all links kept. (mock data)` }] });
       }
       if (name === "delete-entity") {
-        return respond(id, { content: [{ type: "text", text: `Deleted ${args.name || "?"} (owner ${args.owner || "?"}). (mock data)` }] });
+        return respond(id, { content: [{ type: "text", text: `Deleted ${args.name || "?"} (owner ${args.owner || user}). (mock data)` }] });
       }
       return respond(id, null, { code: -32602, message: `Unknown tool: ${name}` });
     }

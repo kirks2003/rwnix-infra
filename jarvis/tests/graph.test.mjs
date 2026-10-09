@@ -1161,6 +1161,7 @@ before(async () => {
     // (rejected as unknown before it reaches the MCP server) in the tests.
     const wantsStoreEntity = String(lastUser?.content || "").includes("Store the entity");
     const wantsStoreFact = String(lastUser?.content || "").includes("Store the fact");
+    const wantsOtherOwner = String(lastUser?.content || "").includes("other user");
     const wantsDeleteViaTool = String(lastUser?.content || "").includes("Delete the entity via the graph");
     const wantsRename = String(lastUser?.content || "").includes("Rename the entity");
     // "Call the tool in xml" mimics the brain endpoint that answers with the
@@ -1194,7 +1195,7 @@ before(async () => {
         : wantsStoreEntity
           ? { name: "store-entity", arguments: JSON.stringify({ owner: "Mila", name: "Test Entity", type: "thing" }) }
           : wantsStoreFact
-             ? { name: "store-fact", arguments: JSON.stringify({ owner: "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: false }) }
+             ? { name: "store-fact", arguments: JSON.stringify({ owner: wantsOtherOwner ? "Roman" : "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: false }) }
              : wantsRename
                ? { name: "rename-entity", arguments: JSON.stringify({ owner: "Mila", name: "Berlin", newName: "Berlintown" }) }
                : wantsDeleteViaTool
@@ -1356,11 +1357,11 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.answer, "I checked the graph.");
-// The brain got the parameterized read tools (no Cypher on the surface) and
-  // the user's stored context.
+  // The brain got the parameterized read tools plus self-scoped write tools
+  // (no Cypher on the surface) and the user's stored context.
   assert.equal(toolRequests.length, 1);
   const names = graphToolNames(toolRequests[0].tools);
-  assert.deepEqual(names, ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"]);
+  assert.deepEqual(names, ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"]);
   const systemText = toolRequests[0].messages.map((message) => String(message.content || "")).join("\n");
   assert.match(systemText, /Knowledge graph context/);
   assert.match(systemText, /Known to this user so far:.*Rocky/);
@@ -1594,7 +1595,7 @@ test("admin session: global panel, cross-owner brain tools, full activity feed",
   assert.ok(!milaActivity.entries.some((entry) => entry.user === "admin"), JSON.stringify(milaActivity.entries));
 });
 
-test("admin write tools: offered only to the admin, routed to the MCP server with the injected admin flag and user list", async () => {
+test("graph write tools: regular users are self-scoped, admin can target any registered owner", async () => {
   const origin = origins[1];
   const backend = backends[1];
   const adminCookie = await login(origin, "admin");
@@ -1633,7 +1634,8 @@ test("admin write tools: offered only to the admin, routed to the MCP server wit
     JSON.stringify(activity.entries),
   );
 
-  // A regular user's brain is never offered the write tools...
+  // A regular user's brain is offered the same write tools, but without an
+  // owner parameter: the backend/MCP layer forces owner to the signed-in user.
   toolRequests = [];
   finalRequests = [];
   const milaLogStart = backend.logs.length;
@@ -1644,19 +1646,42 @@ test("admin write tools: offered only to the admin, routed to the MCP server wit
   assert.equal(milaResponse.status, 200);
   assert.deepEqual(
     graphToolNames(toolRequests[0].tools),
-    ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"],
+    ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"],
   );
-  // ...and a forged write-tool call from one is rejected as unknown before
-  // it can reach the MCP server (there is no write surface for non-admins).
-  assert.doesNotMatch(backend.logs.slice(milaLogStart), /MOCK_GRAPH_CALL (store-entity|store-fact|rename-entity|delete-entity)/);
+  const milaSchema = toolRequests[0].tools.find((tool) => tool.function.name === "store-fact").function.parameters;
+  assert.ok(!milaSchema.properties.owner, "regular users are not offered an owner selector");
+  assert.match(backend.logs.slice(milaLogStart), /MOCK_GRAPH_CALL store-fact/);
+  assert.match(backend.logs.slice(milaLogStart), /\\"user\\":\\"Mila\\",\\"admin\\":false,\\"users\\":\[\\"Mila\\",\\"Roman\\",\\"admin\\"\]/);
+  assert.match(backend.logs.slice(milaLogStart), /\\"owner\\":\\"Mila\\"/);
   const milaFinal = finalRequests[finalRequests.length - 1];
   const milaToolMessage = [...milaFinal.messages].reverse().find((message) => message.role === "tool");
-  assert.match(String(milaToolMessage?.content), /Unknown tool/);
-  // The attempted write is audited in the user's own feed as a failed write.
+  assert.match(String(milaToolMessage?.content), /Stored LIKES from Mila to Pizza under Mila/);
+  // The self-scoped write is audited in the user's own feed as a write.
   const milaActivity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
   assert.ok(
-    milaActivity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "store-fact" && entry.ok === false),
+    milaActivity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "store-fact" && entry.ok),
     JSON.stringify(milaActivity.entries),
+  );
+
+  // A forged owner for another user still reaches only the guarded MCP
+  // server, which returns an error and writes nothing.
+  toolRequests = [];
+  finalRequests = [];
+  const crossOwnerLogStart = backend.logs.length;
+  const crossOwnerResponse = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: milaCookie },
+    body: JSON.stringify({ prompt: "Store the fact for other user", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(crossOwnerResponse.status, 200);
+  assert.match(backend.logs.slice(crossOwnerLogStart), /MOCK_GRAPH_CALL store-fact/);
+  assert.match(backend.logs.slice(crossOwnerLogStart), /\\"owner\\":\\"Roman\\"/);
+  const crossOwnerFinal = finalRequests[finalRequests.length - 1];
+  const crossOwnerToolMessage = [...crossOwnerFinal.messages].reverse().find((message) => message.role === "tool");
+  assert.match(String(crossOwnerToolMessage?.content), /can only modify Mila's own graph data/);
+  const crossOwnerActivity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
+  assert.ok(
+    crossOwnerActivity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "store-fact" && entry.ok === false),
+    JSON.stringify(crossOwnerActivity.entries),
   );
 });
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Knowledge-graph MCP server (stdio transport, newline-delimited JSON-RPC 2.0)
 // exposing four parameterized read-only tools to the Jarvis backend — plus
-// four admin-gated write/delete tools (store-entity, store-fact, rename-entity,
-// delete-entity) that ONLY the admin session can use.
+// four write/delete tools (store-entity, store-fact, rename-entity,
+// delete-entity). Regular sessions may write only their own owner scope; the
+// admin session may target any registered owner.
 //
 // This server deliberately does NOT expose free-form Cypher. Neo4j Community
 // has no RBAC, so a raw read tool would let the brain — or a prompt injection
@@ -21,12 +22,11 @@
 // The ONE cross-user exception is the admin session: the backend injects
 // `admin: true` (never the brain) and this file's admin query variants read
 // across all owners, reporting each row's owner. The same injected flag gates
-// the write/delete tools: a call without it is refused before any database
-// access, and the `owner` every write targets must be one of the registered
-// users the backend injects (like `user`, `admin` and `users` — none of them
-// is in the brain's tool schema). The privilege is an app-level session
-// property — there is no way for a non-admin chat turn to reach the admin
-// reads or the write tools.
+// cross-owner writes: non-admin write/delete calls are forced to the injected
+// `user` owner, while admin calls may set `owner` to any registered user the
+// backend injects (`users`). The privilege is an app-level session property —
+// there is no way for a non-admin chat turn to read or mutate another user's
+// data.
 //
 // The write tools mirror the backend ingestion's upserts (upsert keyed by
 // name+owner, the name case-insensitively, user-named endpoints resolve to
@@ -128,8 +128,8 @@ export const QUERIES = {
 const USER_PARAM = { user: { type: "string", description: "The signed-in user (injected by the backend; not set by the brain)." } };
 
 // Exported so tests can pin the surface: four read tools for every session,
-// plus the three admin-gated write/delete tools (refused by the handler for
-// every call that does not carry the backend-injected admin flag).
+// plus four owner-scoped write/delete tools. Non-admin calls are pinned to
+// the backend-injected user; admin calls may name any registered owner.
 export const TOOLS = [
   {
     name: "get-schema",
@@ -151,15 +151,12 @@ export const TOOLS = [
     description: "List the facts stored about the signed-in user (likes, ownership, family, home, work, ...), optionally filtered to one entity (about) or one relation type (relation, e.g. LIKES).",
     inputSchema: { type: "object", properties: { ...USER_PARAM, about: { type: "string", description: "Optional: only facts about this entity name." }, relation: { type: "string", description: "Optional: only this relation type, e.g. LIKES." } } },
   },
-  // Admin-gated write/delete tools. The backend offers them to the brain ONLY
-  // for the admin session and injects `admin: true` per call; the handler
-  // refuses every call without the flag, before any database access. `owner`
-  // is validated against the registered users the backend injects (`users`),
-  // so a write always lands under a real account's name — the cross-user
-  // reach is the point of the admin session, but the owner must exist.
+  // Owner-scoped write/delete tools. Regular sessions may target only the
+  // backend-injected user (owner defaults to that user); admin sessions may
+  // target any registered owner. `admin`/`users` are never in the schema.
   {
     name: "store-entity",
-    description: "ADMIN ONLY: store an entity under a user's name (owner, name, type). An entity named after a registered user becomes that user's :User account node, not an entity.",
+    description: "Store an entity under the signed-in user's name (or, for admin sessions only, another registered owner). An entity named after a registered user becomes that user's :User account node, not an entity.",
     inputSchema: {
       type: "object",
       properties: {
@@ -173,7 +170,7 @@ export const TOOLS = [
   },
   {
     name: "store-fact",
-    description: "ADMIN ONLY: store a fact (a typed link) under a user's name (owner, from, to, type, optional negative). Endpoints named after registered users are their :User account nodes; other endpoints are (or become) the owner's entity copies.",
+    description: "Store a fact (a typed link) under the signed-in user's name (or, for admin sessions only, another registered owner). Endpoints named after registered users are their :User account nodes; other endpoints are (or become) the owner's entity copies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -189,7 +186,7 @@ export const TOOLS = [
   },
   {
     name: "rename-entity",
-    description: "ADMIN ONLY: rename an entity of a user in place (owner, name, newName). All of the entity's links survive the rename — use it for renames instead of delete+store. The new name must be free for that user (case-insensitively) and must not be a registered user's name.",
+    description: "Rename an entity of the signed-in user in place (or, for admin sessions only, another registered owner). All links survive the rename. The new name must be free for that user and must not be a registered user's name.",
     inputSchema: {
       type: "object",
       properties: {
@@ -203,7 +200,7 @@ export const TOOLS = [
   },
   {
     name: "delete-entity",
-    description: "ADMIN ONLY: delete an entity of a user (owner, name) together with its links. :User account nodes can never be deleted. Afterwards the stored graph policy removes any of the owner's entities left without a relation (a path of fact edges) to the user.",
+    description: "Delete an entity of the signed-in user (or, for admin sessions only, another registered owner) together with its links. :User account nodes can never be deleted. Afterwards the stored graph policy removes any of the owner's entities left without a relation to the user.",
     inputSchema: {
       type: "object",
       properties: {
@@ -309,7 +306,8 @@ export function factQuery(type, fromIsUser, toIsUser) {
   return `UNWIND $rows AS row MATCH ${fromPattern} MATCH ${toPattern} MERGE (a)-[r:${type}]->(b) SET r.last_seen = $now, r.negative = $negative`;
 }
 
-// The write/delete tools, gated on the backend-injected admin flag.
+// The write/delete tools. Non-admin calls are owner-scoped to the
+// backend-injected user; admin calls may target any registered owner.
 export const ADMIN_WRITE_TOOLS = new Set(["store-entity", "store-fact", "rename-entity", "delete-entity"]);
 
 // The registered-user list the backend injects (like user/admin): owner must
@@ -329,17 +327,23 @@ function entityTypeOf(value, fallback = "thing") {
   return graphdb.ENTITY_TYPES.has(type) ? type : fallback;
 }
 
-// Argument validation for the admin write tools, run BEFORE any database
-// access (a non-admin call or a malformed argument never reaches the write
-// driver). Returns { ok: false, error } or { ok: true, params }.
+// Argument validation for the write tools, run BEFORE any database access.
+// Non-admin calls are forced to args.user as owner; an explicit different
+// owner is refused. Admin calls may target any registered owner.
+// Returns { ok: false, error } or { ok: true, params }.
 export function validateWriteTool(name, args, users) {
-  if (args.admin !== true) {
-    return { ok: false, error: `${name} is an admin-session tool; the backend injects the admin flag and only admin sessions may use it.` };
-  }
   const userNames = Array.isArray(users) ? users.map((item) => String(item)).filter(Boolean) : [];
-  const owner = canonicalUserOf(args.owner, userNames);
+  const caller = canonicalUserOf(args.user, userNames);
+  if (!caller) {
+    return { ok: false, error: "user must be a registered user (injected by the backend)." };
+  }
+  const requestedOwner = args.owner === undefined || args.owner === null || String(args.owner).trim() === "" ? caller : args.owner;
+  const owner = canonicalUserOf(requestedOwner, userNames);
   if (!owner) {
     return { ok: false, error: `owner must be a registered user${userNames.length ? ` (one of: ${userNames.join(", ")})` : ""}.` };
+  }
+  if (args.admin !== true && owner !== caller) {
+    return { ok: false, error: `${name} can only modify ${caller}'s own graph data.` };
   }
   if (name === "store-entity") {
     const entityName = graphdb.sanitizeName(args.name);
