@@ -97,3 +97,30 @@ NPM's renewal timer does not touch it. A host cron `/etc/cron.d/letsencrypt-rene
 runs `certbot renew` in the `npm-ui` container daily (added 2026-10-09 when a
 second custom host existed; kept because `npm-voice` still needs it). Roll
 back a host by deleting its server blocks and `nginx -s reload`.
+
+## NPM operations notes (2.16, findings from the 2026-10-09 host add/remove work)
+
+- **Install shape differs per host.** nbg-1/vie-1 run the full NPM docker
+  stack (`npm-ui` + `nginx-proxy-manager` containers; nginx lives *in the
+  container* → `docker exec nginx-proxy-manager nginx -t / -s reload`).
+  **gpu-1 has no nginx container**: nginx is a host daemon supervised by
+  `s6-supervise` — reload with `sudo kill -HUP <master pid>` (binary is
+  `/usr/sbin/nginx` but not reachable via `sudo nginx` from the host PATH).
+- **NPM 2.16 API** (when the UI is unavailable): the backend listens on
+  **127.0.0.1:3000** inside the container and mounts routes at the root
+  (e.g. `DELETE /nginx/proxy-hosts/<id>` — no `/api` prefix). DB tables are
+  singular (`user`, `auth`, `proxy_host`, …); the `auth` table holds
+  **password hashes** (`type=password`), not session JWTs — there is no
+  stored token to reuse for API auth.
+- **Programmatic host delete** (graceful, zero-downtime): mint an RS256 JWT
+  with the keypair in `/data/keys.json`, payload
+  `{iss:'api', attrs:{id:<adminUserId>}, scope:['user'], expiresIn:'1d'}`,
+  then call `internalProxyHost.delete(new Access(token), {id})` from a temp
+  script placed in `/app` of the backend container (needs `jsonwebtoken`
+  from the local node_modules). It soft-deletes the row, removes the config
+  file, does a graceful nginx reload, and writes an audit log. Admin user
+  ids: nbg-1 = 1, vie-1 = 2 (id 1 soft-deleted there).
+- **Deleted/unknown host behavior**: NPM `default-site` is `444` — nginx
+  closes the connection without answering, so a removed host looks like a
+  connection drop / `curl 000`, not a 404. That is the expected
+  post-removal verification result.
