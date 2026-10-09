@@ -61,7 +61,6 @@ access_control:
         - 'wg.gw-1-nbg-1-de-netcup.rwnix.net'
         - 'wetty.gw-1-nbg-1-de-netcup.rwnix.net'
         - 'glances.gw-1-nbg-1-de-netcup.rwnix.net'
-        - vikunja.gw-1-nbg-1-de-netcup.rwnix.net
         - 'portainer.gw-1-nbg-1-de-netcup.rwnix.net'
         - 'kandev.gw-1-nbg-1-de-netcup.rwnix.net'
         - 'kuma.gw-1-nbg-1-de-netcup.rwnix.net'

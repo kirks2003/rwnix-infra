@@ -1,4 +1,48 @@
-# Vikunja MCP for Jarvis — design + region policy (2026-10-07)
+# Vikunja MCP for Jarvis — vm104-local deployment (updated 2026-10-09)
+
+## 2026-10-09 current state
+
+Jarvis now uses **one vm104-local Vikunja instance** for both public Jarvis
+entries. The old nbg-1 Vikunja config/data was cloned to
+`vm104:/home/ubuntu/docker/vikunja` (`vikunja` + `vikunja-db`, no parked MCP
+sidecar), published only on the vm104 docker gateway
+`172.17.0.1:34563 -> 3456`, and Jarvis' `VIKUNJA_URLS` maps both compatible
+region keys to `http://host.docker.internal:34563/api/v1`.
+
+The old per-gateway instances are retired:
+
+- nbg-1 and vie-1 NPM `vikunja.*` proxy hosts were disabled in the NPM
+  SQLite DB after backup.
+- `docker compose down` removed `vikunja`, `vikunja-db` and `vikunja-mcp`
+  containers on both gateways; named volumes were left in place as rollback
+  data, and `/home/ubuntu/docker/vikunja-retired-bak-<ts>.tgz` backups were
+  created.
+- vm104's old SSH tunnel services
+  `jarvis-vikunja-tunnel-nbg1.service` and
+  `jarvis-vikunja-tunnel-vie1.service` were disabled/stopped.
+
+Jarvis still resolves a compatibility region from the public `Host` header
+(`nbg-1` / `vie-1`) and caches one MCP child per `(region, user)`, but both
+regions now use the same cloned token map and same local API URL. The token is
+still the scope: Roman's Jarvis turn uses Roman's Vikunja token, Mila's uses
+Mila's; `VIKUNJA_MCP_ALLOW_DELETE` remains unset, so the brain can create and
+update but not delete tasks.
+
+Live validation on 2026-10-09:
+
+- Jarvis container healthy and `/api/health` OK after rebuild.
+- Direct vm104 Vikunja `/api/v1/info` returned `v2.6.0`.
+- Jarvis chat with the Vikunja MCP switch created a smoke task through the
+  vm104-local API, then the task was deleted via the API token; cleanup
+  verified no smoke task remained.
+- Graph MCP smoke verified a regular user can create/delete their own test
+  entity, a different regular user cannot delete it, and the test entity was
+  removed afterward.
+
+The original 2026-10-07 region-pinned design is retained below as historical
+context only; it is no longer the live topology.
+
+# Historical design — region-pinned gateway Vikunja (2026-10-07)
 
 Goal: give the Jarvis brain access to the user's Vikunja task manager through an
 MCP server, where **each Jarvis user acts as their own Vikunja user** (Roman's

@@ -470,16 +470,14 @@ const mcpServers = [
   { id: "graph", label: "Knowledge graph" },
 ];
 
-// Vikunja (the task manager) is a REGION-PINNED service MCP (binding policy,
-// see AGENTS.md): each gateway host runs its own Vikunja instance and a
-// request may only use the instance on its own region — the nbg-1 entry never
-// touches vie-1's tasks and vice versa. The region is resolved per request
-// from the public entry (the gateway's Host header); direct internal access
-// falls back to VIKUNJA_DEFAULT_REGION. VIKUNJA_URLS and VIKUNJA_TOKENS are
-// JSON maps keyed by region; the tokens are keyed by the signed-in user, so
-// the backend pins one @eargollo/vikunja-mcp stdio server per (region, user)
-// to that user's own API token — the token IS the scope, the brain acts as
-// the user's own Vikunja account (read plus additive writes, no delete).
+// Vikunja (the task manager) is a service MCP. The live deployment uses one
+// vm104-local Vikunja instance for both public Jarvis entries; we keep the
+// Host-derived region keys for compatibility, but both can point to the same
+// API URL. VIKUNJA_URLS and VIKUNJA_TOKENS are JSON maps keyed by region; the
+// tokens are keyed by the signed-in user, so the backend pins one
+// @eargollo/vikunja-mcp stdio server per (region, user) to that user's own
+// API token — the token IS the scope, the brain acts as the user's own
+// Vikunja account (read plus additive writes, no delete).
 const VIKUNJA_HOST_REGIONS = {
   "jarvis.gw-1-nbg-1-de-netcup.rwnix.net": "nbg-1",
   "jarvis.gw-1-vie-1-at-netcup.rwnix.net": "vie-1",
@@ -1355,10 +1353,10 @@ const mcpWebSearch = new McpClient(process.execPath, [process.env.MCP_SEARCH_SCR
 // reach every node — including other users' personal data. Instead each
 // query is built inside the server, pinned to the signed-in user that this
 // backend injects into the arguments of every call, over the read-only
-// database user. On top of the reads, the admin session gets four
-// admin-gated write/delete tools (store-entity, store-fact, rename-entity,
-// delete-entity) that run over the write database user; the server refuses
-// them for every call that does not carry the backend-injected admin flag.
+// database user. On top of the reads, regular sessions get four write/delete
+// tools scoped to their own owner; the admin session gets the cross-owner
+// variants. The server re-validates the injected user/admin/users arguments
+// before any write reaches the write database user.
 // MCP_GRAPH_SCRIPT lets tests point the client at a mock server, same
 // pattern as MCP_SEARCH_SCRIPT.
 const mcpGraph = new McpClient(
@@ -1496,13 +1494,12 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
           // The admin session is the one place allowed to see every user's
           // data: the tools run across all owners, so the privacy line above
           // (which would contradict that) is NOT added here. It is also the
-          // only session whose brain gets the write/delete tools — the same
-          // cross-owner privilege, for writes.
-          mcpStates.push("The knowledge graph (MCP graph server) is ON and you are the administrator of it: the four read-only tools show you ALL users' data — get-schema (labels, relation types, property keys), get-entity(name) (every owner's copy of an entity, its data and its links), list-my-knowledge (every user's stored entities, grouped per user) and list-my-facts(about?, relation?) (every user's stored facts — likes, ownership, family, home, work, watched topics). You can also MODIFY the graph — this is the only session with write access: store-entity(owner, name, type) stores an entity under any user's name (type: person, place, organization, event, topic or thing), store-fact(owner, from, to, type, negative?) stores a fact between two endpoints (entities or registered users) under any user's name, rename-entity(owner, name, newName) renames an entity of any user in place — all of its links survive, so ALWAYS use it for renames, never delete+store — and delete-entity(owner, name) removes an entity of any user together with its links. Use them when the admin asks you to store, correct, rename or remove stored knowledge — including another user's stored data — and confirm exactly what changed. When asked what is stored about the graph or about any user, answer from the read tools and attribute each item to its user (e.g. 'Mila: likes Lego; Roman: no stored facts'). Seeing other users' data is allowed in this admin session only — never present another user's data as the admin's own, and do not guess. Admin conversations do NOT update the graph automatically — only your explicit store-entity, store-fact, rename-entity and delete-entity calls change it, so make those calls and confirm exactly what changed instead of claiming you cannot write.");
+          // only session whose brain gets cross-owner write/delete tools.
+          mcpStates.push("The knowledge graph (MCP graph server) is ON and you are the administrator of it: the four read tools show you ALL users' data — get-schema (labels, relation types, property keys), get-entity(name) (every owner's copy of an entity, its data and its links), list-my-knowledge (every user's stored entities, grouped per user) and list-my-facts(about?, relation?) (every user's stored facts — likes, ownership, family, home, work, watched topics). You can also MODIFY any user's graph data: store-entity(owner, name, type) stores an entity under any user's name (type: person, place, organization, event, topic or thing), store-fact(owner, from, to, type, negative?) stores a fact between two endpoints (entities or registered users) under any user's name, rename-entity(owner, name, newName) renames an entity of any user in place — all of its links survive, so ALWAYS use it for renames, never delete+store — and delete-entity(owner, name) removes an entity of any user together with its links. Use them when the admin asks you to store, correct, rename or remove stored knowledge — including another user's stored data — and confirm exactly what changed. When asked what is stored about the graph or about any user, answer from the read tools and attribute each item to its user (e.g. 'Mila: likes Lego; Roman: no stored facts'). Seeing other users' data is allowed in this admin session only — never present another user's data as the admin's own, and do not guess. Admin conversations do NOT update the graph automatically — only your explicit store-entity, store-fact, rename-entity and delete-entity calls change it, so make those calls and confirm exactly what changed instead of claiming you cannot write.");
         } else {
           mcpStates.push(graphText
-            ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call four read-only tools about the graph: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about) and list-my-facts(about?, relation?) (the facts stored about this user — likes, ownership, family, home, work, watched topics). If the user asks what you remember or know about them, answer from the graph context, these tools and the conversation history. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess. Your graph tools are read-only, but the graph is updated automatically after every answer from the conversation — so when the user asks you to save, remember or track topics or assign them to a named list (e.g. 'add X to my trading news list' or 'assign X to my TradingMonitor list'), confirm that it is done instead of claiming you cannot write; the topics are stored (as WATCHES and PART_OF facts, a named list as its own entity) and visible in the graph context and the list-my-facts tool from the next turn on."
-            : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with the get-schema, get-entity, list-my-knowledge and list-my-facts tools. New facts are stored automatically after every answer — so when the user asks you to save, remember or track topics or assign them to a named list (e.g. 'add X to my trading news list' or 'assign X to my TradingMonitor list'), confirm that it is done instead of claiming you cannot write; the topics are stored (as WATCHES and PART_OF facts, a named list as its own entity) after your answer.");
+            ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call graph tools scoped to this signed-in user: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about), list-my-facts(about?, relation?) (the facts stored about this user), plus store-entity(name, type), store-fact(from, to, type, negative?), rename-entity(name, newName) and delete-entity(name) for this user's OWN graph data only. Use delete-entity when the user asks you to forget or remove one of their stored entities; never claim you can delete or change another user's data. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see or modify data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess. The graph is updated automatically after every answer, so when the user asks you to save, remember or track topics or assign X to my TradingMonitor list, either use the write tool immediately or confirm that it is done; automatic storage writes WATCHES and PART_OF facts as needed."
+            : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with get-schema, get-entity, list-my-knowledge and list-my-facts, and you may use store-entity, store-fact, rename-entity or delete-entity only for this signed-in user's own graph data. New facts are also stored automatically after every answer — so when the user asks you to save, remember or track topics or assign them to a named list (e.g. 'add X to my trading news list' or 'assign X to my TradingMonitor list'), confirm that it is done instead of claiming you cannot write; the topics are stored (as WATCHES and PART_OF facts, a named list as its own entity) after your answer.");
         }
       } catch (error) {
         if (signal.aborted) throw error;
@@ -1588,13 +1585,13 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 // The graph tools offered to the brain when the knowledge graph toggle is on.
 // Parameterized reads — there is no Cypher on the surface: mcp/graph.mjs
 // builds every query itself, pinned to the signed-in user (injected by this
-// backend per call), so a chat turn can neither write to the graph nor reach
-// another user's data. For the admin session the same four tool names run
-// across all owners (the backend injects `admin: true` per call — never the
-// brain), the descriptions say so, and four write/delete tools are offered
-// on top (store-entity, store-fact, rename-entity, delete-entity) — the only
-// place in the app where the brain can write to the graph. The MCP server independently
-// refuses every write call without the injected admin flag.
+// backend per call), so a chat turn can never reach another user's data. The
+// same owner pin now applies to write/delete tools for regular users: they
+// can correct or remove their own stored graph data, but not another user's.
+// For the admin session the same read tools run across all owners and the
+// write tools accept an owner argument (the backend injects `admin: true` per
+// call — never the brain). The MCP server independently enforces the owner
+// and admin gates.
 // Five rounds: a schema call plus a few follow-ups is the common pattern.
 const GRAPH_TOOL_ROUNDS = 5;
 const GRAPH_TOOL_TIMEOUT_MS = 15000;
@@ -1642,25 +1639,25 @@ function graphTools(admin) {
       },
     },
   ];
-  // Admin session only: the cross-user write/delete surface. `owner` is a
-  // registered user (validated server-side against the injected user list),
-  // so the admin can store or remove knowledge under ANY user's name — the
-  // MCP server enforces the admin gate independently of this offer.
-  if (admin) {
-    tools.push(
+  // Write/delete surface. Regular sessions get their own scoped variant (no
+  // owner parameter is exposed; the backend injects owner=user). The admin
+  // session gets the cross-user variant with an explicit registered owner.
+  tools.push(
       {
         type: "function",
         function: {
           name: "store-entity",
-          description: "Store an entity under a user's name (admin only): owner (a registered user), name, type (person, place, organization, event, topic or thing). An entity named after a registered user becomes that user's account node.",
+          description: admin
+            ? "Store an entity under a user's name (admin only): owner (a registered user), name, type (person, place, organization, event, topic or thing). An entity named after a registered user becomes that user's account node."
+            : "Store an entity in this signed-in user's own graph: name and type (person, place, organization, event, topic or thing). An entity named after a registered user becomes that user's account node.",
           parameters: {
             type: "object",
             properties: {
-              owner: { type: "string", description: "The registered user the entity is stored for, e.g. 'Mila'." },
+              ...(admin ? { owner: { type: "string", description: "The registered user the entity is stored for, e.g. 'Mila'." } } : {}),
               name: { type: "string", description: "The entity name, e.g. 'Berlin'." },
               type: { type: "string", description: "One of: person, place, organization, event, topic, thing (default thing)." },
             },
-            required: ["owner", "name"],
+            required: admin ? ["owner", "name"] : ["name"],
           },
         },
       },
@@ -1668,17 +1665,19 @@ function graphTools(admin) {
         type: "function",
         function: {
           name: "store-fact",
-          description: "Store a fact (a typed link) under a user's name (admin only): owner (a registered user), from, to, type (e.g. LIKES, LIVES_IN, WATCHES), negative (true for 'doesn't like'). Endpoints named after registered users are their account nodes; other endpoints are (or become) the owner's entities.",
+          description: admin
+            ? "Store a fact (a typed link) under a user's name (admin only): owner (a registered user), from, to, type (e.g. LIKES, LIVES_IN, WATCHES), negative (true for 'doesn't like'). Endpoints named after registered users are their account nodes; other endpoints are (or become) the owner's entities."
+            : "Store a fact (a typed link) in this signed-in user's own graph: from, to, type (e.g. LIKES, LIVES_IN, WATCHES), negative (true for 'doesn't like'). Endpoints named after registered users are their account nodes; other endpoints are (or become) this user's entities.",
           parameters: {
             type: "object",
             properties: {
-              owner: { type: "string", description: "The registered user the fact is stored for, e.g. 'Mila'." },
+              ...(admin ? { owner: { type: "string", description: "The registered user the fact is stored for, e.g. 'Mila'." } } : {}),
               from: { type: "string", description: "The source name (a user or an entity)." },
               to: { type: "string", description: "The target name (a user or an entity)." },
               type: { type: "string", description: "The relation type, e.g. LIKES (UPPER_SNAKE_CASE)." },
               negative: { type: "boolean", description: "True when the fact is negated ('doesn't like' = LIKES + negative)." },
             },
-            required: ["owner", "from", "to", "type"],
+            required: admin ? ["owner", "from", "to", "type"] : ["from", "to", "type"],
           },
         },
       },
@@ -1686,15 +1685,17 @@ function graphTools(admin) {
         type: "function",
         function: {
           name: "rename-entity",
-          description: "Rename an entity of a user in place (admin only): owner (a registered user), name and newName. All of the entity's links survive the rename — use it for renames instead of delete+store. The new name must be free for that user (case-insensitively) and must not be a registered user's name.",
+          description: admin
+            ? "Rename an entity of a user in place (admin only): owner (a registered user), name and newName. All of the entity's links survive the rename — use it for renames instead of delete+store. The new name must be free for that user (case-insensitively) and must not be a registered user's name."
+            : "Rename one of this signed-in user's own entities in place: name and newName. All links survive the rename — use it for renames instead of delete+store. The new name must be free for this user and must not be a registered user's name.",
           parameters: {
             type: "object",
             properties: {
-              owner: { type: "string", description: "The registered user who owns the entity, e.g. 'Roman'." },
+              ...(admin ? { owner: { type: "string", description: "The registered user who owns the entity, e.g. 'Roman'." } } : {}),
               name: { type: "string", description: "The current entity name, e.g. 'TradingMonitor List'." },
               newName: { type: "string", description: "The new entity name, e.g. 'Trading'." },
             },
-            required: ["owner", "name", "newName"],
+            required: admin ? ["owner", "name", "newName"] : ["name", "newName"],
           },
         },
       },
@@ -1702,19 +1703,20 @@ function graphTools(admin) {
         type: "function",
         function: {
           name: "delete-entity",
-          description: "Delete an entity of a user together with its links (admin only): owner (a registered user) and name. Account nodes of users can never be deleted.",
+          description: admin
+            ? "Delete an entity of a user together with its links (admin only): owner (a registered user) and name. Account nodes of users can never be deleted."
+            : "Delete one of this signed-in user's own entities together with its links. Account nodes of users can never be deleted.",
           parameters: {
             type: "object",
             properties: {
-              owner: { type: "string", description: "The registered user who owns the entity, e.g. 'Roman'." },
+              ...(admin ? { owner: { type: "string", description: "The registered user who owns the entity, e.g. 'Roman'." } } : {}),
               name: { type: "string", description: "The entity name to delete, e.g. 'Berlin'." },
             },
-            required: ["owner", "name"],
+            required: admin ? ["owner", "name"] : ["name"],
           },
         },
       },
-    );
-  }
+  );
   return tools;
 }
 
@@ -1979,12 +1981,12 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       let args = {};
       try { args = JSON.parse(call.function?.arguments || "{}"); } catch { /* malformed args -> error result below */ }
       const started = Date.now();
-      if (useTools && (GRAPH_TOOL_NAMES.has(name) || (admin && GRAPH_WRITE_TOOL_NAMES.has(name)))) {
+      if (useTools && (GRAPH_TOOL_NAMES.has(name) || GRAPH_WRITE_TOOL_NAMES.has(name))) {
         // The session user, the admin flag and the registered user list are
         // injected HERE, not in the brain's tool schema: the brain (or a
         // prompt injection riding on it) can only ever target the signed-in
-        // user's own data — the cross-owner admin queries and the write
-        // tools are reachable only for the admin session (the spread order
+        // user's own data — cross-owner admin queries and cross-owner writes
+        // are reachable only for the admin session (the spread order
         // means a brain-supplied user/admin/users can never win).
         try {
           const result = await withAbort(mcpGraph.call(name, { ...args, user, admin, users: config.users }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);

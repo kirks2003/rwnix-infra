@@ -34,7 +34,7 @@ test("no query uses the nonexistent direction() Cypher function", () => {
   }
 });
 
-test("the MCP tool surface: four read tools plus four admin-gated write/delete tools, never free-form Cypher", () => {
+test("the MCP tool surface: four read tools plus four owner-scoped write/delete tools, never free-form Cypher", () => {
   const names = TOOLS.map((tool) => tool.name);
   assert.deepEqual(
     [...names].sort(),
@@ -209,15 +209,19 @@ test("factQuery: one query per endpoint-kind pair, typed and owner-pinned, no in
   assert.match(factQuery("INTERESTED_IN", false, false), /\[r:INTERESTED_IN\]/);
 });
 
-test("validateWriteTool: the admin flag and a registered owner gate every write call", () => {
+test("validateWriteTool: regular users can write only their own owner scope, admin can target any registered owner", () => {
   const users = ["Mila", "Roman", "admin"];
   const base = { user: "admin", users };
-  // Without the backend-injected admin flag: refused, whatever else is set
-  // (the brain can never set it; a forged flag is overridden by the
-  // backend's injection).
+  // Non-admin callers may omit owner: it defaults to the injected user.
+  const selfDelete = validateWriteTool("delete-entity", { user: "Mila", users, name: "Berlin" }, users);
+  assert.equal(selfDelete.ok, true, JSON.stringify(selfDelete));
+  assert.deepEqual(selfDelete.params, { owner: "Mila", name: "Berlin" });
+  // But an explicit different owner is refused before any database access:
+  // a regular user cannot remove or rewrite another user's graph entity.
   for (const tool of ["store-entity", "store-fact", "rename-entity", "delete-entity"]) {
-    const result = validateWriteTool(tool, { ...base, owner: "Mila", name: "Berlin", newName: "Berlintown", from: "Mila", to: "Pizza", type: "LIKES" }, users);
-    assert.equal(result.ok, false, `${tool} without the admin flag`);
+    const result = validateWriteTool(tool, { user: "Roman", users, owner: "Mila", name: "Berlin", newName: "Berlintown", from: "Roman", to: "Pizza", type: "LIKES" }, users);
+    assert.equal(result.ok, false, `${tool} cross-owner as regular user`);
+    assert.match(result.error, /Roman's own graph data/);
   }
   // The owner must be a registered user (case-insensitive, canonicalised to
   // the configured spelling) — a brain or a prompt injection cannot mint

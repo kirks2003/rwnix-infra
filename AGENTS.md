@@ -13,9 +13,15 @@ Recurring mistake (user-reported repeatedly, 2026-10-04): a fix verified in the 
 
 Never report a fix as done based on worktree tests alone.
 
-### Jarvis region policy — service MCP connections are region-pinned (2026-10-07)
+### Jarvis service MCP topology (updated 2026-10-09)
 
-**Jarvis on nbg-1 must use only service MCP connections to services on the nbg-1 host; Jarvis on vie-1 only to services on the vie-1 host.** No service MCP connection may cross regions (Vikunja today, any future service MCP included). Today one Jarvis backend (vm104) sits behind both public gateways, so the region is resolved **per request** from the public entry (gateway `Host` header) and the backend pins that region's service endpoints for the request; a user's service data is per region by design. Any new service MCP must ship with a per-region endpoint table from day one — never one global URL. Full context (Vikunja topology, per-user token design, rollout steps): `vikunja-mcp.md`.
+Jarvis now uses one vm104-local Vikunja service MCP target for both public
+entries. Keep the Host-header region keys (`nbg-1`, `vie-1`) in Jarvis config
+for compatibility, but both map to the same vm104 Vikunja API
+(`host.docker.internal:34563`). The old gateway Vikunja instances/exposures
+were retired on 2026-10-09. Any future service MCP should document whether it
+is vm104-local/shared or region-local before rollout; do not assume the old
+Vikunja per-gateway pattern still exists. Full context: `vikunja-mcp.md`.
 
 See `kandev-opencode-dsv4f-setup.md` for the Kandev opencode setup details.
 See `kandev-opencode-qwen-setup.md` for the Kandev opencode a1-qwen38-27b setup details.

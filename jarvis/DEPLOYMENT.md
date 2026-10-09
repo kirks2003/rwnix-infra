@@ -3679,6 +3679,57 @@ and the 24-day history across a reload).
 It is a static-asset change, so a **browser hard refresh** (Ctrl+Shift+R) is
 required for clients to pick it up.
 
+## 2026-10-09 — Graph self-writes and vm104-local Vikunja
+
+Requested: regular Jarvis users must be able to remove/write their own
+knowledge-graph entities, never another user's; Vikunja should move from the
+two gateway-host instances to one vm104-local instance used by Jarvis; old
+gateway Vikunja exposure/containers should be removed after validation.
+
+- **Graph MCP write policy** — `mcp/graph.mjs` still has no raw Cypher tool.
+  Regular sessions now get `store-entity`, `store-fact`, `rename-entity` and
+  `delete-entity`, but the MCP server forces the owner to the backend-injected
+  signed-in user and refuses any explicit different owner before database
+  access. The admin session keeps the cross-owner variant with an explicit
+  registered `owner`. `server.js` offers the self-scoped write schemas to
+  regular users (no `owner` selector) and keeps audit entries as
+  `brain_write`.
+- **Vikunja on vm104** — cloned nbg-1 Vikunja config/data to
+  `/home/ubuntu/docker/vikunja` on vm104. The new compose is tracked at
+  `hosts/vm104/vikunja/docker-compose.yml`: `vikunja-db` +
+  `vikunja/vikunja:2.6.0`, no parked `vikunja-mcp` sidecar, API bound only to
+  `172.17.0.1:34563` for Jarvis (`host.docker.internal:34563` from inside the
+  Jarvis container).
+- **Jarvis MCP config** — vm104 `.env` now maps both compatibility region keys
+  to the same local API URL:
+  `{"nbg-1":"http://host.docker.internal:34563/api/v1","vie-1":"http://host.docker.internal:34563/api/v1"}`.
+  The `VIKUNJA_TOKENS` map was cloned from the nbg-1 tokens under both region
+  keys, matching the cloned database.
+- **Gateway retirement** — after live validation, nbg-1 and vie-1 NPM
+  `vikunja.*` proxy hosts were disabled in NPM's SQLite DB (DB backed up
+  first), `docker compose down` removed `vikunja`, `vikunja-db` and
+  `vikunja-mcp` containers on both gateways, and vm104's old
+  `jarvis-vikunja-tunnel-nbg1.service` / `-vie1.service` units were disabled
+  and stopped. Gateway named volumes were left in place for rollback; host
+  directory backups were written as `vikunja-retired-bak-<ts>.tgz`.
+
+Validation:
+
+- Targeted tests:
+  `node --test tests/mcp-graph.test.mjs tests/graph.test.mjs tests/server.test.mjs`
+  → **114/114 pass**.
+- Live Jarvis: container `healthy`, `/api/health` OK.
+- Live graph smoke: a Mila-owned temporary entity was stored, Roman's attempt
+  to delete it was denied, Mila deleted it, and `get-entity` confirmed it was
+  gone (no graph test data left).
+- Live Vikunja smoke: a Jarvis chat turn with the Vikunja MCP switch created a
+  vm104-local smoke task for Roman; the task was then deleted via the Vikunja
+  API token and verified absent (no smoke task left).
+- Direct vm104 Vikunja `/api/v1/info` returned `v2.6.0`; Jarvis stayed healthy
+  after the gateway containers and old tunnels were removed.
+
+No static browser assets changed, so no hard refresh is required.
+
 ## 2026-10-07 — Vikunja task manager MCP (region-pinned service MCP)
 
 The brain gained a third MCP server, **Vikunja** (`id: "vikunja"`): each

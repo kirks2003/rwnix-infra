@@ -62,7 +62,6 @@ access_control:
         - portainer.gw-1-vie-1-at-netcup.rwnix.net
         - wetty.gw-1-vie-1-at-netcup.rwnix.net
         - glances.gw-1-vie-1-at-netcup.rwnix.net
-        - vikunja.gw-1-vie-1-at-netcup.rwnix.net
         - kuma.gw-1-vie-1-at-netcup.rwnix.net
         - wg.gw-1-vie-1-at-netcup.rwnix.net
         - kandev.gw-1-vie-1-at-netcup.rwnix.net
