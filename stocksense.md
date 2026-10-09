@@ -93,6 +93,18 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   The legacy `?token=*** query parameter returns `"Invalid API key."` for
   them (verified: same key, header → 200, query param → invalid). The
   provider module (`app/utils/price_provider.py`) therefore uses header auth.
+- **`stock_quotes` empty — upstream ETL never ran (2026-10-09)**: the
+  upstream ETL populates `stock_quotes` only from NSE/BSE (Indian) lists and
+  never ran — the table had **0 rows**, so no stock ever got live price
+  streaming and the watchlist's price `JOIN` always returned NULL. US tickers
+  are never covered by that ETL at all — they must be seeded manually (see
+  "Adding a US/EU ticker" below). Note: all app tables live in
+  `app/db/stock_predictions.db`, not `stocks.db` (which is empty).
+- **Search was India-only (2026-10-09, fixed)**: the Add-Stock modal uses
+  `/api/stocks/suggestions`, which only searched the local tables (bundled
+  NSE/BSE list) with no external fallback — US tickers like NVDA were
+  undiscoverable. Local patch: external fallback to
+  `search_companies_by_name(indian_only=False)` when local search is empty.
 - **Chart.js flicker loop (2026-10-09, fixed)**: the UI flickered — graphs
   widening and resetting, whole page shaking in milliseconds. Root cause is a
   known Chart.js responsive bug (chartjs/Chart.js#5805, #3428): a
@@ -120,6 +132,10 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   in-container `get_quote_with_retry('ASML')` → `1769.79` via Finnhub
   (header auth); yfinance fallback (env override) → `1769.7900390625`, same
   price. Served `style.css` confirmed to carry the `scrollbar-gutter` fix.
+- NVDA (2026-10-09): `/api/stocks/suggestions?q=NVDA` returns NVIDIA
+  Corporation (local Indian control query unchanged); `stock_quotes` +
+  `watchlists` rows seeded (NVDA @ 230.48 from Finnhub), visible through the
+  app's own `Config.DB_PATH`.
 
 ## Notes / operations
 
@@ -129,6 +145,21 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   resident (~5.7 GB); ~22 GB headroom remains.
 - **Watchlist**: the bundled `stk.json` is NSE/BSE (India) tickers; ASML
   works via yfinance. Add tickers via the app UI.
+- **Adding a US/EU ticker (2026-10-09, e.g. NVDA)**: the watchlist UI
+  (`POST /api/watchlist/add`) only writes the `watchlists` table; live prices
+  additionally need a `stock_quotes` row (streamer lookup + watchlist price
+  `JOIN` on `watchlists.stock_symbol = stock_quotes.security_id`). For US
+  tickers the ETL will never create that row, so seed it (run in the
+  container; key comes from the container env):
+  `INSERT OR REPLACE INTO stock_quotes (company_name, security_id, scrip_code,
+  stock_symbol, current_value, change, p_change, day_high, day_low,
+  previous_close, previous_open, updated_on, weighted_avg_price, stock_status)
+  VALUES (…)` with `security_id`/`stock_symbol` = the **plain US ticker**
+  (matches `watchlists.stock_symbol` and the Finnhub symbol). Then add the
+  watchlist row (UI or `INSERT INTO watchlists (user_id, stock_symbol,
+  company_name, added_at, display_order) …`). On the next dashboard reload the
+  `subscribe_watchlist` socket event starts streaming; no restart needed.
+  NVDA (NVIDIA Corporation) was seeded 2026-10-09.
 - **Live-quote provider (2026-10-09)**: live quotes go through
   `app/utils/price_provider.py`, selected by `PRICE_PROVIDER` in the host-local
   `.env` (`yfinance` default, or `finnhub`). Finnhub free tier = 60 calls/min
@@ -152,6 +183,10 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
     header auth; `yfinance_utils.get_quote_with_retry` dispatches on
     `PRICE_PROVIDER`; `style.css` scrollbar-gutter flicker fix;
     `premium_dashboard.html` fixed-height wrapper for `allocationChart`.
+  - 2026-10-09: `app/api/stock_routes.py` — `/api/stocks/suggestions` external
+    fallback (yfinance search, `indian_only=False`) so US/EU tickers are
+    discoverable in the Add-Stock modal (backup
+    `stock_routes.py.bak-20261009`).
 
 ## Related files
 
