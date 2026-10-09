@@ -44,7 +44,7 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
 
 | Where | What |
 |---|---|
-| vm104 `/home/ubuntu/docker/stocksense/.env` (chmod 600) | `OLLAMA_HOST`, `OLLAMA_MODEL_NAME`, `OLLAMA_AUTH` (base64 user:pass for the gpu-1 NPM front), `FLASK_PORT`, `DEBUG`, numeric `GEMINI_*` (see findings) |
+| vm104 `/home/ubuntu/docker/stocksense/.env` (chmod 600) | `OLLAMA_HOST`, `OLLAMA_MODEL_NAME`, `OLLAMA_AUTH` (base64 user:pass for the gpu-1 NPM front), `FLASK_PORT`, `DEBUG`, numeric `GEMINI_*` (see findings), `PRICE_PROVIDER` (live-quote backend: `yfinance` \| `finnhub`), `FINNHUB_API_KEY` (40-char, **header auth only** — see findings) |
 | gpu-1 `nginx-proxy-manager/npm/data/htpasswd/ollama` | Ollama NPM-front basic auth (user `stocksense`) |
 | nbg-1/vie-1 NPM access lists (1 / 8) | gateway basic-auth credentials (same as Jarvis) |
 
@@ -88,6 +88,20 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
 - **Model naming**: the Ollama library name is **`phi4-mini`** (tags
   `3.8b-q4_K_M` 2.5 GB/128K ctx, `3.8b-q8_0` 4.1 GB/4K ctx, `3.8b-fp16`
   7.7 GB). `OLLAMA.md` in the repo says `phi-mini` — wrong.
+- **Finnhub API key auth quirk (2026-10-09)**: the current 40-char Finnhub
+  API keys are **only accepted via the `X-Finnhub-Token` request header**.
+  The legacy `?token=*** query parameter returns `"Invalid API key."` for
+  them (verified: same key, header → 200, query param → invalid). The
+  provider module (`app/utils/price_provider.py`) therefore uses header auth.
+- **Chart.js flicker loop (2026-10-09, fixed)**: the UI flickered — graphs
+  widening and resetting, whole page shaking in milliseconds. Root cause is a
+  known Chart.js responsive bug (chartjs/Chart.js#5805, #3428): a
+  `responsive: true` + `maintainAspectRatio: false` canvas re-renders when the
+  viewport width changes, and the page scrollbar appearing/disappearing
+  changes that width every render → infinite loop. Fix (local patch, see
+  below): `html { scrollbar-gutter: stable }` + `body { overflow-y: scroll }`
+  in `style.css`, and a fixed-height `position: relative` wrapper around the
+  under-sized `allocationChart` canvas in `premium_dashboard.html`.
 
 ## Verified (2026-10-09)
 
@@ -102,6 +116,10 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   kandev sessions was re-verified after every NPM change (self-dependency)
 - Gateways: no/wrong creds → 401 + `WWW-Authenticate`; Authelia authz returns
   portal redirect with correct return-URL for both new domains
+- Finnhub live-quote provider (2026-10-09): `PRICE_PROVIDER=finnhub` active;
+  in-container `get_quote_with_retry('ASML')` → `1769.79` via Finnhub
+  (header auth); yfinance fallback (env override) → `1769.7900390625`, same
+  price. Served `style.css` confirmed to carry the `scrollbar-gutter` fix.
 
 ## Notes / operations
 
@@ -111,15 +129,29 @@ otherwise). Details: `hosts/README.md` § "StockSense gateway exposure".
   resident (~5.7 GB); ~22 GB headroom remains.
 - **Watchlist**: the bundled `stk.json` is NSE/BSE (India) tickers; ASML
   works via yfinance. Add tickers via the app UI.
+- **Live-quote provider (2026-10-09)**: live quotes go through
+  `app/utils/price_provider.py`, selected by `PRICE_PROVIDER` in the host-local
+  `.env` (`yfinance` default, or `finnhub`). Finnhub free tier = 60 calls/min
+  and real-time US equities only; the 10 s price streamer can track ≈10
+  symbols concurrently on free. Use **plain US tickers** with Finnhub (`ASML`,
+  not `ASML.AS`). Scope: live quotes only — history/fundamentals endpoints
+  (`/api/av/*`, premium dashboard) still call yfinance directly. Flip back any
+  time with `PRICE_PROVIDER=yfinance` (+ container recreate: `docker compose
+  up -d`, a plain `restart` does not re-read `env_file`).
 - **Rollback**: vm104 `docker compose down` in `/home/ubuntu/docker/stocksense`;
   gpu-1 `docker compose down` in `/home/ubuntu/docker/ollama`; gateway hosts
   via NPM UI (ids 45 / 57); Authelia rule lines are marked
   `stocksense.gw-1-…` in both `configuration.yml`s (backups
   `*.bak-stocksense-20261009`).
-- **Local code patch** (vm104 clone, documented in the compose header):
-  `OLLAMA_AUTH` env is sent as an `Authorization` header on the three Ollama
-  call sites (`app/config/ollama_config.py`, `app/models/ollama_model.py`,
-  `app/api/system_routes.py`) — upstream sends no auth.
+- **Local code patches** (vm104 clone, not in the repo; backup
+  `stocksense-code.bak-20261009-flicker-finnhub.tgz` next to it):
+  - `OLLAMA_AUTH` env is sent as an `Authorization` header on the three Ollama
+    call sites (`app/config/ollama_config.py`, `app/models/ollama_model.py`,
+    `app/api/system_routes.py`) — upstream sends no auth.
+  - 2026-10-09: `app/utils/price_provider.py` (new) Finnhub provider with
+    header auth; `yfinance_utils.get_quote_with_retry` dispatches on
+    `PRICE_PROVIDER`; `style.css` scrollbar-gutter flicker fix;
+    `premium_dashboard.html` fixed-height wrapper for `allocationChart`.
 
 ## Related files
 

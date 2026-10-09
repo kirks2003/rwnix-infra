@@ -44,7 +44,7 @@ automatically. Services currently using this pattern (all externalized
 | vm103 / kandev-1 | `CLAUDE_CODE_OAUTH_TOKEN` |
 | gpu-1 / speaches | `API_KEY` |
 | gpu-1 / llamacpp | `LLAMACPP_API_KEY` |
-| vm104 / stocksense | `OLLAMA_HOST`, `OLLAMA_MODEL_NAME`, `OLLAMA_AUTH` (NPM basic-auth for the gpu-1 Ollama front), `FLASK_PORT`, `DEBUG`, `GEMINI_*` (numbers parsed at import; Gemini unused) |
+| vm104 / stocksense | `OLLAMA_HOST`, `OLLAMA_MODEL_NAME`, `OLLAMA_AUTH` (NPM basic-auth for the gpu-1 Ollama front), `FLASK_PORT`, `DEBUG`, `GEMINI_*` (numbers parsed at import; Gemini unused), `PRICE_PROVIDER` (live-quote backend: `yfinance` default or `finnhub`), `FINNHUB_API_KEY` (header-auth only — see `stocksense.md`) |
 
 Other services already used `env_file`/`${VAR}` (e.g. vm104 gitlab,
 mariadb, phpmyadmin, grafana-1; both gateways' authelia uses a bind-mounted
