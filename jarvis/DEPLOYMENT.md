@@ -4749,4 +4749,31 @@ private repo). This section records the code changes and the gpu-2 rollout.
   default deployment serves index.html byte-identical (no brand
   injection)", "BRAND=a1 injects the a1 theme and logo into index.html
   only". Unit 180/180, browser 58 pass / 2 skips.
-- **Rollout to gpu-2:**
+- **Rollout to gpu-2 (2026-10-10, PR #65 → main `11070c5`):**
+  - Backup `jarvis-code.bak-20261010_080706.tgz` (code only, `.env`
+    untouched) + `.env` backed up to `.env.bak-<ts>` before editing.
+  - Synced `server.js`, `public/theme-a1.css`, `public/logo-a1.png`;
+    in-image md5s match source (`server.js f7c0e987c83a152e7c08b854c7dd39eb`,
+    `theme-a1.css 78b2d77ce1c01c3474eb236149e8e62e`,
+    `logo-a1.png d0637e9345aed98e3fdabcaa943ec84e`).
+  - `.env` (host-local): added `BRAND=a1`,
+    `BRAIN_PROFILES=a1-deepseek,a1-qwen`, and `Sarah` (explicit password)
+    to `USERS` — the owner `admin` account kept.
+  - NPM (via the 2.15.1 API on the host, initial-admin creds from the
+    host-local compose file): new access list `a1-jarvis-demo` (id 2) with
+    the single basic-auth user `demo`; proxy host 11 repointed to it and
+    its advanced config replaced by a basic-auth-only `location /`
+    (`auth_basic` + `/data/access/2`, Authorization header stripped before
+    proxying) — **the Authelia block is gone from the jarvis row only**;
+    every other row is untouched (service rows keep their per-row Authelia
+    template, POC rows stay open as before).
+  - Live verification via `https://jarvis.gpu-2-de-fra-1-exo.csdc-nm.at`:
+    no creds → 401; `demo` basic auth → 200; served index.html carries
+    `theme-a1.css` + `logo-a1.png` (both 200, correct content types);
+    containers `healthy`, `/api/health` ok (`aiProfiles: 2`); login as
+    `Sarah` → 200 (wrong password → 403), `admin` still logs in;
+    `/api/config` as Sarah shows exactly `a1-deepseek` + `a1-qwen`
+    (default `a1-deepseek`) and Whisper `gpu-1` only; graph DB re-checked
+    empty (no users, no entities).
+  - Static assets changed → a browser **hard refresh (Ctrl+Shift+R)** is
+    needed on the demo link to see the a1 look.
