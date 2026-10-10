@@ -7,7 +7,12 @@ owner's private LLM links, minus all graph data, rebranded to a1.
 
 Mirror of this document: `romeowindi/a1-jarvis` (private repo, a1 side).
 The two copies must stay in sync; the rwnix-infra copy is maintained by the
-owner, the a1-jarvis copy is the a1-side reference.
+owner, the a1-jarvis copy is the a1-side reference. **Status 2026-10-10: the
+mirror repo does not exist yet** — it belongs to the `romeowindi` account,
+which this repo's deploy token cannot create. Until the owner creates it
+(empty repo + `kirks2003` as collaborator, or a romeowindi token is provided
+so the agent can create and push it), the rwnix-infra copy is the single
+source of truth.
 
 ## Binding rules
 
@@ -72,6 +77,14 @@ owner, the a1-jarvis copy is the a1-side reference.
   repo and rolled out (this closes the "selector still listed the private
   profiles as disabled" gap), `Sarah` added to `USERS`, NPM row switched
   from Authelia+mesh-admin to basic auth `demo`.
+- 2026-10-10 (later, same day): **credential rotation** — the owner set the
+  gateway basic-auth user `demo` and the demo app user `Sarah` to **one
+  shared password** (a strong value chosen by the owner; per rule 8 it is
+  recorded in no repo — it exists only in the NPM access-list htpasswd and
+  the host-local `.env`). Both values rotated on gpu-2 and live-verified
+  (new → 200, old → 401/403); the previously used gateway/app values are
+  dead. Deployment mechanics: `jarvis/DEPLOYMENT.md` (2026-10-10 later
+  entry).
 
 ## Demo `.env` (names only — values are host-local, never in a repo)
 

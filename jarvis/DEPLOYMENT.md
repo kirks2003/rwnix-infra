@@ -4777,3 +4777,25 @@ private repo). This section records the code changes and the gpu-2 rollout.
     empty (no users, no entities).
   - Static assets changed → a browser **hard refresh (Ctrl+Shift+R)** is
     needed on the demo link to see the a1 look.
+
+### 2026-10-10 (later): a1 demo credential rotation — one shared password
+
+Owner decision: the demo gateway's basic-auth user `demo` and the demo app
+user `Sarah` use **one shared password** (a strong value chosen by the
+owner; per the no-secrets rule it is not recorded here — it exists only in
+the NPM access-list htpasswd and the host-local `.env` on gpu-2).
+
+- **NPM:** access list 2 (`a1-jarvis-demo`) htpasswd regenerated via
+  `docker exec npm-ui htpasswd -bB /data/access/2 demo <new>` — the `npm-ui`
+  (NPM) container bundles `htpasswd`; the gpu-2 host has neither `htpasswd`
+  nor passwordless sudo for it. Nginx reads the htpasswd file per request,
+  so no reload/restart was needed for the gateway layer.
+- **`.env` (host-local):** the `Sarah` entry in `USERS` rotated (backup
+  `.env.bak-20261010_110313`). **Gotcha:** `docker compose restart` does
+  **not** re-read `.env` — the first verification attempt still accepted the
+  old app password because the container kept its original env; the fix is
+  a recreate, `docker compose up -d jarvis`.
+- **Live verification** (via `https://jarvis.gpu-2-de-fra-1-exo.csdc-nm.at`):
+  `demo`/new → 200, `demo`/old → 401; login `Sarah`/new → 200, `Sarah`/old
+  → 403; `admin` (unchanged) → 200; `/api/health` ok (`aiProfiles: 2`,
+  whisper + tts endpoints intact).
