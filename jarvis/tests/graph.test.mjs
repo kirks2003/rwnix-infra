@@ -1267,6 +1267,10 @@ before(async () => {
     const wantsStoreFact = String(lastUser?.content || "").includes("Store the fact");
     const wantsOtherOwner = String(lastUser?.content || "").includes("other user");
     const wantsDeleteViaTool = String(lastUser?.content || "").includes("Delete the entity via the graph");
+    // The ghost delete asks for a name that resolves to nothing: the mock MCP
+    // answers the not-found message (a NON-error result) so the backend's
+    // success-prefix verification can be exercised end to end.
+    const wantsGhostDelete = String(lastUser?.content || "").includes("Delete the ghost entity");
     const wantsRename = String(lastUser?.content || "").includes("Rename the entity");
     // "Call the tool in xml" mimics the brain endpoint that answers with the
     // model's NATIVE tool-call XML in the message content instead of the
@@ -1302,11 +1306,13 @@ before(async () => {
              ? { name: "store-fact", arguments: JSON.stringify({ owner: wantsOtherOwner ? "Roman" : "Mila", from: "Mila", to: "Pizza", type: "LIKES", negative: false }) }
              : wantsRename
                ? { name: "rename-entity", arguments: JSON.stringify({ owner: "Mila", name: "Berlin", newName: "Berlintown" }) }
-               : wantsDeleteViaTool
-              ? { name: "delete-entity", arguments: JSON.stringify({ owner: "Mila", name: "Berlin" }) }
-              : loopTools
-                ? { name: "list-my-knowledge", arguments: "{}" }
-                : { name: "list-my-facts", arguments: "{}" };
+             : wantsDeleteViaTool
+               ? { name: "delete-entity", arguments: JSON.stringify({ owner: "Mila", name: "Berlin" }) }
+               : wantsGhostDelete
+                 ? { name: "delete-entity", arguments: JSON.stringify({ owner: "Mila", name: "Ghost Entity" }) }
+                 : loopTools
+                 ? { name: "list-my-knowledge", arguments: "{}" }
+                 : { name: "list-my-facts", arguments: "{}" };
       return res.end(JSON.stringify({
         choices: [{
           message: {
@@ -1872,6 +1878,79 @@ test("graph write tools: regular users are self-scoped, admin can target any reg
   );
 });
 
+test("delete-entity: a verified success is audited as a write and suppresses the re-ingest", async () => {
+  const origin = origins[1];
+  const backend = backends[1];
+  const milaCookie = await login(origin, "Mila");
+
+  toolRequests = [];
+  finalRequests = [];
+  extractionRequests = 0;
+  const logStart = backend.logs.length;
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: milaCookie },
+    body: JSON.stringify({ prompt: "Delete the entity via the graph", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  const logDelta = backend.logs.slice(logStart);
+  assert.match(logDelta, /MOCK_GRAPH_CALL delete-entity/);
+  assert.match(logDelta, /\\"name\\":\\"Berlin\\"/);
+  assert.match(logDelta, /\\"user\\":\\"Mila\\",\\"admin\\":false/);
+  // The verified success reaches the brain WITHOUT the "did NOT succeed"
+  // addendum — the brain may claim it to the user.
+  const lastFinal = finalRequests[finalRequests.length - 1];
+  const toolMessage = [...lastFinal.messages].reverse().find((message) => message.role === "tool");
+  assert.match(String(toolMessage?.content), /^Deleted "Berlin"/);
+  assert.doesNotMatch(String(toolMessage?.content), /did NOT succeed/);
+  // Audited as a successful write …
+  const activity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
+  assert.ok(
+    activity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "delete-entity" && entry.ok),
+    JSON.stringify(activity.entries),
+  );
+  // … and a verified write suppresses the automatic re-ingest of the
+  // confirmation text (a "Berlin was removed" extraction would resurrect it).
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(extractionRequests, 0, "a successful explicit delete must not be re-ingested from its confirmation text");
+});
+
+test("delete-entity: a not-found answer is a FAILED write — the brain is told it did not happen, and the turn is ingested", async () => {
+  const origin = origins[1];
+  const backend = backends[1];
+  const milaCookie = await login(origin, "Mila");
+
+  toolRequests = [];
+  finalRequests = [];
+  const logStart = backend.logs.length;
+  const extractionBefore = extractionRequests;
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: milaCookie },
+    body: JSON.stringify({ prompt: "Delete the ghost entity", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  const logDelta = backend.logs.slice(logStart);
+  assert.match(logDelta, /MOCK_GRAPH_CALL delete-entity/);
+  assert.match(logDelta, /\\"name\\":\\"Ghost Entity\\"/);
+  // The not-found answer is a non-error result that changed nothing: the
+  // backend verifies the success prefix, appends its own verdict, and the
+  // brain cannot turn it into a "Done, removed."
+  const lastFinal = finalRequests[finalRequests.length - 1];
+  const toolMessage = [...lastFinal.messages].reverse().find((message) => message.role === "tool");
+  assert.match(String(toolMessage?.content), /No entity named "Ghost Entity"/);
+  assert.match(String(toolMessage?.content), /did NOT succeed/);
+  assert.match(String(toolMessage?.content), /Do not claim it did/);
+  // Audited as a FAILED write — the live incident logged ok:true here.
+  const activity = await (await auth(origin, "/api/graph/activity", milaCookie)).json();
+  assert.ok(
+    activity.entries.some((entry) => entry.kind === "brain_write" && entry.user === "Mila" && entry.tool === "delete-entity" && entry.ok === false),
+    JSON.stringify(activity.entries),
+  );
+  // A failed write is not a successful write: the anti-resurrection gate
+  // keys on verified writes only, so this turn's automatic storage still
+  // runs (and can re-store a name the user merely mentioned).
+  await waitFor(async () => extractionRequests > extractionBefore);
+});
+
 test("admin rename-entity: on the write surface, routed with the injected args, audited as a write", async () => {
   const origin = origins[1];
   const backend = backends[1];
@@ -1898,7 +1977,7 @@ test("admin rename-entity: on the write surface, routed with the injected args, 
   // The (mock) rename result came back through the tool loop to the brain.
   const lastFinal = finalRequests[finalRequests.length - 1];
   const toolMessage = [...lastFinal.messages].reverse().find((message) => message.role === "tool");
-  assert.match(String(toolMessage?.content), /Renamed Berlin to Berlintown/);
+  assert.match(String(toolMessage?.content), /Renamed "Berlin" to "Berlintown"/);
   // Audited in the admin's global activity feed as a write.
   const activity = await (await auth(origin, "/api/graph/activity", adminCookie)).json();
   assert.ok(

@@ -74,6 +74,34 @@ tooltip) and the brain's `list-my-facts` (`asked about -> Jean Reno (on
 link and the ask date"), `tests/mcp-graph.test.mjs` and
 `tests/graph.browser.mjs`.
 
+**User deletion policy (2026-10-10):** users are allowed to delete their own
+graph (brain) entities — by asking the assistant (the brain's owner-scoped
+`delete-entity`/`rename-entity`/`store-*` MCP tools; `:User` account nodes
+can never be deleted) and via the panel's Remove button. Binding
+implementation rules: (1) the brain must actually call the tool — the
+backend verifies EVERY write-tool result on its success prefix
+(`Deleted "`/`Stored `/`Renamed "`) and a non-success result (a not-found or
+ambiguous answer is a non-error result that changed nothing) is audited
+`ok:false` and fed back to the brain as "The operation did NOT succeed", so
+a claimed deletion without a verified tool result is impossible; (2) the
+write/delete tools resolve a UNIQUE close match on the user's phrasing
+(owner-scoped; the shorter side ≥ 4 chars) — ambiguous matches are refused
+with the candidate list, never guessed; (3) a verified write suppresses the
+turn's automatic ingestion, so a "X was removed" confirmation cannot
+resurrect X. Root cause of the 2026-10-10 incident (three claimed
+deletions, all three entities still in the graph): the brain claimed
+success without a successful tool call, exact-name-only matching missed the
+user's phrasing ("self-hosted LLM for number forecasting" vs the stored
+"Self-hosted LLM"), and the backend counted any non-error result as a
+successful write. Enforced in `jarvis/server.js` (success-prefix
+verification in the brain tool loop) and `jarvis/mcp/graph.mjs`
+(`resolveEntityName` + `findEntityNear`), regression-tested in
+`tests/mcp-graph.test.mjs` ("resolveEntityName: exact first, then a unique
+close match, never short fragments") and `tests/graph.test.mjs` ("delete-
+entity: a verified success … suppresses the re-ingest" / "delete-entity: a
+not-found answer is a FAILED write …"). Docs: `jarvis/README.md`,
+`jarvis/DEPLOYMENT.md` (2026-10-10 user-deletion section).
+
 See `kandev-opencode-dsv4f-setup.md` for the Kandev opencode setup details.
 See `kandev-opencode-qwen-setup.md` for the Kandev opencode a1-qwen38-27b setup details.
 See `kandev-credential-setup.md` for the Kandev GitHub PAT credential setup.

@@ -1495,11 +1495,11 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
           // data: the tools run across all owners, so the privacy line above
           // (which would contradict that) is NOT added here. It is also the
           // only session whose brain gets cross-owner write/delete tools.
-          mcpStates.push("The knowledge graph (MCP graph server) is ON and you are the administrator of it: the four read tools show you ALL users' data — get-schema (labels, relation types, property keys), get-entity(name) (every owner's copy of an entity, its data and its links), list-my-knowledge (every user's stored entities, grouped per user) and list-my-facts(about?, relation?) (every user's stored facts — likes, ownership, family, home, work, watched topics, and the questions they asked (ASKED_ABOUT, with the date)). You can also MODIFY any user's graph data: store-entity(owner, name, type) stores an entity under any user's name (type: person, place, organization, event, topic or thing), store-fact(owner, from, to, type, negative?) stores a fact between two endpoints (entities or registered users) under any user's name, rename-entity(owner, name, newName) renames an entity of any user in place — all of its links survive, so ALWAYS use it for renames, never delete+store — and delete-entity(owner, name) removes an entity of any user together with its links. Use them when the admin asks you to store, correct, rename or remove stored knowledge — including another user's stored data — and confirm exactly what changed. When asked what is stored about the graph or about any user, answer from the read tools and attribute each item to its user (e.g. 'Mila: likes Lego; Roman: no stored facts'). Seeing other users' data is allowed in this admin session only — never present another user's data as the admin's own, and do not guess. Admin conversations do NOT update the graph automatically — only your explicit store-entity, store-fact, rename-entity and delete-entity calls change it, so make those calls and confirm exactly what changed instead of claiming you cannot write.");
+          mcpStates.push("The knowledge graph (MCP graph server) is ON and you are the administrator of it: the four read tools show you ALL users' data — get-schema (labels, relation types, property keys), get-entity(name) (every owner's copy of an entity, its data and its links), list-my-knowledge (every user's stored entities, grouped per user) and list-my-facts(about?, relation?) (every user's stored facts — likes, ownership, family, home, work, watched topics, and the questions they asked (ASKED_ABOUT, with the date)). You can also MODIFY any user's graph data: store-entity(owner, name, type) stores an entity under any user's name (type: person, place, organization, event, topic or thing), store-fact(owner, from, to, type, negative?) stores a fact between two endpoints (entities or registered users) under any user's name, rename-entity(owner, name, newName) renames an entity of any user in place — all of its links survive, so ALWAYS use it for renames, never delete+store — and delete-entity(owner, name) removes an entity of any user together with its links. Use them when the admin asks you to store, correct, rename or remove stored knowledge — including another user's stored data — and confirm exactly what changed. When asked what is stored about the graph or about any user, answer from the read tools and attribute each item to its user (e.g. 'Mila: likes Lego; Roman: no stored facts'). Seeing other users' data is allowed in this admin session only — never present another user's data as the admin's own, and do not guess. Admin conversations do NOT update the graph automatically — only your explicit store-entity, store-fact, rename-entity and delete-entity calls change it, so make those calls and confirm exactly what the tool result says instead of claiming you cannot write. Honesty rule: never claim a store/rename/delete succeeded unless the tool result of THIS very turn starts with 'Stored', 'Renamed' or 'Deleted'; if the tool reports that the operation did not happen, say so honestly.");
         } else {
           mcpStates.push(graphText
-            ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call graph tools scoped to this signed-in user: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about), list-my-facts(about?, relation?) (the facts stored about this user), plus store-entity(name, type), store-fact(from, to, type, negative?), rename-entity(name, newName) and delete-entity(name) for this user's OWN graph data only. Use delete-entity when the user asks you to forget or remove one of their stored entities; never claim you can delete or change another user's data. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see or modify data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess. The graph is updated automatically after every answer, so when the user asks you to save, remember or track topics or assign X to my TradingMonitor list, either use the write tool immediately or confirm that it is done; automatic storage writes WATCHES and PART_OF facts as needed. Questions are stored the same way: each question's subject is linked to the user with an ASKED_ABOUT fact that carries the date and time the question was asked, and the answer's entities (films, people, ...) and their links to the subject are stored with it — so 'what did I ask about, and when?' is answered from list-my-facts (relation ASKED_ABOUT), and the stored question subjects are part of this user's knowledge."
-            : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with get-schema, get-entity, list-my-knowledge and list-my-facts, and you may use store-entity, store-fact, rename-entity or delete-entity only for this signed-in user's own graph data. New facts are also stored automatically after every answer — so when the user asks you to save, remember or track topics or assign them to a named list (e.g. 'add X to my trading news list' or 'assign X to my TradingMonitor list'), confirm that it is done instead of claiming you cannot write; the topics are stored (as WATCHES and PART_OF facts, a named list as its own entity) after your answer. Questions are stored the same way: each question's subject is linked to the user with an ASKED_ABOUT fact that carries the date and time of the question, and the answer's entities and their links to the subject are stored with it.");
+            ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call graph tools scoped to this signed-in user: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about), list-my-facts(about?, relation?) (the facts stored about this user), plus store-entity(name, type), store-fact(from, to, type, negative?), rename-entity(name, newName) and delete-entity(name) for this user's OWN graph data only. Use delete-entity when the user asks you to forget or remove one of their stored entities — first find the exact stored name with list-my-knowledge or get-entity (a close phrasing is fine: a unique close match is resolved automatically), then call the tool with that name; never claim you can delete or change another user's data. Honesty rule: never claim you stored, renamed or deleted anything unless the tool result of THIS very turn starts with 'Stored', 'Renamed' or 'Deleted'; if the tool reports that the operation did not happen (entity not found, no unique match, …), say so honestly — and offer the closest stored names the tool listed — instead of claiming success. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see or modify data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess. The graph is updated automatically after every answer, so when the user asks you to save, remember or track topics or assign X to my TradingMonitor list, either use the write tool immediately or confirm that it is done; automatic storage writes WATCHES and PART_OF facts as needed. Questions are stored the same way: each question's subject is linked to the user with an ASKED_ABOUT fact that carries the date and time the question was asked, and the answer's entities (films, people, ...) and their links to the subject are stored with it — so 'what did I ask about, and when?' is answered from list-my-facts (relation ASKED_ABOUT), and the stored question subjects are part of this user's knowledge."
+            : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with get-schema, get-entity, list-my-knowledge and list-my-facts, and you may use store-entity, store-fact, rename-entity or delete-entity only for this signed-in user's own graph data — for deletes, first find the exact stored name with list-my-knowledge or get-entity (a unique close match is resolved automatically). Never claim you stored, renamed or deleted anything unless the tool result of THIS very turn starts with 'Stored', 'Renamed' or 'Deleted'; if the tool reports that the operation did not happen, say so honestly instead of claiming success. New facts are also stored automatically after every answer — so when the user asks you to save, remember or track topics or assign them to a named list (e.g. 'add X to my trading news list' or 'assign X to my TradingMonitor list'), confirm that it is done instead of claiming you cannot write; the topics are stored (as WATCHES and PART_OF facts, a named list as its own entity) after your answer. Questions are stored the same way: each question's subject is linked to the user with an ASKED_ABOUT fact that carries the date and time of the question, and the answer's entities and their links to the subject are stored with it.");
         }
       } catch (error) {
         if (signal.aborted) throw error;
@@ -1602,8 +1602,16 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 const GRAPH_TOOL_ROUNDS = 5;
 const GRAPH_TOOL_TIMEOUT_MS = 15000;
 const GRAPH_TOOL_NAMES = new Set(["get-schema", "get-entity", "list-my-knowledge", "list-my-facts"]);
-// The admin-only write surface (mcp/graph.mjs enforces the same gate).
+// The write/delete surface — offered to EVERY session with graph tools;
+// non-admin calls are owner-scoped to the signed-in user by this backend and
+// re-validated in mcp/graph.mjs. Admin calls may target any registered owner.
 const GRAPH_WRITE_TOOL_NAMES = new Set(["store-entity", "store-fact", "rename-entity", "delete-entity"]);
+// The success prefixes of the MCP write results. The backend verifies a write
+// tool ACTUALLY changed something before the brain may claim it to the user:
+// a "No entity named …" answer is a non-error result, and unverified the brain
+// turns it into "Done, removed." (live incident 2026-10-10: three claimed
+// deletions, three entities still in the graph).
+const GRAPH_WRITE_SUCCESS_PREFIX = { "delete-entity": 'Deleted "', "store-entity": "Stored ", "store-fact": "Stored ", "rename-entity": 'Renamed "' };
 function graphTools(admin) {
   const tools = [
     {
@@ -1620,7 +1628,7 @@ function graphTools(admin) {
         name: "get-entity",
         description: admin
           ? "Look up an entity by name: every user's copy of it (one per owner), its data and its links. Returns nothing if no user has such an entity."
-          : "Look up one of the signed-in user's own entities (person, place, thing, ...) by name: its data and its links. Returns nothing if the user has no such entity.",
+          : "Look up one of the signed-in user's own entities (person, place, thing, ...) by name (a close phrasing is fine — on a miss the closest stored names are reported): its data and its links. Returns nothing if the user has no such entity.",
         parameters: { type: "object", properties: { name: { type: "string", description: "The entity name, e.g. 'Berlin'." } }, required: ["name"] },
       },
     },
@@ -1692,8 +1700,8 @@ function graphTools(admin) {
         function: {
           name: "rename-entity",
           description: admin
-            ? "Rename an entity of a user in place (admin only): owner (a registered user), name and newName. All of the entity's links survive the rename — use it for renames instead of delete+store. The new name must be free for that user (case-insensitively) and must not be a registered user's name."
-            : "Rename one of this signed-in user's own entities in place: name and newName. All links survive the rename — use it for renames instead of delete+store. The new name must be free for this user and must not be a registered user's name.",
+            ? "Rename an entity of a user in place (admin only): owner (a registered user), name (stored name or a close phrasing — a unique close match is resolved automatically) and newName. All of the entity's links survive the rename — use it for renames instead of delete+store. The new name must be free for that user (case-insensitively) and must not be a registered user's name."
+            : "Rename one of this signed-in user's own entities in place: name (stored name or a close phrasing — a unique close match is resolved automatically) and newName. All links survive the rename — use it for renames instead of delete+store. The new name must be free for this user and must not be a registered user's name.",
           parameters: {
             type: "object",
             properties: {
@@ -1710,8 +1718,8 @@ function graphTools(admin) {
         function: {
           name: "delete-entity",
           description: admin
-            ? "Delete an entity of a user together with its links (admin only): owner (a registered user) and name. Account nodes of users can never be deleted."
-            : "Delete one of this signed-in user's own entities together with its links. Account nodes of users can never be deleted.",
+            ? "Delete an entity of a user together with its links (admin only): owner (a registered user) and name (stored name or a close phrasing — a unique close match is resolved automatically). Account nodes of users can never be deleted."
+            : "Delete one of this signed-in user's own entities together with its links. Pass the stored name or a close phrasing — a unique close match (e.g. a longer phrasing of the stored name) is resolved automatically. Account nodes of users can never be deleted.",
           parameters: {
             type: "object",
             properties: {
@@ -1997,10 +2005,22 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         // means a brain-supplied user/admin/users can never win).
         try {
           const result = await withAbort(mcpGraph.call(name, { ...args, user, admin, users: config.users }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
+          const isWrite = GRAPH_WRITE_TOOL_NAMES.has(name);
           const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
-          if (GRAPH_WRITE_TOOL_NAMES.has(name) && !result.isError) graphWriteSucceeded = true;
-          recordGraphActivity({ kind: GRAPH_WRITE_TOOL_NAMES.has(name) ? "brain_write" : "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: !result.isError, error: result.isError ? resultText.slice(0, 200) : undefined, ms: Date.now() - started });
-          local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
+          // Write tools are verified on their success prefix: a "No entity
+          // named …" / "No unique match …" answer is a NON-error result, and
+          // without this check the brain would claim the delete anyway.
+          let toolContent = resultText || "No result.";
+          const prefix = GRAPH_WRITE_SUCCESS_PREFIX[name];
+          const writeOk = isWrite && !result.isError && typeof prefix === "string" && toolContent.startsWith(prefix);
+          if (writeOk) graphWriteSucceeded = true;
+          if (isWrite && !writeOk) {
+            // The backend — not the (possibly prompt-injected) model — tells
+            // the brain the truth: nothing was written.
+            toolContent += ` The operation did NOT succeed — the tool reported the message above. Do not claim it did; tell the user honestly what happened.`;
+          }
+          recordGraphActivity({ kind: isWrite ? "brain_write" : "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: isWrite ? writeOk : !result.isError, error: (isWrite ? !writeOk : result.isError) ? toolContent.slice(0, 200) : undefined, ms: Date.now() - started });
+          local.push({ role: "tool", tool_call_id: call.id, content: toolContent });
         } catch (error) {
           if (totalSignal.aborted) throw error;
           recordGraphActivity({ kind: GRAPH_WRITE_TOOL_NAMES.has(name) ? "brain_write" : "brain_query", user, tool: name, detail: graphToolDetail(name, args).slice(0, 200), ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started });
@@ -2051,8 +2071,10 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         // A write-tool name from a non-admin brain (or a typo) is still an
         // attempted write: audit it as one, even though nothing ran.
         if (useTools) recordGraphActivity({ kind: GRAPH_WRITE_TOOL_NAMES.has(name) ? "brain_write" : "brain_query", user, tool: name, ok: false, error: "unknown tool", ms: 0 });
+        // The write/delete tools are offered to every session (owner-scoped
+        // for regular users), so they belong in the hint for everyone.
         const available = [
-          ...(useTools ? ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", ...(admin ? ["store-entity", "store-fact", "rename-entity", "delete-entity"] : [])] : []),
+          ...(useTools ? ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"] : []),
           ...(webToolsOn ? ["web_search", "web_news", "web_fetch"] : []),
           ...(vikunjaToolNames ? [...vikunjaToolNames] : []),
         ];

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { QUERIES, TOOLS, ADMIN_WRITE_TOOLS, factQuery, validateWriteTool, formatEntity, formatEntityAll, formatKnowledge, formatKnowledgeAll, formatFacts, formatFactsAll } from "../mcp/graph.mjs";
+import { QUERIES, TOOLS, ADMIN_WRITE_TOOLS, factQuery, validateWriteTool, resolveEntityName, formatEntity, formatEntityAll, formatKnowledge, formatKnowledgeAll, formatFacts, formatFactsAll } from "../mcp/graph.mjs";
 
 // The MCP graph server is the brain's only window into the database. These
 // pins keep every query bounded by the signed-in user (owner = them): a
@@ -188,6 +188,17 @@ test("write queries: entities are owner-keyed like the ingestion (name case-inse
   // findEntity is the same match: "not found" is identical for a foreign and
   // a nonexistent entity.
   assert.match(QUERIES.findEntity, /MATCH \(e:Entity \{owner: \$owner\}\) WHERE toLower\(e\.name\) = toLower\(\$name\)/);
+  // findEntityNear feeds the close-match resolution: owner-pinned (another
+  // user's entities can never be candidates), :Entity only (a :User account
+  // node is never a candidate), both containment directions (the stored name
+  // contains the phrasing, or the phrasing contains the stored name), exact
+  // matches excluded (the exact path runs first), and the 4-character floor
+  // is the caller's job (resolveEntityName), not Cypher's.
+  assert.match(QUERIES.findEntityNear, /MATCH \(e:Entity \{owner: \$owner\}\)/);
+  assert.match(QUERIES.findEntityNear, /toLower\(e\.name\) CONTAINS toLower\(\$name\) OR toLower\(\$name\) CONTAINS toLower\(e\.name\)/);
+  assert.match(QUERIES.findEntityNear, /NOT toLower\(e\.name\) = toLower\(\$name\)/);
+  assert.doesNotMatch(QUERIES.findEntityNear, /User/);
+  assert.doesNotMatch(QUERIES.findEntityNear, /DELETE/);
   // rename-entity: a name-property change on the owner-pinned node — the
   // elementId and every link survive (a delete+recreate would detach them),
   // and it can never match a :User account node or another owner's copy.
@@ -277,4 +288,31 @@ test("validateWriteTool: regular users can write only their own owner scope, adm
   assert.equal(validateWriteTool("store-entity", { ...admin, owner: "Mila" }, users).ok, false, "missing name");
   assert.equal(validateWriteTool("store-fact", { ...admin, owner: "Mila", from: "Mila" }, users).ok, false, "missing to");
   assert.equal(validateWriteTool("rename-entity", { ...admin, owner: "Mila", name: "Berlin" }, users).ok, false, "missing newName");
+});
+
+test("resolveEntityName: exact first, then a unique close match, never short fragments", () => {
+  const names = ["Self-hosted LLM", "LLM forecasting", "Trading", "Home Assistant", "Home Assistant Config", "phi-mini"];
+  // Exact match is case-insensitive and wins over any close match.
+  assert.deepEqual(resolveEntityName("self-hosted llm", names), { exact: true, name: "Self-hosted LLM" });
+  assert.deepEqual(resolveEntityName("PHI-MINI", names), { exact: true, name: "phi-mini" });
+  // The live incident shape: the user's longer phrasing contains the stored
+  // name -> the unique close match resolves to the stored name.
+  assert.deepEqual(resolveEntityName("self-hosted LLM for number forecasting", names), { exact: false, candidates: ["Self-hosted LLM"] });
+  // The other direction: the stored name contains the user's phrasing.
+  assert.deepEqual(resolveEntityName("hosted LLM", names), { exact: false, candidates: ["Self-hosted LLM"] });
+  // Ambiguous: several stored names contain the phrasing -> all candidates,
+  // the caller must refuse and list them.
+  assert.deepEqual(resolveEntityName("Home", names), { exact: false, candidates: ["Home Assistant", "Home Assistant Config"] });
+  // No match at all.
+  assert.deepEqual(resolveEntityName("quantum entanglement", names), { exact: false, candidates: [] });
+  // The 4-character floor on the shorter side: a 3-letter fragment matches
+  // nothing, even when many names contain it ("ing" in Trading/... no, use
+  // "phi" -> inside "phi-mini" but shorter side is 3).
+  assert.deepEqual(resolveEntityName("phi", names), { exact: false, candidates: [] });
+  // Empty query: no exact, no candidates (never "everything contains ''").
+  assert.deepEqual(resolveEntityName("", names), { exact: false, candidates: [] });
+  // Duplicate input names (any case) collapse before matching.
+  assert.deepEqual(resolveEntityName("self-hosted LLM for x", ["Self-hosted LLM", "self-hosted llm", "Self-Hosted LLM"]), { exact: false, candidates: ["Self-hosted LLM"] });
+  // Case-variant exact: the canonical stored spelling is returned.
+  assert.deepEqual(resolveEntityName("trading", names), { exact: true, name: "Trading" });
 });

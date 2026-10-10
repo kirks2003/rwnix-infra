@@ -115,6 +115,18 @@ export const QUERIES = {
   touchEntity: "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) SET e.last_seen = $now RETURN e.name AS name",
   findEntity: "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) RETURN e.name AS name, e.type AS type LIMIT 10",
   deleteEntity: "MATCH (e:Entity {owner: $owner}) WHERE toLower(e.name) = toLower($name) DETACH DELETE e",
+  // Close matches for the owner-scoped name resolution: a stored name contains
+  // the user's phrasing, or the phrasing contains a stored name (case-
+  // insensitive). The 4-character floor on the shorter side is enforced by the
+  // caller (resolveEntityName), not Cypher. :Entity only — a :User account
+  // node is never a candidate — and pinned to owner = $owner, so another
+  // user's entities can never be candidates.
+  findEntityNear:
+    "MATCH (e:Entity {owner: $owner}) " +
+    "WHERE (toLower(e.name) CONTAINS toLower($name) OR toLower($name) CONTAINS toLower(e.name)) " +
+    "AND NOT toLower(e.name) = toLower($name) " +
+    "RETURN e.name AS name, e.type AS type " +
+    "ORDER BY e.last_seen DESC LIMIT 20",
   // Rename = change the name property in place: the node keeps its elementId,
   // its type and every link (a delete+recreate would detach them). The
   // collision check (no other copy of $newName for $owner) runs in the
@@ -138,7 +150,7 @@ export const TOOLS = [
   },
   {
     name: "get-entity",
-    description: "Look up one of the signed-in user's own entities (person, place, organization, event, topic or thing) by name: its data and its links. Returns nothing if the user has no such entity.",
+    description: "Look up one of the signed-in user's own entities (person, place, organization, event, topic or thing) by name (a close phrasing is fine — on a miss the closest stored names are reported): its data and its links. Returns nothing if the user has no such entity.",
     inputSchema: { type: "object", properties: { ...USER_PARAM, name: { type: "string", description: "The entity name, e.g. 'Berlin'." } }, required: ["name"] },
   },
   {
@@ -330,6 +342,33 @@ function canonicalUserOf(name, users) {
   return null;
 }
 
+// Owner-scoped name resolution for the brain's write/delete tools. The user's
+// phrasing is rarely the exact stored name ("self-hosted LLM for number
+// forecasting" vs the stored "Self-hosted LLM"), so the exact
+// case-insensitive match runs first, then a UNIQUE close match: one string
+// contains the other (case-insensitive) with the shorter side at least 4
+// characters, so a two-letter fragment cannot sweep half the graph. `names`
+// are the owner's own entity names (owner-pinned upstream), so this can never
+// resolve into another user's world. Returns { exact: true, name } for an
+// exact hit, else { exact: false, candidates } (the unique close match, if
+// any, first; an ambiguous set keeps the stored order).
+export function resolveEntityName(query, names) {
+  const wanted = String(query || "").trim().toLowerCase();
+  const unique = [];
+  for (const raw of names || []) {
+    const name = String(raw || "").trim();
+    if (name && !unique.some((existing) => existing.toLowerCase() === name.toLowerCase())) unique.push(name);
+  }
+  const exact = unique.find((name) => name.toLowerCase() === wanted);
+  if (exact) return { exact: true, name: exact };
+  const candidates = unique.filter((name) => {
+    const stored = name.toLowerCase();
+    if (Math.min(stored.length, wanted.length) < 4) return false;
+    return stored.includes(wanted) || wanted.includes(stored);
+  });
+  return { exact: false, candidates };
+}
+
 function entityTypeOf(value, fallback = "thing") {
   const type = String(value || "").toLowerCase();
   return graphdb.ENTITY_TYPES.has(type) ? type : fallback;
@@ -472,7 +511,15 @@ function startServer() {
       return formatEntityAll(rows);
     }
     const rows = await run(QUERIES.getEntity, { user, name });
-    if (!rows.length || rows[0].name === null) return `No entity named "${name}" in the graph.`;
+    if (!rows.length || rows[0].name === null) {
+      // The user's phrasing is rarely the exact stored name: on a miss report
+      // the owner's close matches so the brain can target the exact name
+      // (delete-entity/rename-entity resolve the same way).
+      const near = resolveEntityName(name, (await run(QUERIES.findEntityNear, { owner: user, name })).map((row) => row.name));
+      if (near.candidates.length === 1) return `No entity named "${name}" in the graph. Closest stored entity: "${near.candidates[0]}" — use that exact name.`;
+      if (near.candidates.length > 1) return `No entity named "${name}" in the graph. Closest stored entities: ${near.candidates.map((candidate) => `"${candidate}"`).join(", ")} — use one of those exact names.`;
+      return `No entity named "${name}" in the graph.`;
+    }
     return formatEntity(rows[0], rows.filter((row) => row.rel));
   }
 
@@ -543,31 +590,58 @@ function startServer() {
     return `Stored ${params.type} from "${params.from}" to "${params.to}" under ${params.owner}${params.negative ? " (negative)" : ""}.`;
   }
 
+  // Resolve the requested name to the owner's stored entity: an exact
+  // (case-insensitive) match first, else the UNIQUE close match (the user's
+  // phrasing contains a stored name, or a stored name contains the phrasing).
+  // Returns { ok: true, name, matched } | { ok: false, candidates } where
+  // `matched` is the stored name only when it differs from the request (any
+  // case), so callers can note the close match in their reply.
+  async function resolveOwnedEntity(owner, name) {
+    const existing = await runWrite(QUERIES.findEntity, { name, owner });
+    if (existing.length) return { ok: true, name: existing[0].name, matched: false };
+    const near = resolveEntityName(name, (await runWrite(QUERIES.findEntityNear, { name, owner })).map((row) => row.name));
+    if (near.candidates.length !== 1) return { ok: false, candidates: near.candidates };
+    const found = await runWrite(QUERIES.findEntity, { name: near.candidates[0], owner });
+    if (!found.length) return { ok: false, candidates: [] };
+    return { ok: true, name: found[0].name, matched: found[0].name.toLowerCase() !== name.toLowerCase() };
+  }
+
+  const closeMatchNote = (requested, matched) =>
+    matched ? ` (the unique close match to your request "${requested}")` : "";
+
   async function handleRenameEntity(params) {
     const now = new Date().toISOString();
-    const existing = await runWrite(QUERIES.findEntity, { name: params.name, owner: params.owner });
-    if (!existing.length) return `No entity named "${params.name}" owned by ${params.owner} in the graph.`;
+    const resolved = await resolveOwnedEntity(params.owner, params.name);
+    if (!resolved.ok) {
+      const candidates = resolved.candidates.map((candidate) => `"${candidate}"`).join(", ");
+      return `No entity named "${params.name}" owned by ${params.owner} in the graph${resolved.candidates.length ? ` (closest: ${candidates})` : ""}. The rename did not happen.`;
+    }
     // Collision against the upsert key: renaming onto an existing copy (any
     // case) would leave two nodes with the same (name, owner) key.
     const taken = await runWrite(QUERIES.findEntity, { name: params.newName, owner: params.owner });
     if (taken.length) {
       return `Cannot rename to "${params.newName}": ${params.owner} already has an entity by that name ("${taken[0].name}"). Delete or rename it first.`;
     }
-    await runWrite(QUERIES.renameEntity, { name: params.name, newName: params.newName, owner: params.owner, now });
-    return `Renamed "${existing[0].name}" to "${params.newName}" (owner ${params.owner}); all links kept.`;
+    await runWrite(QUERIES.renameEntity, { name: resolved.name, newName: params.newName, owner: params.owner, now });
+    return `Renamed "${resolved.name}" to "${params.newName}" (owner ${params.owner}) and all links kept${closeMatchNote(params.name, resolved.matched)}.`;
   }
 
   async function handleDeleteEntity(params) {
-    const existing = await runWrite(QUERIES.findEntity, { name: params.name, owner: params.owner });
-    if (!existing.length) return `No entity named "${params.name}" owned by ${params.owner} in the graph.`;
-    await runWrite(QUERIES.deleteEntity, { name: params.name, owner: params.owner });
+    const resolved = await resolveOwnedEntity(params.owner, params.name);
+    if (!resolved.ok) {
+      const candidates = resolved.candidates.map((candidate) => `"${candidate}"`).join(", ");
+      return resolved.candidates.length
+        ? `No unique match for "${params.name}" owned by ${params.owner} (closest: ${candidates}). The deletion did not happen — ask which one to delete.`
+        : `No entity named "${params.name}" owned by ${params.owner} in the graph. The deletion did not happen.`;
+    }
+    await runWrite(QUERIES.deleteEntity, { name: resolved.name, owner: params.owner });
     // The stored graph policy runs after the removal, exactly like the
     // backend's own delete path: deleting the middle of a chain can free the
     // far side with no path to the owner's :User node left, and an entity
     // with no relation to its user does not belong in the world.
     const swept = await runWrite(graphdb.DISCONNECT_SWEEP, { user: params.owner });
     const sweptNames = swept.map((row) => row.name);
-    return `Deleted "${params.name}" (owner ${params.owner}) and its links.`
+    return `Deleted "${resolved.name}" (owner ${params.owner}) and its links${closeMatchNote(params.name, resolved.matched)}.`
       + (sweptNames.length ? ` Also removed ${sweptNames.join(", ")}: the policy keeps only entities connected to the user.` : "");
   }
 

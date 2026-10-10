@@ -4596,3 +4596,71 @@ the panel statics changed, so browsers need a hard refresh
   `orphansRemoved: ["The Camel", "My Penguin Friend"]` (the policy sweep
   took the disconnected works), nothing left behind (world back to
   22 nodes / 36 edges).
+
+## 2026-10-10: users delete their own brain entities — verified, close-matching, no hallucinated "Done"
+
+**Incident (user-reported, 2026-10-10 08:39 CEST).** Roman asked the brain to
+delete three of his own entities ("self-hosted LLM for numb[er forecasting]",
+"jarvis vm104…", "phi-mini"). The brain answered "Done" for all three —
+**all three were still in the graph**. Live evidence (`/api/graph/activity`):
+only the first turn called the tools — `get-entity` + `delete-entity` with the
+name "self-hosted LLM for number forecasting", while the stored entity was
+"Self-hosted LLM" (case-insensitive exact match only → the tool correctly
+answered "No entity named … in the graph" as a NON-error result). Turns 2–3
+made **no tool calls at all**. The third turn's auto-ingest even re-stored
+"phi-mini" from the prompt (ingest entities:1).
+
+**Root cause.** (1) The brain claimed success without a successful tool call
+(hallucinated completion). (2) Owner-scoped name matching was exact-only, so
+the user's phrasing missed the stored name and the tool offered no close
+match. (3) The backend counted ANY non-error tool result as a successful
+write (`graphWriteSucceeded`, activity `ok:true`) — it never verified the
+entity was actually deleted. (4) The anti-resurrection gate (skip ingestion
+after a successful write) only fired when a write tool had actually been
+called.
+
+**Policy (new, user directive).** Users are allowed to delete their own graph
+(brain) entities — by asking the assistant (the brain's owner-scoped
+`delete-entity` tool; `:User` account nodes can never be deleted) or via the
+panel's Remove button. See the root `AGENTS.md` ("User deletion policy") and
+`jarvis/README.md`.
+
+**Changes.**
+- `mcp/graph.mjs`: exported pure helper `resolveEntityName(query, names)`
+  (exact case-insensitive first, then a UNIQUE close match — one string
+  contains the other, shorter side ≥ 4 chars so a two-letter fragment matches
+  nothing) and the owner-pinned `findEntityNear` query (both containment
+  directions, `:Entity` only, exact matches excluded). `delete-entity` and
+  `rename-entity` resolve the unique close match and report the ACTUAL stored
+  name they deleted/renamed (`Deleted "Self-hosted LLM" (owner Roman) and its
+  links (the unique close match to your request "…")`); ambiguous candidates
+  are refused with the candidate list, a miss says "The deletion did not
+  happen". `get-entity` (user branch) reports the closest stored names on a
+  miss so the brain can target the exact name.
+- `server.js`: the brain tool loop now VERIFIES write results on their success
+  prefix (`Deleted "`/`Stored `/`Renamed "`): a non-success result is audited
+  as a FAILED write (`ok:false`, the tool's message as error) and the tool
+  content is extended with "The operation did NOT succeed — … Do not claim it
+  did" before it reaches the brain; only a verified success sets
+  `graphWriteSucceeded` (so the anti-resurrection gate keeps working). The
+  ON-state prompts (user + admin) add the honesty rule (never claim a
+  store/rename/delete without this turn's `Stored`/`Renamed`/`Deleted` tool
+  result; for deletes first find the exact stored name — the tools resolve
+  unique close matches) and the tool descriptions mention the close-match
+  resolution. The "Unknown tool" hint now lists the write tools for every
+  session (they are offered to everyone, owner-scoped).
+- Tests: `tests/mcp-graph.test.mjs` (unit: `resolveEntityName` cases incl.
+  the incident shape, `findEntityNear` owner pin),
+  `tests/mock-graph-mcp.mjs` (the "ghost" name returns the real server's
+  not-found answer — a non-error result), `tests/graph.test.mjs` (integration:
+  a verified delete success — audited `ok:true`, no "did NOT succeed"
+  addendum, re-ingest suppressed; a not-found delete — audited `ok:false`,
+  the brain is told the operation did not happen, the turn is still ingested
+  because the gate keys on verified writes only).
+
+**Effect on live data:** none — no migration. The three leftover entities
+from the incident are removed as part of the live verification, through the
+brain (which is what the user originally asked for).
+
+**Rollout:** backend-only change (`server.js`, `mcp/graph.mjs`, tests, docs)
+— no panel statics, no browser refresh needed.
