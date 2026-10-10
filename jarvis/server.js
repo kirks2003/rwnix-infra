@@ -14,6 +14,10 @@ const parsedUsers = parseUsers(process.env.USERS || "Mila,Roman,admin");
 
 const config = {
   publicBasePath: normalizeBasePath(process.env.PUBLIC_BASE_PATH || "/"),
+  // Opt-in white-label theme for branded deployments (the a1-enterprise demo
+  // on gpu-2 sets BRAND=a1). Unset/empty serves the app byte-identical to
+  // the pve104 default: no theme stylesheet, no logo, same index.html.
+  brand: (process.env.BRAND || "").trim().toLowerCase(),
   wakePhrase: process.env.WAKE_PHRASE || "Hey Rocky",
   silenceMs: Number(process.env.SILENCE_MS || 1500),
   whisperEndpoints: splitCsv(process.env.WHISPER_ENDPOINTS || "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions"),
@@ -25,6 +29,12 @@ const config = {
   brainModel: process.env.BRAIN_MODEL || "deepseek-v4-flash",
   brainApiKey: process.env.BRAIN_API_KEY || "",
   brainProfileDefault: process.env.BRAIN_PROFILE_DEFAULT || "a1-deepseek",
+  // Comma-separated AI profile ids to build and advertise. Unset (the
+  // pve104 default) builds every profile; the a1 demo on gpu-2 sets
+  // BRAIN_PROFILES=a1-deepseek,a1-qwen so the private profiles (Claude Code,
+  // OVHcloud, OpenRouter) are absent from /api/config entirely — no selector
+  // entries, no advertised endpoints. Unknown ids are ignored.
+  brainProfileAllowlist: splitCsv(process.env.BRAIN_PROFILES || ""),
   brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are Jarvis, a concise voice assistant. Answer in English, be helpful, and keep spoken answers short.",
   // `??`, not `||`: an explicitly empty TTS_ENDPOINTS must disable self-hosted TTS
   // and leave HAL 9000 on its speechSynthesis fallback.
@@ -611,7 +621,7 @@ function buildAiProfiles() {
     openrouter: ["OpenRouter", "rw_openrouter-qwen3.8-27b", true],
     claudecode: ["Claude Code", "rw-claude-Opus5.5", true],
   };
-  const profiles = Object.entries(defaults).map(([id, profile]) => ({
+  const all = Object.entries(defaults).map(([id, profile]) => ({
     id,
     label: labels[id][0],
     profile: labels[id][1],
@@ -620,6 +630,11 @@ function buildAiProfiles() {
     apiKey: profile.apiKey,
     configured: Boolean(profile.baseUrl && profile.model && (!labels[id][2] || profile.apiKey)),
   }));
+  // The allowlist decides which profiles the deployment advertises; the
+  // default-profile fallback below only ever sees the visible set.
+  const profiles = config.brainProfileAllowlist.length
+    ? all.filter((profile) => config.brainProfileAllowlist.includes(profile.id))
+    : all;
   if (!profiles.some((profile) => profile.id === config.brainProfileDefault && profile.configured)) {
     config.brainProfileDefault = profiles.find((profile) => profile.configured)?.id || "a1-deepseek";
   }
@@ -693,6 +708,7 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
   ".ico": "image/x-icon",
 };
 
@@ -1072,12 +1088,36 @@ function serveStatic(pathname, res) {
   if (!filePath.startsWith(publicDir)) return json(res, 403, { error: "forbidden" });
   fs.readFile(filePath, (error, data) => {
     if (error) return json(res, 404, { error: "not_found" });
+    let body = data;
+    if (config.brand === "a1" && safePath === "/index.html") {
+      body = Buffer.from(brandizeA1(data.toString("utf8")));
+    }
     res.writeHead(200, {
       "content-type": mimeTypes[path.extname(filePath)] || "application/octet-stream",
       "cache-control": "no-store",
     });
-    res.end(data);
+    res.end(body);
   });
+}
+
+// a1 white-label: serve a copy of index.html with the a1 theme stylesheet and
+// the a1 logo injected. Each injection is a guarded string replace against an
+// exact line of the current index.html — if a future edit moves that line the
+// replacement simply does not happen and the page degrades to the default
+// look instead of breaking. The file on disk (and every non-BRAND=a1
+// deployment) is never modified.
+function brandizeA1(html) {
+  const logo = (indent) => `${indent}<img class="brand-logo" src="/logo-a1.png" alt="a1" width="56" height="56">\n`;
+  return html
+    .replace(
+      '    <link rel="stylesheet" href="/style.css">',
+      '    <link rel="stylesheet" href="/style.css">\n    <link rel="stylesheet" href="/theme-a1.css">'
+    )
+    .replace('        <h1>Jarvis</h1>', logo("        ") + "        <h1>Jarvis</h1>")
+    .replace(
+      '          <p class="eyebrow">Jarvis web assistant</p>',
+      logo("          ") + '          <p class="eyebrow">Jarvis web assistant</p>'
+    );
 }
 
 function readBody(req, limitBytes) {

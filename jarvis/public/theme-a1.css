@@ -1,0 +1,187 @@
+/* a1 white-label theme — loaded after style.css ONLY when the server runs
+   with BRAND=a1 (the a1-enterprise demo on gpu-2). The pve104 default
+   deployment never loads this file: index.html is served byte-identical
+   without it and style.css is untouched.
+
+   The layout is the pve104 layout; only the palette changes, to the a1.net
+   look: white / light-gray surfaces, dark text, a1 red (#DA291C) as the
+   primary accent. Every rule below is a scoped override of a selector that
+   style.css hardcodes (it cannot follow the :root variables); selectors that
+   already use var(--*) recolor automatically through the :root block.
+
+   The graph visualization stages (.graph-canvas, .graph-3d-stage,
+   .graph-full-*) deliberately KEEP their dark #02050b background: the graph
+   is drawn in bright node colors, so it stays a dark "instrument screen"
+   even on the light page (same as the #log console). */
+
+:root {
+  --bg: #f4f4f4;
+  --panel: rgba(255, 255, 255, 0.92);
+  --text: #1b1b1d;
+  --muted: #6d6d72;
+  --cyan: #DA291C;
+  --accent-text: #DA291C;
+  --green: #0a8a46;
+  --amber: #b26a00;
+  --blue: #005FCC;
+  --purple: #6b3fc4;
+  --red: #a31212;
+}
+
+body {
+  background:
+    radial-gradient(circle at 20% 20%, rgba(218, 41, 28, 0.07), transparent 30%),
+    radial-gradient(circle at 80% 10%, rgba(0, 95, 204, 0.05), transparent 26%),
+    linear-gradient(135deg, #ffffff, var(--bg));
+}
+
+/* Login */
+.login-panel {
+  border: 1px solid rgba(218, 41, 28, 0.35);
+  box-shadow: 0 30px 120px rgba(0, 0, 0, 0.14);
+}
+.login-form input {
+  border: 1px solid rgba(27, 27, 29, 0.22);
+  background: #ffffff;
+}
+.login-status.error {
+  color: #a31212;
+}
+.sign-out {
+  background: rgba(27, 27, 29, 0.06);
+}
+
+/* Core visualization: ring borders follow var(--cyan) → a1 red; the glows
+   are hardcoded in style.css, softened to suit a light page. */
+.ring-a {
+  box-shadow: 0 0 34px rgba(218, 41, 28, 0.45), inset 0 0 30px rgba(218, 41, 28, 0.12);
+}
+.ring-b {
+  border: 2px dashed rgba(27, 27, 29, 0.35);
+}
+.prompting .ring-a {
+  box-shadow: 0 0 40px rgba(10, 138, 70, 0.45), inset 0 0 22px rgba(10, 138, 70, 0.18);
+}
+.command .ring-a, .recording .ring-a {
+  box-shadow: 0 0 34px rgba(10, 138, 70, 0.4), inset 0 0 20px rgba(10, 138, 70, 0.16);
+}
+.transcribing .ring-a {
+  box-shadow: 0 0 34px rgba(0, 95, 204, 0.45), inset 0 0 20px rgba(0, 95, 204, 0.16);
+}
+.thinking .ring-a, .computing .ring-a {
+  box-shadow: 0 0 34px rgba(178, 106, 0, 0.45), inset 0 0 20px rgba(178, 106, 0, 0.16);
+}
+.speaking .ring-a {
+  box-shadow: 0 0 34px rgba(107, 63, 196, 0.45), inset 0 0 20px rgba(107, 63, 196, 0.16);
+}
+.error .ring-a {
+  box-shadow: 0 0 34px rgba(163, 18, 18, 0.5);
+}
+
+/* Controls */
+.controls {
+  border: 1px solid rgba(27, 27, 29, 0.14);
+}
+button {
+  border: 1px solid rgba(218, 41, 28, 0.45);
+  background: rgba(218, 41, 28, 0.07);
+}
+.stage-preview {
+  border: 1px solid rgba(27, 27, 29, 0.14);
+}
+.stage-preview button.active {
+  background: rgba(218, 41, 28, 0.14);
+  box-shadow: 0 0 14px rgba(218, 41, 28, 0.25);
+}
+.lang-switch {
+  border: 1px solid rgba(27, 27, 29, 0.25);
+  background: rgba(27, 27, 29, 0.05);
+}
+.lang-knob {
+  background: rgba(218, 41, 28, 0.3);
+  box-shadow: 0 0 14px rgba(218, 41, 28, 0.3);
+}
+.wake-settings {
+  border: 1px solid rgba(27, 27, 29, 0.14);
+}
+#wakeWordInput {
+  border: 1px solid rgba(27, 27, 29, 0.25);
+  background: #ffffff;
+}
+#voiceSelect, #aiProfileSelect, #whisperProfileSelect {
+  border: 1px solid rgba(27, 27, 29, 0.25);
+  background: #ffffff;
+}
+
+/* Transcript */
+.transcript-panel {
+  border: 1px solid rgba(27, 27, 29, 0.14);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.10);
+}
+.transcript-list::-webkit-scrollbar-track {
+  background: rgba(27, 27, 29, 0.06);
+}
+.transcript-copy {
+  border-color: rgba(27, 27, 29, 0.2);
+}
+
+/* Graph panel shell (the visualization stages inside stay dark — see header) */
+.graph-panel {
+  border: 1px solid rgba(27, 27, 29, 0.14);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.10);
+}
+.graph-user {
+  border: 1px solid rgba(27, 27, 29, 0.2);
+}
+
+/* Panels & steps */
+.panel {
+  border: 1px solid rgba(27, 27, 29, 0.14);
+  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.10);
+}
+#steps li {
+  border: 1px solid rgba(27, 27, 29, 0.12);
+  background: rgba(27, 27, 29, 0.04);
+}
+#steps li:not(:last-child)::after {
+  background: rgba(27, 27, 29, 0.18);
+}
+#steps li.active {
+  border-color: rgba(178, 106, 0, 0.55);
+  box-shadow: 0 0 18px rgba(178, 106, 0, 0.18);
+}
+#steps li.done .step-dot {
+  box-shadow: 0 0 12px rgba(10, 138, 70, 0.4);
+}
+#steps li.skipped .step-dot {
+  border-color: #9a9aa0;
+}
+#steps li.skipped .step-name, #steps li.skipped .step-state {
+  color: #9a9aa0;
+}
+#steps li.error .step-dot {
+  background: rgba(163, 18, 18, 0.25);
+  box-shadow: 0 0 14px rgba(163, 18, 18, 0.4);
+}
+
+/* Log console + dialogs */
+#log {
+  color: #33333a;
+}
+dialog {
+  border: 1px solid rgba(27, 27, 29, 0.2);
+  background: #ffffff;
+}
+textarea {
+  border: 1px solid rgba(27, 27, 29, 0.25);
+  background: #ffffff;
+}
+
+/* The a1 logo injected into index.html by the server (BRAND=a1 only). */
+.brand-logo {
+  display: block;
+  margin-bottom: 8px;
+}
+.login-panel .brand-logo {
+  margin: 0 auto 6px;
+}
