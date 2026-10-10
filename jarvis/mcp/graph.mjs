@@ -148,7 +148,7 @@ export const TOOLS = [
   },
   {
     name: "list-my-facts",
-    description: "List the facts stored about the signed-in user (likes, ownership, family, home, work, ...), optionally filtered to one entity (about) or one relation type (relation, e.g. LIKES).",
+    description: "List the facts stored about the signed-in user (likes, ownership, family, home, work, the questions they asked — ASKED_ABOUT, rendered with the date and time of the question — ...), optionally filtered to one entity (about) or one relation type (relation, e.g. ASKED_ABOUT).",
     inputSchema: { type: "object", properties: { ...USER_PARAM, about: { type: "string", description: "Optional: only facts about this entity name." }, relation: { type: "string", description: "Optional: only this relation type, e.g. LIKES." } } },
   },
   // Owner-scoped write/delete tools. Regular sessions may target only the
@@ -234,9 +234,17 @@ export function formatKnowledge(rows) {
   return `This user knows: ${rows.map((row) => `${row.name} (${row.type || "thing"})`).join(", ")}.`;
 }
 
+// One fact as a sentence fragment. An ASKED_ABOUT row carries the question's
+// date — the edge's last_seen, booked by the ingestion upsert when the user
+// asked — rendered as "asked about -> Jean Reno (on 2026-10-10)".
+function factLine(row) {
+  const when = String(row.type || "").toUpperCase() === "ASKED_ABOUT" && row.lastSeen ? ` (on ${String(row.lastSeen).slice(0, 10)})` : "";
+  return `${plain(row.type)}${row.negative ? " (negative)" : ""} -> ${row.name}${when}`;
+}
+
 export function formatFacts(rows, about, relation) {
   if (!rows.length) return `No stored facts about this user${about ? ` mentioning "${about}"` : ""}${relation ? ` of type ${String(relation).toUpperCase()}` : ""} yet.`;
-  return `Facts about this user: ${rows.map((row) => `${plain(row.type)}${row.negative ? " (negative)" : ""} -> ${row.name}`).join("; ")}.`;
+  return `Facts about this user: ${rows.map(factLine).join("; ")}.`;
 }
 
 // Bookkeeping properties never rendered (the owner bookkeeping is shown in
@@ -284,7 +292,7 @@ export function formatFactsAll(rows) {
   for (const row of rows) {
     const key = String(row.user || "unknown");
     const list = byUser.get(key) || [];
-    list.push(`${plain(row.type)}${row.negative ? " (negative)" : ""} -> ${row.name}`);
+    list.push(factLine(row));
     byUser.set(key, list);
   }
   return `Stored facts per user: ${[...byUser.entries()].map(([user, list]) => `${user}: ${list.join("; ")}`).join("; ")}.`;
@@ -486,9 +494,12 @@ function startServer() {
       cypher += "AND type(r) = $relation ";
       params.relation = String(relation).toUpperCase().slice(0, 24);
     }
+    // lastSeen = the turn timestamp the upsert books on the edge: for an
+    // ASKED_ABOUT fact it is when the user asked the question, rendered in
+    // the answer ("asked about -> Jean Reno (on 2026-10-10)").
     cypher += admin
-      ? "RETURN type(r) AS type, u.name AS user, e.name AS name, coalesce(r.negative, false) AS negative ORDER BY user, type, name LIMIT 100"
-      : "RETURN type(r) AS type, e.name AS name, coalesce(r.negative, false) AS negative ORDER BY type, name LIMIT 100";
+      ? "RETURN type(r) AS type, u.name AS user, e.name AS name, coalesce(r.negative, false) AS negative, r.last_seen AS lastSeen ORDER BY user, type, name LIMIT 100"
+      : "RETURN type(r) AS type, e.name AS name, coalesce(r.negative, false) AS negative, r.last_seen AS lastSeen ORDER BY type, name LIMIT 100";
     const rows = await run(cypher, params);
     return admin ? formatFactsAll(rows) : formatFacts(rows, about, relation);
   }

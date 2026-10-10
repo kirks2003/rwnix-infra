@@ -101,6 +101,13 @@ export function renderGraph2d(svg, subgraph, { nodeScale = 1, userName = null, o
     line.setAttribute("y2", String(b.y));
     line.style.stroke = edgeMatched(edge) ? "rgba(66, 217, 255, 0.25)" : "rgba(66, 217, 255, 0.05)";
     line.setAttribute("stroke-width", "1");
+    // Hover tooltip: the plain-word relation plus, when the edge carries a
+    // turn timestamp (every edge the ingestion books has one — for an
+    // ASKED_ABOUT edge it is the date the user asked the question).
+    const tooltip = document.createElementNS(NS, "title");
+    const baseLabel = relationLabel(edge.type, edge.negative === true);
+    tooltip.textContent = edge.lastSeen ? `${baseLabel} · ${String(edge.lastSeen).slice(0, 10)}` : baseLabel;
+    line.appendChild(tooltip);
     svg.appendChild(line);
     // The relation in plain words (with the negative form), so a link reads
     // like a sentence with its two node labels ("Mila" —likes→ "Lego").

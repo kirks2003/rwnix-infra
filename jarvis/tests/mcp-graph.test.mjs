@@ -96,6 +96,17 @@ test("formatKnowledge lists the user's entities (or the empty state)", () => {
 test("formatFacts renders facts and the empty state with filters", () => {
   assert.equal(formatFacts([], "Lego", "LIKES"), 'No stored facts about this user mentioning "Lego" of type LIKES yet.');
   assert.equal(formatFacts([{ type: "LIKES", name: "Lego", negative: true }]), "Facts about this user: likes (negative) -> Lego.");
+  // An ASKED_ABOUT fact renders the question's date — the edge's last_seen,
+  // booked by the ingestion upsert when the user asked. Other facts carry no
+  // date, and a missing timestamp never renders a broken "(on undefined)".
+  assert.equal(
+    formatFacts([{ type: "ASKED_ABOUT", name: "Jean Reno", negative: false, lastSeen: "2026-10-10T07:15:00.000Z" }]),
+    "Facts about this user: asked about -> Jean Reno (on 2026-10-10).",
+  );
+  assert.equal(
+    formatFacts([{ type: "ASKED_ABOUT", name: "Jean Reno", negative: false }]),
+    "Facts about this user: asked about -> Jean Reno.",
+  );
 });
 
 // The admin variants are the only cross-user reads in this file. They run
@@ -144,6 +155,11 @@ test("formatKnowledgeAll and formatFactsAll group per user (and render empty sta
   assert.equal(
     formatFactsAll([{ type: "LIKES", user: "Mila", name: "Lego", negative: false }, { type: "OWNS", user: "Mila", name: "Car", negative: false }]),
     "Stored facts per user: Mila: likes -> Lego; owns -> Car.",
+  );
+  // The admin view renders the ASKED_ABOUT date too, per owner.
+  assert.equal(
+    formatFactsAll([{ type: "ASKED_ABOUT", user: "Mila", name: "Jean Reno", negative: false, lastSeen: "2026-10-10T07:15:00.000Z" }]),
+    "Stored facts per user: Mila: asked about -> Jean Reno (on 2026-10-10).",
   );
 });
 
