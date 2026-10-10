@@ -4664,3 +4664,35 @@ brain (which is what the user originally asked for).
 
 **Rollout:** backend-only change (`server.js`, `mcp/graph.mjs`, tests, docs)
 — no panel statics, no browser refresh needed.
+- **Verification (2026-10-10 ~09:15 UTC):** backed up as
+  `jarvis-code.bak-20261010_091022.tgz` (code only, the live `.env`
+  untouched), synced `server.js`, `mcp/graph.mjs`, `tests/` and
+  `README.md`, and appended this section to the host's `DEPLOYMENT.md`.
+  After `docker compose up -d --build`: both containers `healthy`,
+  `/api/health` OK (`brainConfigured: true`), in-image md5s match source
+  (`server.js fb8a3246c7dd8c30c1ae57418c487775`,
+  `mcp/graph.mjs 94f00e4f8a5abd8644f31be4096731e8`); no panel statics
+  changed, so no browser refresh is needed. (The container restart also
+  clears the in-memory login sessions — the next sign-in re-establishes
+  them, as designed.)
+- **Incident entities:** all three were already removed by the user's own
+  retry at 09:04 CEST — this time the brain called `list-my-knowledge`
+  first and deleted with the exact stored names (activity: three
+  `delete-entity` writes, `phi-mini`, `Jarvis vm104 Vikunja smoke
+  1791547997`, `Self-hosted LLM`).
+- **Live verification of the new code:** the close-match query against the
+  real data (`warcraft forever` → `["Warcraft Forever Collection"]`,
+  `close match probe xyz thing` → `["Close Match Probe Xyz"]`, exact
+  matches excluded, no containment → none); a real brain turn as Roman
+  (toggle on, "Please delete the close match probe entity from my
+  graph.") → the brain called `delete-entity`, audited `ok:true` under
+  the new success-prefix verification, and the entity was gone from the
+  subgraph; the real MCP handler end to end (subprocess against live
+  Neo4j) with a non-exact phrasing → `Deleted "Close Match Probe Xyz"
+  (owner Roman) and its links (the unique close match to your request
+  "close match probe xyz thing")` — the entity was actually deleted; and
+  the not-found path → `No entity named "quantum entanglement device"
+  owned by Roman in the graph. The deletion did not happen.` (a non-error
+  result the backend now audits `ok:false` and feeds back as "The
+  operation did NOT succeed"). All probe entities cleaned up; nothing
+  left behind.
