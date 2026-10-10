@@ -37,7 +37,7 @@ were retired on 2026-10-09. Any future service MCP should document whether it
 is vm104-local/shared or region-local before rollout; do not assume the old
 Vikunja per-gateway pattern still exists. Full context: `vikunja-mcp.md`.
 
-### Jarvis graph brain ingestion policy (added 2026-10-09)
+### Jarvis graph brain ingestion policy (added 2026-10-09, question storage added 2026-10-10)
 
 Every Jarvis prompt/answer turn is extracted — one structured LLM call,
 backend-side, fire-and-forget, never the brain — into entities and relation
@@ -54,6 +54,25 @@ cross-owner tools) are deliberate actions and stay unaffected. Enforced in
 `tests/graph.test.mjs` and `tests/server.test.mjs`. Docs:
 `jarvis/README.md` ("Knowledge graph (Neo4j)" → "Stored policy: ingestion
 only while the toggle is on").
+
+**Question storage (2026-10-10):** a turn whose prompt is a question about
+something stores, connected to the asking user, (1) the question subject as
+an entity, (2) the answer's concrete entities and their links to the subject
+(e.g. the films in a "tell me more about Jean Reno" answer,
+`Jean Reno -ACTED_IN-> Léon: The Professional`), and (3) one
+`ASKED_ABOUT` edge from the user's `:User` node to the subject carrying the
+question's date and time (the edge's `last_seen`). The subjects come from the
+extraction's `question_subjects` field (≤3); the `ASKED_ABOUT` edge itself is
+booked deterministically by the backend — the type is reserved like `KNOWS`
+and the extraction/brain can never emit it. The date is an edge attribute,
+not a standalone node (keeps the 12-entity/turn budget; the edge attribute
+answers "what did I ask about, and when?"). Surfaced in the panel (2D hover
+tooltip) and the brain's `list-my-facts` (`asked about -> Jean Reno (on
+2026-10-10)`). Enforced in `jarvis/graphdb.js` (`parseExtraction` +
+`upsertTurn`), regression-tested in `tests/graph.test.mjs`
+("a question turn stores the subject, the answer entities, the ASKED_ABOUT
+link and the ask date"), `tests/mcp-graph.test.mjs` and
+`tests/graph.browser.mjs`.
 
 See `kandev-opencode-dsv4f-setup.md` for the Kandev opencode setup details.
 See `kandev-opencode-qwen-setup.md` for the Kandev opencode a1-qwen38-27b setup details.

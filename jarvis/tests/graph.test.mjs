@@ -21,6 +21,7 @@ test("parseExtraction handles plain, fenced and prose-wrapped JSON", () => {
   assert.deepEqual(plain, {
     entities: [{ name: "Mila", type: "person", props: {} }],
     relations: [{ from: "Mila", to: "Berlin", type: "LIVES_IN", negative: false }],
+    subjects: [],
   });
   const fenced = graphdb.parseExtraction('Here you go:\n```json\n{"entities":[{"name":"Berlin","type":"place"}],"relations":[]}\n```\nDone.');
   assert.equal(fenced.entities.length, 1);
@@ -90,8 +91,8 @@ test("parseToolCallsFromContent leaves ordinary answers untouched", () => {
 });
 
 test("parseExtraction drops duplicates, self-relations and garbage", () => {
-  assert.deepEqual(graphdb.parseExtraction("no json here"), { entities: [], relations: [] });
-  assert.deepEqual(graphdb.parseExtraction("{{{"), { entities: [], relations: [] });
+  assert.deepEqual(graphdb.parseExtraction("no json here"), { entities: [], relations: [], subjects: [] });
+  assert.deepEqual(graphdb.parseExtraction("{{{"), { entities: [], relations: [], subjects: [] });
   const parsed = graphdb.parseExtraction(JSON.stringify({
     entities: [
       { name: "  Mila  ", type: "PERSON" },
@@ -126,6 +127,37 @@ test("parseExtraction carries the negation flag (only boolean true counts)", () 
     { from: "Mila", to: "Lego", type: "LIKES", negative: true },
     { from: "Mila", to: "Lego", type: "USES", negative: false },
     { from: "Mila", to: "Berlin", type: "LIVES_IN", negative: false },
+  ]);
+});
+
+test("parseExtraction parses question subjects: canonicalised, deduped, capped, auto-added", () => {
+  const parsed = graphdb.parseExtraction(JSON.stringify({
+    entities: [
+      { name: "Roman", type: "person" },
+      { name: "Jean Reno", type: "person" },
+      { name: "Léon: The Professional", type: "thing" },
+    ],
+    relations: [
+      { from: "Jean Reno", to: "Léon: The Professional", type: "ACTED_IN" },
+      { from: "Roman", to: "Jean Reno", type: "ASKED_ABOUT" },
+    ],
+    question_subjects: ["jean reno", "Jean Reno", null, "Bruce Willis", "Bruce Willis", "Mel Gibson", "Dwayne Johnson"],
+  }));
+  // A subject is canonicalised to the entity's spelling, deduped
+  // case-insensitively and capped at three — the fourth distinct name is
+  // dropped with its would-be entity.
+  assert.deepEqual(parsed.subjects, ["Jean Reno", "Bruce Willis", "Mel Gibson"]);
+  // A subject missing from the entities list is added (type "thing"), so the
+  // subject node is never lost to the "only entities a fact connects are
+  // stored" rule.
+  assert.deepEqual(parsed.entities.find((entity) => entity.name === "Bruce Willis"), { name: "Bruce Willis", type: "thing", props: {} });
+  assert.deepEqual(parsed.entities.find((entity) => entity.name === "Mel Gibson"), { name: "Mel Gibson", type: "thing", props: {} });
+  assert.ok(!parsed.entities.some((entity) => entity.name === "Dwayne Johnson"), "past the cap: no entity, no subject");
+  // ASKED_ABOUT is reserved: an LLM-emitted copy degrades to RELATED_TO like
+  // any prose type — the backend books the real edge itself.
+  assert.deepEqual(parsed.relations, [
+    { from: "Jean Reno", to: "Léon: The Professional", type: "ACTED_IN", negative: false },
+    { from: "Roman", to: "Jean Reno", type: "RELATED_TO", negative: false },
   ]);
 });
 
@@ -782,6 +814,56 @@ test("neo4j store: an introduced relation type is merged under its own name (own
   assert.ok(!calls.some((call) => call.cypher.includes("I AM NOT SURE")), "malformed types are dropped before any query");
 });
 
+test("neo4j store: question subjects get a deterministic ASKED_ABOUT edge from the user's :User node", async () => {
+  const calls = [];
+  const fakeFactory = () => ({
+    session() {
+      return {
+        async run(cypher, params) { calls.push({ cypher, params }); return { records: [] }; },
+        async close() {},
+      };
+    },
+  });
+  const store = graphdb.createGraphStore({
+    uri: "bolt://mock:7687",
+    database: "neo4j",
+    readUser: "r",
+    readPassword: "r",
+    writeUser: "w",
+    writePassword: "w",
+    driverFactory: fakeFactory,
+    users: ["Mila", "Roman"],
+  });
+  await store.upsertTurn({
+    user: "Roman",
+    entities: [
+      { name: "Jean Reno", type: "person", props: {} },
+      { name: "Léon: The Professional", type: "thing", props: {} },
+    ],
+    relations: [{ from: "Jean Reno", to: "Léon: The Professional", type: "ACTED_IN" }],
+    subjects: ["Jean Reno"],
+  });
+  // The backend (never the extraction) books one ASKED_ABOUT edge per
+  // subject, from the user's :User node to the subject's :Entity copy.
+  const merge = calls.find((call) => call.cypher.includes("ASKED_ABOUT"));
+  assert.ok(merge, "expected the MERGE for the ASKED_ABOUT edge");
+  assert.ok(merge.cypher.includes("MERGE (a)-[r:ASKED_ABOUT]->(b)"), merge.cypher);
+  assert.ok(merge.cypher.includes("MATCH (a:User {name: row.from})"), `the source is the user's account node: ${merge.cypher}`);
+  assert.ok(merge.cypher.includes("MATCH (b:Entity {owner: $user}) WHERE toLower(b.name) = toLower(row.to)"), `the target is the user's own copy: ${merge.cypher}`);
+  const askedRow = merge.params.rows.find((row) => row.type === undefined && row.from === "Roman" && row.to === "Jean Reno");
+  assert.ok(askedRow, `the edge rows carry the deterministic endpoints: ${JSON.stringify(merge.params.rows)}`);
+  assert.ok(askedRow.negative === false, "a question was asked, full stop");
+  // The turn's timestamp lands on the edge (r.last_seen) — the question's
+  // date and time, surfaced by the panel and the brain.
+  assert.ok(merge.cypher.includes("SET r.last_seen = row.now"), merge.cypher);
+  assert.match(askedRow.now, /^\d{4}-\d{2}-\d{2}T/);
+  // A subject the user does not own and never stored is not resolvable: no
+  // dangling edge is written.
+  calls.length = 0;
+  await store.upsertTurn({ user: "Roman", entities: [], relations: [], subjects: ["Nobody Ever Stored"] });
+  assert.ok(!calls.some((call) => call.cypher.includes("ASKED_ABOUT")), "an unresolvable subject writes no edge");
+});
+
 test("neo4j store: upsertTurn Cypher uses only valid relationship patterns", async () => {
   // Neo4j rejects reversed patterns written as -[:KNOWS<-] (parse error at
   // the "<"); the shared-knowledge step used to do exactly that, which made
@@ -1000,6 +1082,9 @@ test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and ret
   assert.ok(edgeQuery, "expected the newest-mode edge query");
   assert.ok(edgeQuery.cypher.includes("type(r) <> 'KNOWS'"), `KNOWS must be filtered: ${edgeQuery.cypher}`);
   assert.ok(edgeQuery.cypher.includes("coalesce(r.negative, false)"), `negation must be returned: ${edgeQuery.cypher}`);
+  // The edge's turn timestamp is returned too (r.last_seen): for an
+  // ASKED_ABOUT edge it is the date the user asked, drawn by the panel.
+  assert.ok(edgeQuery.cypher.includes("r.last_seen AS lastSeen"), `the edge timestamp must be returned: ${edgeQuery.cypher}`);
   // Every :Entity endpoint must be in the user's owned set; :User endpoints
   // are account markers; pure user-to-user edges are limited to their parties.
   assert.ok(edgeQuery.cypher.includes("(a:User OR elementId(a) IN $ids)"), `entity endpoints must be owner-scoped: ${edgeQuery.cypher}`);
@@ -1139,6 +1224,21 @@ const INTEREST_JSON = JSON.stringify({
   entities: [{ name: "Home Assistant", type: "thing", props: {} }],
   relations: [{ from: "Roman", to: "Home Assistant", type: "INTERESTED_IN" }],
 });
+// A question turn: the question subject (Jean Reno), the answer's films as
+// entities linked to the subject, and the subject the backend links to the
+// user with a deterministic ASKED_ABOUT edge.
+const QUESTION_TEST_JSON = JSON.stringify({
+  entities: [
+    { name: "Jean Reno", type: "person", props: {} },
+    { name: "Léon: The Professional", type: "thing", props: {} },
+    { name: "La Femme Nikita", type: "thing", props: {} },
+  ],
+  relations: [
+    { from: "Jean Reno", to: "Léon: The Professional", type: "ACTED_IN" },
+    { from: "Jean Reno", to: "La Femme Nikita", type: "ACTED_IN" },
+  ],
+  question_subjects: ["Jean Reno"],
+});
 
 before(async () => {
   upstream = createServer(async (req, res) => {
@@ -1150,11 +1250,13 @@ before(async () => {
     const systemText = (body.messages || []).map(textOf).join("\n");
     res.setHeader("content-type", "application/json");
     if (systemText.includes("extract knowledge-graph entities")) {
-      extractionRequests += 1;
-      const userMention = systemText.includes("user-account-mention");
-      const interest = systemText.includes("interest-test");
-      return res.end(JSON.stringify({ choices: [{ message: { content: userMention ? USER_MENTION_JSON : interest ? INTEREST_JSON : EXTRACT_JSON } }] }));
-    }
+       extractionRequests += 1;
+       const userMention = systemText.includes("user-account-mention");
+       const interest = systemText.includes("interest-test");
+       const question = systemText.includes("question-test");
+       const extraction = userMention ? USER_MENTION_JSON : interest ? INTEREST_JSON : question ? QUESTION_TEST_JSON : EXTRACT_JSON;
+       return res.end(JSON.stringify({ choices: [{ message: { content: extraction } }] }));
+     }
     const lastUser = [...(body.messages || [])].reverse().find((message) => message.role === "user");
     const wantsDelete = String(lastUser?.content || "").includes("Delete everything");
     // The "Store the entity/fact" and "Delete the entity via the graph"
@@ -1433,6 +1535,59 @@ test("a chat with the graph toggle off stores nothing: no extraction, no entitie
   const subAfter = await (await auth(origin, "/api/graph/subgraph?limit=60", cookie)).json();
   assert.equal(subAfter.nodes.length, subBefore.nodes.length, JSON.stringify({ subBefore, subAfter }));
   assert.equal(subAfter.edges.length, subBefore.edges.length, JSON.stringify({ subBefore, subAfter }));
+});
+
+test("a question turn stores the subject, the answer entities, the ASKED_ABOUT link and the ask date", async () => {
+  const origin = origins[1];
+  // Mila: her world already holds Amelie (the earlier ingest), and this
+  // stays her second ingest, so Roman's "first ingest sweeps Coffee" test
+  // below keeps its precondition.
+  const cookie = await login(origin, "Mila");
+  toolRequests = [];
+  finalRequests = [];
+  const response = await fetch(`${origin}/api/chat`, {
+    method: "POST", headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ prompt: "question-test: tell me more about Jean Reno", mcp: { graph: true, websearch: false } }),
+  });
+  assert.equal(response.status, 200);
+  // The brain was told questions are stored with the date, and the
+  // list-my-facts tool description carries ASKED_ABOUT.
+  const brainSystem = (toolRequests[0]?.messages || []).map((message) => String(message.content || "")).join("\n");
+  assert.match(brainSystem, /ASKED_ABOUT fact that carries the date and time/);
+  // Ingestion is fire-and-forget: poll until the memory store recorded it.
+  // (Mila's earlier ingest stored 1 relation; the question turn stores 3.)
+  const ingest = await waitFor(async () => {
+    const entries = (await (await auth(origin, "/api/graph/activity", cookie)).json()).entries;
+    return entries.find((entry) => entry.kind === "ingest" && entry.user === "Mila" && entry.relations >= 3);
+  });
+  // The extraction prompt asks for the question subjects and the answer's
+  // entities, and forbids the LLM from emitting ASKED_ABOUT itself (the
+  // backend books the edge).
+  const extractionSystem = (receivedChat.messages || []).map((message) => String(message.content || "")).join("\n");
+  assert.match(extractionSystem, /question_subjects/);
+  assert.match(extractionSystem, /Never emit a relation of type ASKED_ABOUT/);
+  // Three entities (the subject + the two films), three relations (two
+  // ACTED_IN + the deterministic ASKED_ABOUT).
+  assert.equal(ingest.entities, 3, JSON.stringify(ingest));
+  assert.equal(ingest.relations, 3, JSON.stringify(ingest));
+  const sub = await (await auth(origin, "/api/graph/subgraph?limit=60", cookie)).json();
+  // The question subject is stored as an entity of the asking user …
+  const reno = sub.nodes.find((node) => node.name === "Jean Reno");
+  assert.ok(reno, "the question subject is stored as an entity");
+  assert.equal(reno.type, "person");
+  assert.equal(reno.owner, "Mila", "owner-keyed to the asking user");
+  // … the answer's films are stored too, linked to the subject …
+  assert.ok(sub.nodes.some((node) => node.name === "Léon: The Professional" && node.owner === "Mila"), "the answer's films are stored");
+  assert.ok(sub.nodes.some((node) => node.name === "La Femme Nikita" && node.owner === "Mila"));
+  assert.equal(sub.edges.filter((edge) => edge.type === "ACTED_IN").length, 2, JSON.stringify(sub.edges));
+  // … and the user is linked to the subject with ASKED_ABOUT, carrying the
+  // date and time the question was asked.
+  const asked = sub.edges.find((edge) => edge.type === "ASKED_ABOUT");
+  assert.ok(asked, "the user is linked to the question subject");
+  const milaNode = sub.nodes.find((node) => node.name === "Mila");
+  assert.equal(asked.source, milaNode.id, "ASKED_ABOUT runs from the user's own node");
+  assert.equal(asked.target, reno.id, "… to the subject entity");
+  assert.match(asked.lastSeen, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, `the question carries its timestamp: ${JSON.stringify(asked)}`);
 });
 
 test("mentioning a registered user stores no entity and the feed says so", async () => {

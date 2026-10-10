@@ -4497,3 +4497,73 @@ still stored in the graph after the answer").
   `mcp.graph=true` answered "the toggle is on" from the ON state line,
   again with zero ingest lines (admin gate intact); `/api/graph/status`
   still answers with the live data (31 nodes / 45 edges).
+
+## 2026-10-10: question turns store the subject, the answer entities, the user link and the ask date
+
+**Feature (user request).** When the user prompts a question (toggle on), the
+graph brain automatically stores — connected to the asking user — (1) the
+question's subject as an entity (e.g. "Jean Reno" from "tell me more about
+Jean Reno"), (2) the answer's concrete entities and their links to the
+subject (the films: `Jean Reno -ACTED_IN-> Léon: The Professional`), and (3)
+one `ASKED_ABOUT` edge from the user's `:User` node to the subject carrying
+the question's date and time (the edge's `last_seen`, the same timestamp
+every upsert books). The date is an edge attribute, not a standalone node:
+a per-question event node would spend the turn's 12-entity budget and
+clutter the world, while the attribute answers "what did I ask about, and
+when?" the same way.
+
+**Changes.**
+- `graphdb.js`: `ASKED_ABOUT` added to `RELATION_TYPES` and
+  `RESERVED_RELATION_TYPES` (reserved like `KNOWS`: only the backend's
+  deterministic path writes it — the extraction/brain can never emit it, an
+  LLM-emitted copy degrades to `RELATED_TO`). `parseExtraction` parses the
+  new `question_subjects` extraction field (≤3, canonicalised to the
+  entity's spelling, deduped case-insensitively, a subject missing from the
+  entities list is auto-added as `thing` so the subject node is never lost).
+  Both `upsertTurn` implementations (Neo4j + memory) resolve each subject
+  and book the `ASKED_ABOUT` edge from the signed-in user's `:User` node
+  (a subject named after a registered user targets that user's `:User`
+  node — a pure user-to-user edge, visible only to its two parties); the
+  edge is what keeps the subject connected to the user, so a question about
+  X always stores X and survives the disconnect sweep. Memory-store
+  `addEdge` books `firstSeen`/`lastSeen` like the Neo4j `r.last_seen`;
+  the panel read paths (`EDGE_RETURN` + both subgraph centre queries)
+  return `r.last_seen AS lastSeen` on every edge.
+- `server.js`: `EXTRACT_SYSTEM_PROMPT` — the extraction JSON shape gains
+  `question_subjects`; new rules (name the question's subjects; store the
+  answer's entities and their links to the subject; never emit
+  `ASKED_ABOUT` yourself) with the Jean Reno example; `ingestTurn` logs the
+  subject count; the brain's ON-state prompt (both branches) and the
+  `list-my-facts` tool description (user + admin) tell the brain questions
+  are stored as `ASKED_ABOUT` facts with the date, so "what did I ask
+  about, and when?" is answered from `list-my-facts (relation ASKED_ABOUT)`.
+- `mcp/graph.mjs`: `list-my-facts` (user + admin) RETURNs `r.last_seen`;
+  `formatFacts`/`formatFactsAll` render the date for `ASKED_ABOUT` rows
+  (`asked about -> Jean Reno (on 2026-10-10)`); the tool description
+  updated.
+- `public/relLabel.js`: `ASKED_ABOUT` → "asked about" (negative: "never
+  asked about"). `public/graph2d.js`: the 2D edge hover tooltip shows the
+  plain-word relation plus the date when the edge carries a timestamp.
+
+**Tests.** New unit: `parseExtraction` question-subject handling
+(canonicalise/dedupe/cap/auto-add + `ASKED_ABOUT` not emittable), the
+Neo4j `upsertTurn` `ASKED_ABOUT` MERGE pin (deterministic edge from the
+`:User` node, timestamp on the edge, no dangling edge for an unresolvable
+subject), and the edge-query `lastSeen` projection pin. New integration
+(`tests/graph.test.mjs`, mock brain `question-test` marker): a question
+turn stores the subject entity, the answer's films, two `ACTED_IN` links
+and the `ASKED_ABOUT` edge with an ISO timestamp, and pins both the
+extraction prompt and the brain's ON prompt. `tests/mcp-graph.test.mjs`:
+the `ASKED_ABOUT` date rendering in both formatters. New browser test
+(`tests/graph.browser.mjs`): the 2D tooltip carries the ask date. Full
+unit suite 173/173, browser suite 58 pass / 2 opt-in live skips.
+
+**Effect on live data:** none — no migration. Existing edges already carry
+`r.last_seen` (the upsert always booked it); it is now surfaced. Old
+`ASKED_ABOUT`-less worlds simply have no question edges until the next
+question turn.
+
+**Rollout:** backend + panel change (`server.js`, `graphdb.js`,
+`mcp/graph.mjs`, `public/graph2d.js`, `public/relLabel.js`, tests, docs) —
+the panel statics changed, so browsers need a hard refresh
+(Ctrl+Shift+R) to pick up the tooltip.

@@ -149,6 +149,30 @@ test("the graph panel renders the graph, schema and activity", async (t) => {
   assert.match(activity[3], /brain wrote store-fact: owner=Mila, from=Mila, to=Pizza, type=LIKES$/);
 });
 
+test("the 2D edge tooltip carries the edge's timestamp (the ask date for ASKED_ABOUT)", async (t) => {
+  const page = await openPanel(t);
+  // A question turn's world: the user, the question subject and the
+  // ASKED_ABOUT edge carrying the date and time the question was asked.
+  // Registered last, so it wins over the initial subgraph route.
+  await page.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: {
+    nodes: [
+      { id: "n0", name: "Mila", owner: null },
+      { id: "n1", name: "Jean Reno", type: "person", owner: "Mila" },
+    ],
+    edges: [
+      { source: "n0", target: "n1", type: "ASKED_ABOUT", lastSeen: "2026-10-10T07:15:00.000Z" },
+    ],
+  } }));
+  await page.click("#graphView2dButton"); // the 3D view is the default
+  await page.waitForSelector("#graphCanvas circle");
+  const labels = await page.locator("#graphCanvas text.edge-label").allTextContents();
+  assert.ok(labels.includes("asked about"), `the ASKED_ABOUT edge renders its plain-word label: ${JSON.stringify(labels)}`);
+  // The hover tooltip shows the relation in plain words plus the date the
+  // question was asked (the edge's lastSeen).
+  const titles = await page.$$eval("#graphCanvas line title", (titles) => titles.map((title) => title.textContent));
+  assert.deepEqual(titles, ["asked about · 2026-10-10"], `the tooltip carries the question's date: ${JSON.stringify(titles)}`);
+});
+
 test("clicking a node re-centres the panel on its neighbourhood", async (t) => {
   const page = await openPanel(t);
   await page.click("#graphView2dButton"); // the 3D view is the default

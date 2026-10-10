@@ -13,11 +13,13 @@ const ENTITY_TYPES = new Set(["person", "place", "organization", "event", "topic
 const RELATION_TYPES = new Set([
   "WORKS_AT", "LIVES_IN", "STUDIES_AT", "BORN_IN", "FRIEND_OF", "FAMILY_OF",
   "PART_OF", "LOCATED_IN", "RELATED_TO", "MENTIONED_IN", "LIKES", "WENT_TO",
-  "OWNS", "USES",
+  "OWNS", "USES", "ASKED_ABOUT",
 ]);
-// The one type the ingestion itself books: it must never be emittable by an
-// extraction (KNOWS is internal bookkeeping, never a stored fact).
-const RESERVED_RELATION_TYPES = new Set(["KNOWS"]);
+// Types the ingestion itself books: they must never be emittable by an
+// extraction (KNOWS is internal bookkeeping, ASKED_ABOUT is the deterministic
+// user→question-subject edge the backend adds for question turns — a stored
+// fact in the panel and for the brain, but never LLM-invented).
+const RESERVED_RELATION_TYPES = new Set(["KNOWS", "ASKED_ABOUT"]);
 const MAX_ENTITIES = 12;
 const MAX_RELATIONS = 15;
 const PROP_KEYS = new Set(["name", "type", "common", "owner", "id", "elementId"]);
@@ -203,7 +205,7 @@ function parseExtraction(text) {
   try {
     data = JSON.parse(fenced ? fenced[1] : start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned);
   } catch {
-    return { entities: [], relations: [] };
+    return { entities: [], relations: [], subjects: [] };
   }
   const seen = new Set();
   const entities = [];
@@ -241,7 +243,34 @@ function parseExtraction(text) {
     relations.push({ from, to, type, negative: raw && raw.negative === true });
     if (relations.length >= MAX_RELATIONS) break;
   }
-  return { entities, relations };
+  // The question's subjects: who or what the PROMPT itself is asking about
+  // ("tell me more about Jean Reno" -> "Jean Reno"). The backend books a
+  // deterministic ASKED_ABOUT edge from the signed-in user to each of them
+  // (the extraction never emits that type — it is reserved). A subject must
+  // be an entity of this turn: if the extractor named it in
+  // question_subjects but forgot the entities list, the name is added here
+  // (type "thing") so the subject node is never lost to the "only entities a
+  // fact connects are stored" rule. At most 3: a question is about a thing,
+  // not a shopping list.
+  const subjectKeys = new Set();
+  const subjects = [];
+  for (const raw of Array.isArray(data.question_subjects) ? data.question_subjects : []) {
+    const name = sanitizeName(raw);
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (subjectKeys.has(key)) continue;
+    subjectKeys.add(key);
+    const known = entities.find((entity) => entity.name.toLowerCase() === key);
+    if (known) {
+      subjects.push(known.name);
+    } else if (entities.length < MAX_ENTITIES) {
+      entities.push({ name, type: "thing", props: {} });
+      seen.add(key);
+      subjects.push(name);
+    }
+    if (subjects.length >= 3) break;
+  }
+  return { entities, relations, subjects };
 }
 
 // The brain's context is this user's PRIVATE knowledge only: the entities
@@ -293,10 +322,13 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
   // list-my-knowledge reports is what the panel shows. With `admin`: the
   // WHOLE graph — every :User and :Entity node and every fact edge — because
   // the admin session is the one place allowed to see all users' data.
+  // lastSeen = the turn timestamp the upsert MERGE books on the edge
+  // (r.last_seen): for an ASKED_ABOUT edge it is when the user asked the
+  // question, surfaced by the panel (tooltip) and the brain's list-my-facts.
   const EDGE_RETURN =
     "RETURN elementId(a) AS source, a.name AS sourceName, a.type AS sourceType, a.owner AS sourceOwner, " +
     "elementId(b) AS target, b.name AS targetName, b.type AS targetType, b.owner AS targetOwner, " +
-    "type(r) AS type, coalesce(r.negative, false) AS negative";
+    "type(r) AS type, coalesce(r.negative, false) AS negative, r.last_seen AS lastSeen";
   async function visibleWorld(user, cap, userRows = null, admin = false) {
     let byId;
     if (admin) {
@@ -350,7 +382,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       if (!byId.has(row.source)) byId.set(row.source, { id: row.source, name: row.sourceName, type: row.sourceType, owner: row.sourceOwner, isolated: false });
       if (!byId.has(row.target)) byId.set(row.target, { id: row.target, name: row.targetName, type: row.targetType, owner: row.targetOwner, isolated: false });
     }
-    const edges = edgeRows.map((row) => ({ source: row.source, target: row.target, type: row.type, negative: row.negative === true }));
+    const edges = edgeRows.map((row) => ({ source: row.source, target: row.target, type: row.type, negative: row.negative === true, lastSeen: row.lastSeen || null }));
     for (const edge of edges) {
       const source = byId.get(edge.source);
       const target = byId.get(edge.target);
@@ -471,7 +503,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
             "WHERE r IS NULL OR type(r) <> 'KNOWS' " +
             "RETURN elementId(a) AS id, a.name AS name, a.type AS type, a.owner AS owner, " +
             "elementId(b) AS other, b.name AS otherName, b.type AS otherType, b.owner AS otherOwner, type(r) AS rel, " +
-            "coalesce(r.negative, false) AS negative " +
+            "coalesce(r.negative, false) AS negative, r.last_seen AS lastSeen " +
             "LIMIT 200",
             { center },
           ));
@@ -480,7 +512,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
           for (const row of nodeRows) {
             if (!byId.has(row.id)) byId.set(row.id, { id: row.id, name: row.name, type: row.type, owner: row.owner, isolated: false });
             if (row.other && !byId.has(row.other)) byId.set(row.other, { id: row.other, name: row.otherName, type: row.otherType, owner: row.otherOwner, isolated: false });
-            if (row.other && row.rel) edges.push({ source: row.id, target: row.other, type: row.rel, negative: row.negative === true });
+            if (row.other && row.rel) edges.push({ source: row.id, target: row.other, type: row.rel, negative: row.negative === true, lastSeen: row.lastSeen || null });
           }
           return { nodes: [...byId.values()], edges: edges.slice(0, 200), center };
         }
@@ -509,7 +541,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
           "WHERE r IS NULL OR (type(r) <> 'KNOWS' AND (b:User OR (b:Entity AND b.owner = $user))) " +
           "RETURN elementId(a) AS id, a.name AS name, a.type AS type, a.owner AS owner, " +
           "elementId(b) AS other, b.name AS otherName, b.type AS otherType, b.owner AS otherOwner, type(r) AS rel, " +
-          "coalesce(r.negative, false) AS negative " +
+          "coalesce(r.negative, false) AS negative, r.last_seen AS lastSeen " +
           "LIMIT 200",
           { user, center },
         ));
@@ -518,7 +550,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         for (const row of nodeRows) {
           if (!byId.has(row.id)) byId.set(row.id, { id: row.id, name: row.name, type: row.type, owner: row.owner, isolated: false });
           if (row.other && !byId.has(row.other)) byId.set(row.other, { id: row.other, name: row.otherName, type: row.otherType, owner: row.otherOwner, isolated: false });
-          if (row.other && row.rel) edges.push({ source: row.id, target: row.other, type: row.rel, negative: row.negative === true });
+          if (row.other && row.rel) edges.push({ source: row.id, target: row.other, type: row.rel, negative: row.negative === true, lastSeen: row.lastSeen || null });
         }
         return { nodes: [...byId.values()], edges: edges.slice(0, 200), center };
       }
@@ -576,7 +608,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
     // matter how the type or casing is re-extracted), which is what makes the
     // whole graph per-user private by construction (reads match on owner, so
     // no query can cross the boundary).
-    async upsertTurn({ user, entities = [], relations = [] }) {
+    async upsertTurn({ user, entities = [], relations = [], subjects = [] }) {
       const now = new Date().toISOString();
       // Every registered user is ONE node: their :User account doubles as the
       // person entity. So any entity or relation endpoint named after a
@@ -600,7 +632,9 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       const typed = relations.filter((relation) => isRelationType(relation.type));
       const lower = (name) => String(name).toLowerCase();
       const candidateNames = new Set(candidates.map((entity) => lower(entity.name)));
-      const referenced = [...new Set(typed.flatMap((relation) => [lower(relation.from), lower(relation.to)]))];
+      // The question subjects are referenced by the ASKED_ABOUT edges built
+      // below, so they count for the stored-copy lookup as well.
+      const referenced = [...new Set([...typed.flatMap((relation) => [lower(relation.from), lower(relation.to)]), ...subjects.map((subject) => lower(subject))])];
       const storedNames = new Set();
       if (referenced.length) {
         const storedRows = rows(await run(readClient,
@@ -610,7 +644,23 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
         for (const row of storedRows) storedNames.add(row.name);
       }
       const resolvable = (name) => isUser(name) || candidateNames.has(lower(name)) || storedNames.has(lower(name));
-      const writable = typed.filter((relation) => resolvable(relation.from) && resolvable(relation.to) && lower(relation.from) !== lower(relation.to));
+      // The question's subjects: one ASKED_ABOUT edge each, from the
+      // signed-in user (their :User node) to the subject — the "who asked
+      // what" connector. The backend books them, never the extraction (the
+      // type is reserved), and the turn's timestamp lands on the edge via the
+      // MERGE below (r.last_seen), so the question's date and time are part of
+      // the stored fact. The edge is also what keeps the subject entity
+      // connected to the user, so a question about X always stores X. A
+      // subject resolves like any relation endpoint: a registered user's name
+      // is their :User node (a pure user-to-user edge, visible only to its
+      // two parties), everything else is the turn user's own entity copy.
+      const askedAbout = subjects
+        .filter((subject) => resolvable(subject) && lower(subject) !== lower(user))
+        .map((subject) => ({ from: user, to: subject, type: "ASKED_ABOUT", negative: false }));
+      const writable = [
+        ...typed.filter((relation) => resolvable(relation.from) && resolvable(relation.to) && lower(relation.from) !== lower(relation.to)),
+        ...askedAbout,
+      ];
       const connected = new Set(writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]));
       const otherEntities = candidates.filter((entity) => connected.has(lower(entity.name)));
       const skippedUnconnected = candidates.length - otherEntities.length;
@@ -748,14 +798,18 @@ function createMemoryStore(users = []) {
     return addNode({ name, type: "person", owner: null, props: { role: "user" } });
   }
 
-  function addEdge(from, to, type, negative = false) {
+  function addEdge(from, to, type, negative = false, now = new Date().toISOString()) {
     const existing = edges.find((edge) => edge.source === from && edge.target === to && edge.type === type);
     if (!existing) {
-      edges.push({ source: from, target: to, type, negative: negative === true });
-      return edges[edges.length - 1];
+      const edge = { source: from, target: to, type, negative: negative === true, firstSeen: now, lastSeen: now };
+      edges.push(edge);
+      return edge;
     }
-    // Re-stating a relation overwrites its polarity, like the Neo4j store.
+    // Re-stating a relation overwrites its polarity and refreshes the
+    // timestamp, like the Neo4j store's SET r.last_seen — firstSeen keeps
+    // when the fact was first stored.
     existing.negative = negative === true;
+    existing.lastSeen = now;
     return existing;
   }
 
@@ -1050,12 +1104,13 @@ function createMemoryStore(users = []) {
       return { userEntities };
     },
 
-   async upsertTurn({ user, entities = [], relations = [] }) {
+   async upsertTurn({ user, entities = [], relations = [], subjects = [] }) {
       // Same one-node-per-user rule as the Neo4j store: an entity or relation
       // endpoint named after a registered user is that user's node, never an
       // entity (a person entity with a user's name is a proxy for that
       // user's personal data). Entities are written keyed by owner = the
       // signed-in user of the turn.
+      const now = new Date().toISOString();
       const userNames = new Set(users);
       userNames.add(user);
       const isUser = (name) => userNames.has(name);
@@ -1073,7 +1128,16 @@ function createMemoryStore(users = []) {
         .filter((node) => node.props.role !== "user" && node.owner === user)
         .map((node) => lower(node.name)));
       const resolvable = (name) => isUser(name) || candidateNames.has(lower(name)) || storedNames.has(lower(name));
-      const writable = typed.filter((relation) => resolvable(relation.from) && resolvable(relation.to) && lower(relation.from) !== lower(relation.to));
+      // The question's subjects, exactly like the Neo4j store: one
+      // ASKED_ABOUT edge each from the signed-in user to the subject, with
+      // the turn's timestamp on the edge (the question's date and time).
+      const askedAbout = subjects
+        .filter((subject) => resolvable(subject) && lower(subject) !== lower(user))
+        .map((subject) => ({ from: user, to: subject, type: "ASKED_ABOUT", negative: false }));
+      const writable = [
+        ...typed.filter((relation) => resolvable(relation.from) && resolvable(relation.to) && lower(relation.from) !== lower(relation.to)),
+        ...askedAbout,
+      ];
       const connected = new Set(writable.flatMap((relation) => [lower(relation.from), lower(relation.to)]));
       let upserted = 0;
       let skippedUnconnected = 0;
@@ -1099,7 +1163,7 @@ function createMemoryStore(users = []) {
         const from = resolve(relation.from);
         const to = resolve(relation.to);
         if (from && to && from !== to) {
-          addEdge(from.id, to.id, relation.type, relation.negative === true);
+          addEdge(from.id, to.id, relation.type, relation.negative === true, now);
           linked += 1;
         }
       }

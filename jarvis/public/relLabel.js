@@ -16,6 +16,7 @@ const RELATION_LABELS = {
   WENT_TO: ["went to", "didn't go to"],
   OWNS: ["owns", "doesn't own"],
   USES: ["uses", "doesn't use"],
+  ASKED_ABOUT: ["asked about", "never asked about"],
 };
 
 export function relationLabel(type, negative = false) {
