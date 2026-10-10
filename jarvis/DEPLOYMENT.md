@@ -4691,8 +4691,62 @@ brain (which is what the user originally asked for).
   Neo4j) with a non-exact phrasing → `Deleted "Close Match Probe Xyz"
   (owner Roman) and its links (the unique close match to your request
   "close match probe xyz thing")` — the entity was actually deleted; and
-  the not-found path → `No entity named "quantum entanglement device"
-  owned by Roman in the graph. The deletion did not happen.` (a non-error
-  result the backend now audits `ok:false` and feeds back as "The
-  operation did NOT succeed"). All probe entities cleaned up; nothing
-  left behind.
+   the not-found path → `No entity named "quantum entanglement device"
+   owned by Roman in the graph. The deletion did not happen.` (a non-error
+   result the backend now audits `ok:false` and feeds back as "The
+   operation did NOT succeed"). All probe entities cleaned up; nothing
+   left behind.
+
+## 2026-10-10: a1-enterprise demo clone on gpu-2 — profile allowlist, a1 brand, demo user
+
+The a1-enterprise company demo on gpu-2 (`92.39.59.7`, code in
+`/home/ubuntu/docker/jarvis`, public link
+`jarvis.gpu-2-de-fra-1-exo.csdc-nm.at` via the gpu-2 Nginx Proxy Manager)
+is a clone of the actual pve104 Jarvis. Binding policy and full playbook:
+`a1-jarvis-gpu2-clone.md` (repo root, mirrored into the `romeowindi/a1-jarvis`
+private repo). This section records the code changes and the gpu-2 rollout.
+
+- **Why:** the 2026-10-08 clone already blanked the private LLM env values,
+  but unconfigured brain profiles still rendered as **disabled** selector
+  entries (`app.js` sets `option.disabled = true` on `configured === false`),
+  so the demo still advertised the owner's private endpoints (Claude Code,
+  OVHcloud, OpenRouter). The a1 demo must show exactly its two a1 profiles
+  and the shared gpu-1 voice service — nothing else.
+- **`BRAIN_PROFILES` allowlist (`server.js`, `buildAiProfiles`):** a
+  comma-separated env list of AI profile ids; when set, only those profiles
+  are built and only they appear in `/api/config` (no selector entries at
+  all for the rest — not even disabled). The default-profile fallback only
+  ever sees the visible set. Unset = every profile (the pve104 behavior,
+  byte-identical). Demo value: `BRAIN_PROFILES=a1-deepseek,a1-qwen`.
+- **`BRAND=a1` white-label theme (`server.js`, `serveStatic` +
+  `brandizeA1`):** when `BRAND=a1`, the served index.html is a copy with
+  `<link rel="stylesheet" href="/theme-a1.css">` injected after style.css
+  and the a1 logo (`public/logo-a1.png`, the a1.net mark, 146×146 PNG
+  captured 2026-10-10) injected into the hero and the login panel. Each
+  injection is a guarded string replace against an exact line of the
+  current index.html — if a future edit moves the line, the page degrades
+  to the default look instead of breaking. The file on disk is never
+  modified. `public/theme-a1.css` keeps the pve104 layout but switches the
+  palette to the a1.net look: white/light-gray surfaces, dark text, a1 red
+  `#DA291C` as the primary accent (the `--cyan` role), secondary
+  `#005FCC`; the graph visualization stages and the log console keep their
+  dark backgrounds by design (bright node colors need a dark screen).
+  Without `BRAND` the app is served byte-identical — the pve104 (vm104)
+  deployment is never affected.
+- **Demo user:** `Sarah` added to the host-local `.env` `USERS` (the
+  `name:password` form, server.js `parseUsers`); the owner `admin` account
+  is kept for maintenance. Credentials live only in that `.env` (chmod 600)
+  — per the no-secrets rule, no user password appears in any repo, including
+  the a1-jarvis mirror of the playbook.
+- **Gateway:** the demo link drops Authelia (the per-row auth_request
+  template) and runs NPM basic auth with the single user `demo` on a
+  dedicated access list — the `auth_basic`/`auth_basic_user_file` layer only
+  in the jarvis row's advanced config. The other gpu-2 rows (POC hosts,
+  admin panel, etc.) are untouched.
+- **Regression tests:** `tests/server.test.mjs` — "BRAIN_PROFILES restricts
+  the advertised AI profiles to the allowlist", "BRAIN_PROFILES excludes
+  the default profile, the default falls back to a visible one", "the
+  default deployment serves index.html byte-identical (no brand
+  injection)", "BRAND=a1 injects the a1 theme and logo into index.html
+  only". Unit 180/180, browser 58 pass / 2 skips.
+- **Rollout to gpu-2:**

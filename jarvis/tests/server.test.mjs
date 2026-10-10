@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -376,6 +377,54 @@ test("config advertises AI and Whisper selectors from the local profiles", async
   assert.ok(config.aiProfiles.some((profile) => profile.id === "a1-qwen" && profile.profile === "a1-qwen38-27b"));
   assert.ok(config.aiProfiles.some((profile) => profile.id === "a1-deepseek" && profile.profile === "a1-deepseek-v4.0-flash"));
   assert.deepEqual(config.whisperProfiles.map((profile) => profile.id), ["gpu-1", "vm103", "ovhcloud"]);
+});
+
+test("BRAIN_PROFILES restricts the advertised AI profiles to the allowlist", async (t) => {
+  const { process: child, origin: demo } = await startBackend({
+    BRAIN_PROFILES: "a1-deepseek,a1-qwen",
+    BRAIN_PROFILE_DEFAULT: "a1-qwen",
+  });
+  t.after(() => { child.kill(); });
+  const config = await (await auth(demo, "/api/config")).json();
+  // The private profiles are absent entirely — no selector entries at all —
+  // while the a1 profiles stay. The allowed default is preserved.
+  assert.deepEqual(config.aiProfiles.map((profile) => profile.id), ["a1-deepseek", "a1-qwen"]);
+  assert.equal(config.brainProfileDefault, "a1-qwen");
+});
+
+test("BRAIN_PROFILES excludes the default profile, the default falls back to a visible one", async (t) => {
+  const { process: child, origin: demo } = await startBackend({
+    BRAIN_PROFILES: "a1-qwen",
+    BRAIN_PROFILE_DEFAULT: "claudecode",
+  });
+  t.after(() => { child.kill(); });
+  const config = await (await auth(demo, "/api/config")).json();
+  assert.deepEqual(config.aiProfiles.map((profile) => profile.id), ["a1-qwen"]);
+  assert.equal(config.brainProfileDefault, "a1-qwen");
+});
+
+test("the default deployment serves index.html byte-identical (no brand injection)", async () => {
+  const served = await (await fetch(`${origin}/`)).text();
+  const onDisk = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.equal(served, onDisk);
+});
+
+test("BRAND=a1 injects the a1 theme and logo into index.html only", async (t) => {
+  const { process: child, origin: a1 } = await startBackend({ BRAND: "a1" });
+  t.after(() => { child.kill(); });
+  const html = await (await fetch(`${a1}/`)).text();
+  assert.match(html, /<link rel="stylesheet" href="\/style\.css">\s*<link rel="stylesheet" href="\/theme-a1\.css">/);
+  assert.match(html, /<img class="brand-logo" src="\/logo-a1\.png" alt="a1"/);
+  const theme = await fetch(`${a1}/theme-a1.css`);
+  assert.equal(theme.status, 200);
+  assert.match(theme.headers.get("content-type"), /text\/css/);
+  const logo = await fetch(`${a1}/logo-a1.png`);
+  assert.equal(logo.status, 200);
+  assert.match(logo.headers.get("content-type"), /image\/png/);
+  // The on-disk file is never modified: the same request on the unbranded
+  // deployment stays byte-identical.
+  const onDisk = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(onDisk, /theme-a1\.css/);
 });
 
 test("the Whisper selector routes a request to the requested server profile", async () => {

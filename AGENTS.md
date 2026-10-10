@@ -98,9 +98,31 @@ verification in the brain tool loop) and `jarvis/mcp/graph.mjs`
 (`resolveEntityName` + `findEntityNear`), regression-tested in
 `tests/mcp-graph.test.mjs` ("resolveEntityName: exact first, then a unique
 close match, never short fragments") and `tests/graph.test.mjs` ("delete-
-entity: a verified success … suppresses the re-ingest" / "delete-entity: a
-not-found answer is a FAILED write …"). Docs: `jarvis/README.md`,
-`jarvis/DEPLOYMENT.md` (2026-10-10 user-deletion section).
+ entity: a verified success … suppresses the re-ingest" / "delete-entity: a
+ not-found answer is a FAILED write …"). Docs: `jarvis/README.md`,
+ `jarvis/DEPLOYMENT.md` (2026-10-10 user-deletion section).
+
+### Jarvis a1 demo clone policy (added 2026-10-10)
+
+The **a1-enterprise company demo** on gpu-2
+(`jarvis.gpu-2-de-fra-1-exo.csdc-nm.at`, code in
+`/home/ubuntu/docker/jarvis` on `92.39.59.7`) is a clone of the actual
+pve104 Jarvis. Binding rules (full playbook: `a1-jarvis-gpu2-clone.md`,
+mirrored into the `romeowindi/a1-jarvis` private repo — keep both in sync):
+(1) all app functions are cloned; (2) **no private LLM links** — the Claude
+Code API profile, Whisper on vm103, OVHcloud and OpenRouter are excluded via
+`BRAIN_PROFILES=a1-deepseek,a1-qwen` (unlisted profiles are absent from
+`/api/config`, never shown in the selector) and empty `WHISPER_VM103_*`/
+`WHISPER_OVHCLOUD_*` env values, and their keys must not exist in the demo
+`.env`; (3) **no cloned graph data** — the demo Neo4j starts empty, the
+demo user Sarah's brain is built from her own turns; (4) demo app user
+`Sarah`, owner `admin` kept for maintenance, credentials **only** in the
+host-local `.env`; (5) the demo link has **no Authelia** — NPM basic auth
+user `demo` only; (6) a1 branding via `BRAND=a1` (theme-a1.css + logo-a1.png
+injected server-side; without it the app is byte-identical); (7) **no API
+keys or user passwords in any repo** — values live host-local only. The
+pve104 (vm104) deployment runs the same code without `BRAND`/
+`BRAIN_PROFILES` and is never affected.
 
 See `kandev-opencode-dsv4f-setup.md` for the Kandev opencode setup details.
 See `kandev-opencode-qwen-setup.md` for the Kandev opencode a1-qwen38-27b setup details.
@@ -111,6 +133,7 @@ See `pve-hosts.md` for the full Proxmox VE host inventory (public + internal, ve
 See `docker-vm-inventory.md` for every PVE Docker VM (IPs, containers, the 5 Wine+MetaTrader5 stacks), how all 10 docker VMs are routed into the mesh via the OWRT gateway VMs (2026-10-09), the kandev key on each, and how to reach the OVH docker VMs from their PVE (temp `vmbr1` IP — no persistent host IP on the bridge).
 See `scripts/host/mesh-password-rotate.py` for the emergency password rotation tool (copy; source of truth is `kirks2003/rw_mesh`).
 See `jarvis/README.md` for the browser voice assistant (wake word, Whisper STT, brain, HAL 9000 answer voice, MCP web-search toggle) and `jarvis/DEPLOYMENT.md` for its live deployment, the gpu-1 Whisper/TTS service, the MCP web-search server and the measured voice-pipeline findings.
+ See `a1-jarvis-gpu2-clone.md` for the a1-enterprise demo clone policy (pve104 → gpu-2: profile allowlist, no cloned graph data, Sarah demo user, NPM basic auth instead of Authelia, `BRAND=a1` theming, no-secrets rule).
 See `ovhcloud-exporter.md` for the nbg-1 OVHcloud billing/AI-endpoint-cost exporter, the "Cloud & AI Credits" Grafana dashboard (provisioned-file workflow), the OVH in-arrears billing finding, and the live `usage/current` integration.
 See `vie1-grafana-ip-conflict.md` for the vie-1 Grafana stack, the `authelia_shared-grafana` network IP allocation, and the 2026-10-06 static-IP-conflict finding (telegraf stole grafana's pinned IP after a reboot).
 See `vikunja-mcp.md` for the Vikunja MCP design (per-user Vikunja accounts/tokens, the `@eargollo/vikunja-mcp` sidecars on both gateways) and the binding Jarvis region policy for service MCP connections.
