@@ -4567,3 +4567,32 @@ question turn.
 `mcp/graph.mjs`, `public/graph2d.js`, `public/relLabel.js`, tests, docs) —
 the panel statics changed, so browsers need a hard refresh
 (Ctrl+Shift+R) to pick up the tooltip.
+- **Verification (2026-10-10 ~08:40 UTC):** backed up as
+  `jarvis-code.bak-20261010_083407.tgz` (code only, the live `.env`
+  untouched), synced `server.js`, `graphdb.js`, `mcp/graph.mjs`,
+  `public/graph2d.js`, `public/relLabel.js`, `tests/` and `README.md`, and
+  appended this section to the host's `DEPLOYMENT.md`. After
+  `docker compose up -d --build`: both containers `healthy`, `/api/health`
+  OK (`brainConfigured: true`), in-image md5s match source
+  (`server.js fa5c5cac22ccb2ae34ffd390de765289`,
+  `graphdb.js 5afa1f09fc82305fce613ec7adbadd9e`,
+  `mcp/graph.mjs ec128a9ad0fe0afb7733c8fda5ae3d1b`,
+  `public/graph2d.js 8ee188c6041c42a2bfa5cc5ab808b1ce`,
+  `public/relLabel.js a0fd6e4ce9b5e6d0f5f044cca3a53d31`); served statics:
+  `graph2d.js 8ee188c6…` / `relLabel.js a0fd6e4c…` are the new versions
+  (panel change — **browsers need a hard refresh, Ctrl+Shift+R**),
+  `app.js 0c6b9548…` / `index.html 3728d957…` unchanged.
+- **Live probe:** Roman (non-admin) turn "tell me more about Jean Reno"
+  with `mcp: { graph: true, websearch: true }` — answered from a live web
+  search (his 2026 "Camel" one-man show, "My Penguin Friend"), then
+  `graph_ingest_success`: extracted 4, stored 3, extractedRelations 2,
+  linked 3, **subjects 1**, skippedUsers 1 (Roman's own person entity → his
+  `:User` account node), orphansRemoved none. The live subgraph then showed
+  `Jean Reno` (person, owner Roman), `The Camel` and `My Penguin Friend`
+  (things), `Roman -[ASKED_ABOUT]-> Jean Reno` and
+  `Jean Reno -[ACTED_IN]->` each work — every edge carrying
+  `lastSeen 2026-10-10T06:36:52.909Z` (the question's date and time).
+  Cleanup: `DELETE /api/graph/entity` (Jean Reno) as Roman → deleted 1,
+  `orphansRemoved: ["The Camel", "My Penguin Friend"]` (the policy sweep
+  took the disconnected works), nothing left behind (world back to
+  22 nodes / 36 edges).
