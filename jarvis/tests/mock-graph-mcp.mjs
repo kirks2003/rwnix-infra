@@ -80,10 +80,19 @@ async function handleMessage(message) {
         return respond(id, { content: [{ type: "text", text: `Stored ${args.type || "?"} from ${args.from || "?"} to ${args.to || "?"} under ${args.owner || user}. (mock data)` }] });
       }
       if (name === "rename-entity") {
-        return respond(id, { content: [{ type: "text", text: `Renamed ${args.name || "?"} to ${args.newName || "?"} (owner ${args.owner || user}); all links kept. (mock data)` }] });
+        // Same success prefix as the real server (Renamed "stored name" to
+        // "new name") — the backend verifies on it.
+        return respond(id, { content: [{ type: "text", text: `Renamed "${args.name || "?"}" to "${args.newName || "?"}" (owner ${args.owner || user}); all links kept. (mock data)` }] });
       }
       if (name === "delete-entity") {
-        return respond(id, { content: [{ type: "text", text: `Deleted ${args.name || "?"} (owner ${args.owner || user}). (mock data)` }] });
+        // The "ghost" marker mimics the real server's not-found answer for a
+        // name that does not resolve: a NON-error result that changed nothing
+        // — the backend must verify the success prefix and tell the brain the
+        // deletion did not happen (no hallucinated "Done, removed.").
+        if (String(args.name || "").toLowerCase().includes("ghost")) {
+          return respond(id, { content: [{ type: "text", text: `No entity named "${args.name}" owned by ${args.owner || user} in the graph. The deletion did not happen. (mock data)` }] });
+        }
+        return respond(id, { content: [{ type: "text", text: `Deleted "${args.name || "?"}" (owner ${args.owner || user}) and its links. (mock data)` }] });
       }
       return respond(id, null, { code: -32602, message: `Unknown tool: ${name}` });
     }
