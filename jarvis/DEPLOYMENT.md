@@ -2,7 +2,7 @@
 
 ## Live service
 
-- Docker host: `vm104` (`192.168.54.111`) on pve14
+- Docker host: `vm104` (`192.168.54.111`) on pve104
 - App directory: `/home/ubuntu/docker/jarvis`
 - Container: `jarvis`
 - Internal/public host bind: `192.168.54.111:8094`
@@ -68,10 +68,14 @@ truth); the snapshot backups (below) carry the data and the secrets.
 ## Snapshot backup (2026-10-09)
 
 A point-in-time snapshot of the whole Jarvis stack for the fatal-crash
-case. Current: **`jarvis-snapshot-v1-20261009T153748Z.tgz`** (8.2 MB,
-sha256 `8e4810f06bd88d19afe0de184f6354e9436b5d9a144a7fb3b361f675b21b1091`,
-taken 2026-10-09 15:37 UTC from vm104 at repo head `797136e`, services
-stopped during the volume tar so the data is crash-consistent).
+case. Current: **`jarvis-snapshot-v1-20261009T190532Z.tgz`** (8.0 MB,
+sha256 `aa657530ed7ce437ad1c5463767c0ed0bf247404587dd5e1c9b46ae6d65db4da`,
+taken 2026-10-09 19:05 UTC from vm104 at repo head `d92dd16`, services
+stopped during the volume tar so the data is crash-consistent). The
+earlier same-day snapshot `jarvis-snapshot-v1-20261009T153748Z.tgz`
+(sha256 `8e4810f06bd88d19afe0de184f6354e9436b5d9a144a7fb3b361f675b21b1091`,
+repo head `797136e`) is retained on all four hosts per the retention
+policy and remains a valid restore point.
 
 Contents: `MANIFEST.txt` (version, timestamp, source host, per-part
 sha256), `env/` (live `jarvis/.env`, `vikunja/.env`, Vikunja admin
@@ -86,10 +90,10 @@ generic policy, naming, retention and inventory):
 
 | Host | Path |
 |---|---|
-| vm104 (source) | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
-| nbg-1 | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
-| vie-1 | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
-| pve102 | `/local-zfs-1/backups/jarvis/jarvis-snapshot-v1-20261009T153748Z.tgz` |
+| vm104 (source) | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T190532Z.tgz` |
+| nbg-1 | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T190532Z.tgz` |
+| vie-1 | `/home/ubuntu/backups/jarvis/jarvis-snapshot-v1-20261009T190532Z.tgz` |
+| pve102 | `/local-zfs-1/backups/jarvis/jarvis-snapshot-v1-20261009T190532Z.tgz` |
 
 Take a new one (from a Kandev sandbox; stops the stack ~1 minute,
 distributes + sha256-verifies all copies, keeps the newest 5 per host):

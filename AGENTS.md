@@ -18,14 +18,26 @@ Never report a fix as done based on worktree tests alone.
 Crash-recovery snapshots are versioned with date and time
 (`<service>-snapshot-v<N>-<YYYYMMDDTHHMMSSZ>.tgz` + `.sha256`), contain
 secrets (live `.env` files), so they live **only** on the backup hosts —
-never in git. Jarvis snapshot v1 (`jarvis-snapshot-v1-20261009T153748Z.tgz`)
-is stored on vm104 (`/home/ubuntu/backups/jarvis/`), nbg-1 and vie-1
-(same path) and pve102 (`/local-zfs-1/backups/jarvis/`), each copy
-sha256-verified. Take a new one with `scripts/jarvis/backup-jarvis.sh`
-(from a sandbox; stops the stack ~1 min, keeps newest 5 per host); restore
-a host from scratch with `scripts/jarvis/restore-jarvis.sh`. Policy,
-locations and inventory: `snapshot-backups.md`; Jarvis-specific
-from-scratch setup + verified restore results: `jarvis/DEPLOYMENT.md`.
+never in git. Jarvis snapshot v1
+(`jarvis-snapshot-v1-20261009T190532Z.tgz`) is stored on vm104
+(`/home/ubuntu/backups/jarvis/`), nbg-1 and vie-1 (same path) and pve102
+(`/local-zfs-1/backups/jarvis/`), each copy sha256-verified. Take a new
+one with `scripts/jarvis/backup-jarvis.sh` (from a sandbox; stops the
+stack ~1 min, keeps newest 5 per host); restore a host from scratch with
+`scripts/jarvis/restore-jarvis.sh`.
+
+**Coverage policy (binding):** every related container of a snapshot-
+backed service (for Jarvis on vm104/pve104: `jarvis`, `jarvis-neo4j`,
+`vikunja`, `vikunja-db`; the legacy stateless `whisper` is documented but
+needs no data part) must be (1) documented in the repo MD files with its
+compose file — no API keys in the repo, secrets only in host-local
+`.env` + the snapshot — and (2) covered by the snapshot (every data
+volume a part, deployed source mirrored). A service's backup is complete
+only when a verified copy is on the source host **and** all three backup
+hosts. This is what makes disaster recovery on a fresh host possible from
+snapshot + repo alone. Policy, locations and inventory:
+`snapshot-backups.md`; Jarvis-specific from-scratch setup + verified
+restore results: `jarvis/DEPLOYMENT.md`.
 
 ### Jarvis service MCP topology (updated 2026-10-09)
 
