@@ -161,6 +161,10 @@ compose files in [`hosts/`](hosts/).
 
 ## Wine + MetaTrader 5 containers
 
+Per-broker setup detail (branded installers, install flow, demo/live ini
+account data, deploy pipeline, 2026-10-12 findings) — see
+[`wine-mt5-setup.md`](wine-mt5-setup.md).
+
 **5 containers** running on **3 Docker VMs**, all using the same stack:
 
 - **Image**: `lscr.io/linuxserver/webtop:ubuntu-xfce` (3.31 GB)
@@ -195,6 +199,12 @@ Terminal/account numbers allow multiple terminals or accounts per broker
 (e.g. `mt5-4-fxpro-1` → 20104). The pattern is consistent across VMs (e.g.
 eri-1 docker-1 and docker-2 both use 20101 for FxPro — each is a separate
 MT5 instance with its own config).
+
+> Note (2026-10-12): the FxPro ini (source tree *and* deployed on the hosts,
+> v1.11) declares `Terminal=4`/`Port=20104`, but the running containers are
+> exposed on **20101** via the container `.env` `HOST_PORT` — the ini's
+> `[Deploy]` block is ahead of the actual exposure. See
+> [`wine-mt5-setup.md`](wine-mt5-setup.md) Finding 3.
 
 ### MT5 exe installer setup (3 brokers)
 
