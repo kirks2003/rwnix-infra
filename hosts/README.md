@@ -16,6 +16,7 @@ hosts/<host>/<service>/docker-compose.yml     (or compose.yaml where the host us
 | `vm104` | gitlab, glance, glances, glances-gw1, grafana-1, kandev, kandev-2, kandev104, mariadb ×2, phpmyadmin ×2, portainer, tftp-1, vikunja (compose + `Dockerfile` + `mcp-token-owner.sh`), vscode, wetty-gw1, whisper (legacy) — **plus** `jarvis` (compose + Dockerfile live in [`jarvis/`](../jarvis/) at the repo root, not here) |
 | `gpu-1` | cadvisor, fail2ban-exporter, glances, kokoro-tts, llamacpp, nginx-proxy-manager, portainer, speaches, wetty |
 | `gpu-2` | authelia, glances, grafana, kandev, nginx-proxy-manager, openrouter-exporter, ovhcloud-exporter, portainer, uptime-kuma, victoria-metrics, vikunja, wetty |
+| `gra-1`, `lim-1` (OVH Docker VMs) | checkmk |
 
 ## Deploy procedure (repo → host)
 
@@ -44,6 +45,7 @@ automatically. Services currently using this pattern (all externalized
 | vm103 / kandev-1 | `CLAUDE_CODE_OAUTH_TOKEN` |
 | gpu-1 / speaches | `API_KEY` |
 | gpu-1 / llamacpp | `LLAMACPP_API_KEY` |
+| gra-1, lim-1 / checkmk | `CMK_PASSWORD` (first-boot only; the running site's cmkadmin password was rotated in the UI and lives only in the site htpasswd — see `checkmk-monitoring.md`) |
 
 Other services already used `env_file`/`${VAR}` (e.g. vm104 gitlab,
 mariadb, phpmyadmin, grafana-1; both gateways' authelia uses a bind-mounted

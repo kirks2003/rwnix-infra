@@ -97,6 +97,8 @@ access_control:
         - 'pve102.gw-1-nbg-1-de-netcup.rwnix.net'
         - 'kandev104.gw-1-nbg-1-de-netcup.rwnix.net'
         - 'jarvis.gw-1-nbg-1-de-netcup.rwnix.net'
+        - 'checkmk-gra-1.gw-1-nbg-1-de-netcup.rwnix.net'
+        - 'checkmk-lim-1.gw-1-nbg-1-de-netcup.rwnix.net'
       policy: 'two_factor'
 
 session:

@@ -61,6 +61,7 @@ reachable Docker VM (see [Access notes](#access-notes) below).
 | `glances` | `nicolargo/glances:latest-full` | Up 8 days |
 | `glance` | `nginx:1.27-alpine` | Up 8 days |
 | `portainer` | `portainer/portainer-ce` | Up 8 days |
+| `checkmk` | `checkmk/check-mk-community:2.5.0-latest` | Up (added 2026-10-12; fleet monitor, see `checkmk-monitoring.md`) |
 | `kandev` | `74186cdc1590` | **Exited** (6 weeks ago) |
 | `telegraf` | `telegraf:latest` | **Exited** (7 weeks ago) |
 | `mosquitto` | `eclipse-mosquitto:2` | **Exited** (7 weeks ago) |
@@ -78,6 +79,7 @@ reachable Docker VM (see [Access notes](#access-notes) below).
 | `glances` | `nicolargo/glances:latest-full` | Up 8 days |
 | `glance` | `nginx:1.27-alpine` | Up 8 days |
 | `portainer` | `portainer/portainer-ce` | Up 8 days |
+| `checkmk` | `checkmk/check-mk-community:2.5.0-latest` | Up (added 2026-10-12; fleet monitor, see `checkmk-monitoring.md`) |
 | `telegraf` | `telegraf:latest` | Up 8 days |
 | `mosquitto` | `eclipse-mosquitto:2` | Up 8 days |
 | `kandev` | `74186cdc1590` | **Exited** (6 weeks ago) |
