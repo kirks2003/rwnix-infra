@@ -11,7 +11,7 @@ hosts/<host>/<service>/docker-compose.yml     (or compose.yaml where the host us
 
 | Host | Services (one dir each) |
 |---|---|
-| `nbg-1`, `vie-1` (gateways) | authelia, glances, grafana, kandev, nginx-proxy-manager, openrouter-exporter, ovhcloud-exporter, portainer, tasmota-relay (mosquitto + telegraf), uptime-kuma, victoria-metrics, wetty, wg-easy, wg-easy-mcp |
+| `nbg-1`, `vie-1` (gateways) | authelia, glances, grafana, kandev, nginx-proxy-manager, openrouter-exporter, ovhcloud-exporter, portainer, semaphore (Ansible UI), tasmota-relay (mosquitto + telegraf), uptime-kuma, victoria-metrics, wetty, wg-easy, wg-easy-mcp |
 | `vm103` | glance, glances, glances-gw1, kandev-1, ollama, portainer, speaches, voice-gpu, vscode, wetty, wetty-gw1 |
 | `vm104` | gitlab, glance, glances, glances-gw1, grafana-1, kandev, kandev-2, kandev104, mariadb ×2, phpmyadmin ×2, portainer, tftp-1, vikunja (compose + `Dockerfile` + `mcp-token-owner.sh`), vscode, wetty-gw1, whisper (legacy) — **plus** `jarvis` (compose + Dockerfile live in [`jarvis/`](../jarvis/) at the repo root, not here) |
 | `gpu-1` | cadvisor, fail2ban-exporter, glances, kokoro-tts, llamacpp, nginx-proxy-manager, portainer, speaches, wetty |

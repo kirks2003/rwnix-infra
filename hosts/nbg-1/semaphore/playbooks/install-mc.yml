@@ -1,0 +1,17 @@
+- hosts: all
+  become: true
+  tasks:
+    - name: Install Midnight Commander
+      apt:
+        name: mc
+        state: present
+        update_cache: true
+
+    - name: Verify mc is installed
+      command: mc --version
+      register: mc_version
+      changed_when: false
+
+    - name: Show version
+      debug:
+        msg: "{{ mc_version.stdout_lines[0] }}"
