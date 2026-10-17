@@ -1229,6 +1229,11 @@ html.graph-full {
   justify-self: end;
 }
 
+/* The History day slider sits on its own row below Send. */
+.manual-prompt .transcript-controls {
+  grid-column: 1 / -1;
+}
+
 .panel {
   min-height: 88px;
   padding: 11px;

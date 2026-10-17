@@ -2015,8 +2015,13 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
     }
     if (!hasTools || !toolCalls.length) return { data, webResults, graphWriteSucceeded };
     if (round >= GRAPH_TOOL_ROUNDS) {
-      // Tool budget spent: force a final answer without tools.
-      local.push({ ...message, role: "assistant" }, { role: "system", content: "Tool budget reached. Answer now from what you have gathered." });
+      // Tool budget spent: force a final answer without tools. The nudge
+      // rides as a `user` turn, not a `system` one: a system message after
+      // the conversation is rejected outright by strict endpoints — OVH AI
+      // Endpoints answer HTTP 400 "System message must be at the beginning."
+      // (seen live 2026-10-17), while vLLM/llama.cpp tolerate it. Every
+      // system message in this app therefore stays in the leading block.
+      local.push({ ...message, role: "assistant" }, { role: "user", content: "Tool budget reached. Answer now from what you have gathered." });
       const fallback = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
         method: "POST", signal: totalSignal, headers,
         body: JSON.stringify({ model: brainProfile.model, messages: local, temperature: 0.2, max_tokens: 4096 }),
