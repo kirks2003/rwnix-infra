@@ -737,6 +737,35 @@ test("an empty command window after the greeting returns to wake listening witho
   await page.click("#stopButton");
 });
 
+test("clicking into the prompt box while wake listening disarms and releases the microphone", async (t) => {
+  // Typing a prompt only works while disarmed, so the microphone must step
+  // aside the moment the user starts typing — but never mid-turn.
+  const { page } = await setup(t, async () => ({ text: "" }), { silent: true });
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Wake listening",
+    null, { timeout: 15000 });
+  assert.equal(await page.isDisabled("#sendManualButton"), true, "Send is taken while armed");
+  // A pointer press into the box (not a Tab focus) disarms.
+  await page.click("#manualPrompt");
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled, null, { timeout: 10000 });
+  assert.equal(await page.textContent("#stageTitle"), "Stopped");
+  assert.equal(await page.getAttribute("#enableSwitch", "aria-checked"), "false");
+  assert.equal(await page.isDisabled("#sendManualButton"), false, "Send is available once disarmed");
+  assert.ok(await page.evaluate(() => testTracks.every((track) => track.readyState === "ended")),
+    "the microphone tracks are released");
+  assert.match(await page.textContent("#log"), /disarming and releasing the microphone/);
+  // Focus must never re-arm: the microphone only reopens on an explicit Arm.
+  await page.waitForTimeout(500);
+  assert.equal(await page.textContent("#stageTitle"), "Stopped");
+  // Keyboard focus alone leaves a running session alone (Tab must not disarm).
+  await page.click("#armButton");
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Wake listening",
+    null, { timeout: 15000 });
+  await page.evaluate(() => document.getElementById("manualPrompt").focus());
+  await page.waitForTimeout(400);
+  assert.equal(await page.textContent("#stageTitle"), "Wake listening", "a Tab focus keeps the session armed");
+  await page.click("#stopButton");
+});
+
 test("silence makes no Whisper calls and hiding the tab keeps the session armed", async (t) => {
   const { page, calls } = await setup(t, async () => ({ text: "" }), { silent: true });
   await page.waitForTimeout(4500);
@@ -781,7 +810,9 @@ test("MCP web-search toggle is saved, restored and sent with brain requests", { 
     input.value = value;
     input.dispatchEvent(new Event("input", { bubbles: true }));
   }, "What time is it?");
-  await page.click("#sendManualButton");
+  // Ctrl+Enter in the prompt box sends, same as clicking Send.
+  await page.focus("#manualPrompt");
+  await page.keyboard.press("Control+Enter");
   await page.waitForFunction(() => window.savedUtterances.length >= 1, null, { timeout: 15000 });
   // The manual-prompt flow stops itself, so the Stop button is disabled.
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
@@ -1321,8 +1352,8 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     const slider = document.getElementById("historyDays");
     return { min: slider.min, max: slider.max, step: slider.step };
   }), { min: "1", max: "31", step: "1" }, "the day window is a 1..31 slider");
-  // The slider's own controls must stay compact beside Send. It used to be
-  // styled by `.transcript > div`, which matched the conversation controls
+  // The slider's own controls must stay compact, on their own row below
+  // Send. It used to be styled by `.transcript > div`, which matched the conversation controls
   // and gave them the panel's min-height — a near-empty box that pushed
   // the conversation off the first screen. Pin it short, and pin that the
   // panel keeps the tall styling.
@@ -1335,8 +1366,8 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
       stripHeight: strip.getBoundingClientRect().height,
       panelHeight: panel.getBoundingClientRect().height,
       panelTop: panel.getBoundingClientRect().top + window.scrollY,
-      historyRight: strip.getBoundingClientRect().right,
-      sendLeft: button.getBoundingClientRect().left,
+      historyTop: strip.getBoundingClientRect().top,
+      sendBottom: button.getBoundingClientRect().bottom,
       // A scrollbar that takes layout width, not a 0-width overlay bar that
       // fades out at rest: the bar is how you know you can scroll back.
       scrollbarGutter: list.offsetWidth - list.clientWidth,
@@ -1348,8 +1379,8 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     `the conversation panels stay tall (358px min-height), got ${layout.panelHeight}px`);
   assert.ok(layout.panelTop < 500,
     `the conversation panel must start on the first screen, got top ${layout.panelTop}px`);
-  assert.ok(layout.historyRight <= layout.sendLeft,
-    `the History slider must sit to the left of Send, got ${layout.historyRight}px > ${layout.sendLeft}px`);
+  assert.ok(layout.historyTop >= layout.sendBottom,
+    `the History slider must sit below Send, got top ${layout.historyTop}px < Send bottom ${layout.sendBottom}px`);
   assert.ok(layout.scrollbarGutter > 0,
     `the history list needs a laid-out scrollbar, got ${layout.scrollbarGutter}px`);
   assert.equal(await page.inputValue("#historyDays"), "24");

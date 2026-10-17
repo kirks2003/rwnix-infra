@@ -1708,6 +1708,22 @@ test("the graph tool budget leaves room for schema plus follow-up queries (five 
     lastRequest.messages.map((message) => String(message.content || "")).join("\n"),
     /Tool budget reached/,
   );
+  // The nudge must not be a system message: a `system` role after the
+  // conversation makes strict endpoints reject the whole request (OVH AI
+  // Endpoints: HTTP 400 "System message must be at the beginning."), which
+  // broke every budget-exhausting turn on that brain profile.
+  const nudge = lastRequest.messages.find((message) =>
+    String(message.content || "").includes("Tool budget reached"));
+  assert.equal(nudge.role, "user", "the budget nudge rides as a user turn");
+  // Stronger, and the rule for every request this app sends: no system
+  // message may follow a non-system message.
+  for (const request of finalRequests) {
+    const firstOther = request.messages.findIndex((message) => message.role !== "system");
+    const stray = firstOther === -1 ? -1
+      : request.messages.findIndex((message, index) => index > firstOther && message.role === "system");
+    assert.equal(stray, -1,
+      `system message at index ${stray} follows the conversation: ${JSON.stringify(request.messages.map((m) => m.role))}`);
+  }
 });
 
 test("raw Cypher is not on the tool surface: the old read-cypher call is rejected as unknown", async () => {

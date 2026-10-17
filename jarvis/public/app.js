@@ -66,6 +66,10 @@ let current = null;
 let sequence = 0;
 // Live state for the pipeline panel's status line and per-step timings.
 let stageTitleNow = "Standby";
+// True while the session is only listening for the wake word — no command
+// turn in flight. Clicking into the prompt box is allowed to disarm then
+// (see the pointerdown handler), but never mid-turn.
+let wakeIdle = false;
 let probeCount = 0;
 let pipelineStatusOverride = null;
 const stepTimers = new Map();
@@ -817,6 +821,11 @@ function stage(kind, title, detail, active = null) {
   for (const item of el.steps.children) item.classList.remove("active");
   if (active) mark(active, "active");
   stageTitleNow = title;
+  // A wake probe runs as "transcribing" between two wake-listening stretches,
+  // so it must not clear the flag; a real command turn (recording, thinking,
+  // speaking, …) does.
+  if (kind === "wake") wakeIdle = true;
+  else if (kind !== "transcribing") wakeIdle = false;
   pipelineStatusOverride = kind === "error" ? `Error: ${detail}` : null;
   el.pipelineStatus.textContent = pipelineStatus();
   log("stage", `${title}: ${detail}`);
@@ -1873,6 +1882,27 @@ el.manualPromptForm.addEventListener("submit", async (event) => {
   } catch (error) {
     fatal(session, error);
   }
+});
+// Typing takes the microphone away: clicking or tapping into the prompt box
+// while Jarvis is merely wake listening disarms it, which releases the
+// microphone and enables Send (typing a prompt only works while disarmed).
+// Deliberately narrow: `pointerdown` (not `focus`) so tabbing through the
+// page cannot disarm, and only while `wakeIdle` — a command being recorded,
+// transcribed, answered or spoken is never cut off, and the turn is not
+// lost. Re-arming stays manual: focus must never re-open the microphone.
+el.manualPrompt.addEventListener("pointerdown", () => {
+  if (!current || !wakeIdle) return;
+  log("session", "Prompt box focused while wake listening; disarming and releasing the microphone.");
+  stop("Disarmed because you started typing. Click Arm Jarvis for voice mode.");
+});
+// Ctrl+Enter (Cmd+Enter on macOS) in the prompt box presses Send. Plain
+// Enter keeps inserting a newline. requestSubmit() runs the same submit
+// handler as a click, and a disabled Send (armed, or config not loaded)
+// blocks it the same way.
+el.manualPrompt.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey) || event.isComposing) return;
+  event.preventDefault();
+  if (!el.sendManualButton.disabled) el.manualPromptForm.requestSubmit(el.sendManualButton);
 });
 el.clearLogButton.addEventListener("click", () => { el.log.textContent = ""; });
 el.voiceSpeed.addEventListener("input", () => {
