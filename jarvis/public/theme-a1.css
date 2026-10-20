@@ -195,3 +195,16 @@ textarea {
   vertical-align: middle;
   transform: translateY(-1px);
 }
+
+/* Mini pipeline: white a1 surfaces — style.css hardcodes dark
+   rgba(2, 5, 11, …) backgrounds that read grey on the light a1 page.
+   State colors adapt automatically through the :root --amber/--green/
+   --red overrides; their borders win over the base border above. */
+.pipeline-mini {
+  background: #ffffff;
+  border-color: rgba(27, 27, 29, 0.18);
+}
+.pipeline-mini-stage {
+  background: #ffffff;
+  border-color: rgba(27, 27, 29, 0.22);
+}

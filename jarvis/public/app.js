@@ -15,7 +15,7 @@ const el = Object.fromEntries([
   "commandWait", "commandWaitValue", "commandWaitStatus",
   "conversationText",
   "historyDays", "historyDaysValue", "historyDaysStatus",
-  "log", "steps", "pipelineStatus", "pipelineMini", "pipelineMiniStage",
+  "log", "steps", "pipelineStatus", "pipelineMini",
   "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
@@ -948,40 +948,20 @@ function pipelineStatus() {
   return `${stageTitleNow} · ${elapsed} s armed · ${probes}`;
 }
 
-const MINI_STAGE_LABELS = {
-  wake: "Wake word",
-  record: "Record",
-  vad: "VAD",
-  whisper: "Whisper",
-  brain: "Brain",
-  tts: "Speech",
-};
-
-// The stage badge next to Send mirrors the full pipeline panel: it shows the
-// currently running stage as a short label and takes that stage's state color
+// The mini pipeline next to Send mirrors the full pipeline panel: one small
+// rectangle per stage, side by side, each carrying its own state color
 // (active amber / done green / skipped dashed / error red / idle muted).
-function setMiniStage(state, label) {
-  el.pipelineMini.dataset.state = state;
-  el.pipelineMiniStage.textContent = label;
-}
-
+// The stage labels are static in index.html; only the data-state attribute
+// is synced from the #steps items.
 function syncMiniStage() {
-  const items = [...el.steps.children];
-  const active = items.find((li) => li.classList.contains("active"));
-  if (active) {
-    setMiniStage("active", MINI_STAGE_LABELS[active.dataset.step] || active.dataset.step);
-    return;
+  for (const chip of el.pipelineMini.children) {
+    const li = el.steps.querySelector(`[data-step="${chip.dataset.step}"]`);
+    const cls = li ? li.className : "";
+    chip.dataset.state =
+      cls === "active" || cls === "done" || cls === "skipped" || cls === "error"
+        ? cls
+        : "idle";
   }
-  if (el.core.classList.contains("error")) {
-    setMiniStage("error", "Error");
-    return;
-  }
-  const done = items.filter((li) => li.classList.contains("done")).length;
-  if (done > 0 && done === items.length) {
-    setMiniStage("done", "Done");
-    return;
-  }
-  setMiniStage("idle", "Idle");
 }
 
 // The li keeps its status as its only class (tests read className directly),

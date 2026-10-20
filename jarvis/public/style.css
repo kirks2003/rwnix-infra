@@ -1407,54 +1407,57 @@ html.graph-full {
   grid-column: 1 / -1;
 }
 
-/* Pipeline stage badge spanning the composer row above the History slider:
-   one wide rounded rectangle showing the current stage as a short label.
-   It replaces the old six step dots — the label carries the stage — and is
-   colored by state exactly like the full pipeline panel (#steps). */
+/* The mini pipeline spans the composer row above the History slider:
+   one small rectangle per stage, side by side (left to right), each
+   carrying its own state color exactly like the full pipeline panel
+   (#steps) — all six states are visible at once, not just the active one. */
 .pipeline-mini {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 6px;
   min-width: 0;
-  padding: 7px 14px;
+  padding: 6px 8px;
   border: 1px solid rgba(66, 217, 255, 0.14);
   border-radius: 10px;
   background: rgba(2, 5, 11, 0.5);
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  transition: border-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
 }
 
 .pipeline-mini-stage {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding: 4px 10px;
+  border: 1px solid rgba(120, 138, 153, 0.28);
+  border-radius: 7px;
+  background: rgba(2, 5, 11, 0.35);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
   white-space: nowrap;
+  transition: border-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
 }
 
 /* State colors mirror the full pipeline panel (#steps li.*). */
-.pipeline-mini[data-state="active"] {
+.pipeline-mini-stage[data-state="active"] {
   border-color: rgba(255, 192, 77, 0.5);
   box-shadow: 0 0 18px rgba(255, 192, 77, 0.22);
   color: var(--amber);
 }
 
-.pipeline-mini[data-state="done"] {
+.pipeline-mini-stage[data-state="done"] {
   border-color: rgba(45, 255, 191, 0.5);
   box-shadow: 0 0 18px rgba(45, 255, 191, 0.22);
   color: var(--green);
 }
 
-.pipeline-mini[data-state="skipped"] {
+.pipeline-mini-stage[data-state="skipped"] {
   border-color: #789;
   border-style: dashed;
   color: #789;
 }
 
-.pipeline-mini[data-state="error"] {
+.pipeline-mini-stage[data-state="error"] {
   border-color: rgba(255, 76, 106, 0.5);
   box-shadow: 0 0 18px rgba(255, 76, 106, 0.22);
   color: var(--red);

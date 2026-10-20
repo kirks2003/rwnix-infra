@@ -78,9 +78,14 @@
           <form id="manualPromptForm" class="manual-prompt">
             <textarea id="manualPrompt" rows="2" aria-keyshortcuts="Control+Enter"
                       placeholder="Type a prompt here (when disarmed) and press Send or Ctrl+Enter..."></textarea>
-            <div id="pipelineMini" class="pipeline-mini" data-state="idle">
-               <span id="pipelineMiniStage">Idle</span>
-             </div>
+           <div id="pipelineMini" class="pipeline-mini" aria-label="Pipeline stages">
+              <span class="pipeline-mini-stage" data-step="wake" data-state="idle">Wake word</span>
+              <span class="pipeline-mini-stage" data-step="record" data-state="idle">Record</span>
+              <span class="pipeline-mini-stage" data-step="vad" data-state="idle">VAD</span>
+              <span class="pipeline-mini-stage" data-step="whisper" data-state="idle">Whisper</span>
+              <span class="pipeline-mini-stage" data-step="brain" data-state="idle">Brain</span>
+              <span class="pipeline-mini-stage" data-step="tts" data-state="idle">Speech</span>
+            </div>
             <button id="sendManualButton" type="submit" title="Send (Ctrl+Enter)" disabled>Send</button>
             <div class="transcript-controls">
               <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>
