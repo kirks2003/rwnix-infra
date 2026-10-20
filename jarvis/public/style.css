@@ -1407,69 +1407,57 @@ html.graph-full {
   grid-column: 1 / -1;
 }
 
-/* Compact pipeline mirror above the History slider row: the status text
-   left, the six step dots right. ~25% of the full pipeline panel height —
-   one line, no step names (the title attribute carries them). */
+/* Pipeline stage badge spanning the composer row above the History slider:
+   one wide rounded rectangle showing the current stage as a short label.
+   It replaces the old six step dots — the label carries the stage — and is
+   colored by state exactly like the full pipeline panel (#steps). */
 .pipeline-mini {
-  /* Shares its row with the Send button (col 2) instead of taking the full
-     width, so the History strip below keeps its own row. */
-  grid-column: 1;
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   min-width: 0;
-  padding: 2px 0;
-  font-size: 0.68rem;
+  padding: 7px 14px;
+  border: 1px solid rgba(66, 217, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(2, 5, 11, 0.5);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--muted);
+  transition: border-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
 }
 
-.pipeline-mini-status {
+.pipeline-mini-stage {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.pipeline-mini-steps {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+/* State colors mirror the full pipeline panel (#steps li.*). */
+.pipeline-mini[data-state="active"] {
+  border-color: rgba(255, 192, 77, 0.5);
+  box-shadow: 0 0 18px rgba(255, 192, 77, 0.22);
+  color: var(--amber);
 }
 
-.pipeline-mini-steps li {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 2px solid var(--muted);
-  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+.pipeline-mini[data-state="done"] {
+  border-color: rgba(45, 255, 191, 0.5);
+  box-shadow: 0 0 18px rgba(45, 255, 191, 0.22);
+  color: var(--green);
 }
 
-.pipeline-mini-steps li.active {
-  border-color: var(--amber);
-  border-top-color: transparent;
-  animation: spin 0.9s linear infinite;
-}
-
-.pipeline-mini-steps li.done {
-  border-color: var(--green);
-  background: var(--green);
-  box-shadow: 0 0 12px rgba(45, 255, 191, 0.5);
-}
-
-.pipeline-mini-steps li.skipped {
+.pipeline-mini[data-state="skipped"] {
   border-color: #789;
   border-style: dashed;
+  color: #789;
 }
 
-.pipeline-mini-steps li.error {
-  border-color: var(--red);
-  background: rgba(255, 76, 106, 0.3);
-  box-shadow: 0 0 14px rgba(255, 76, 106, 0.5);
+.pipeline-mini[data-state="error"] {
+  border-color: rgba(255, 76, 106, 0.5);
+  box-shadow: 0 0 18px rgba(255, 76, 106, 0.22);
+  color: var(--red);
 }
 
 .panel {

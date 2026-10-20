@@ -78,17 +78,9 @@
           <form id="manualPromptForm" class="manual-prompt">
             <textarea id="manualPrompt" rows="2" aria-keyshortcuts="Control+Enter"
                       placeholder="Type a prompt here (when disarmed) and press Send or Ctrl+Enter..."></textarea>
-            <div id="pipelineMini" class="pipeline-mini">
-              <span id="pipelineMiniStatus" class="pipeline-mini-status" role="status">Idle.</span>
-              <ol id="pipelineMiniSteps" class="pipeline-mini-steps" aria-hidden="true">
-                <li data-step="wake" title="Wake word"></li>
-                <li data-step="record" title="Record command"></li>
-                <li data-step="vad" title="Stop after 1.5 s silence"></li>
-                <li data-step="whisper" title="Whisper transcription"></li>
-                <li data-step="brain" title="Brain"></li>
-                <li data-step="tts" title="Speech output"></li>
-              </ol>
-            </div>
+            <div id="pipelineMini" class="pipeline-mini" data-state="idle">
+               <span id="pipelineMiniStage">Idle</span>
+             </div>
             <button id="sendManualButton" type="submit" title="Send (Ctrl+Enter)" disabled>Send</button>
             <div class="transcript-controls">
               <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>

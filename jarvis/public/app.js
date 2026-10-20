@@ -15,7 +15,7 @@ const el = Object.fromEntries([
   "commandWait", "commandWaitValue", "commandWaitStatus",
   "conversationText",
   "historyDays", "historyDaysValue", "historyDaysStatus",
-  "log", "steps", "pipelineStatus", "pipelineMiniStatus", "pipelineMiniSteps",
+  "log", "steps", "pipelineStatus", "pipelineMini", "pipelineMiniStage",
   "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
@@ -936,7 +936,7 @@ function stage(kind, title, detail, active = null) {
   else if (kind !== "transcribing") wakeIdle = false;
   pipelineStatusOverride = kind === "error" ? `Error: ${detail}` : null;
   el.pipelineStatus.textContent = pipelineStatus();
-  el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
+  syncMiniStage();
   log("stage", `${title}: ${detail}`);
 }
 
@@ -948,34 +948,68 @@ function pipelineStatus() {
   return `${stageTitleNow} · ${elapsed} s armed · ${probes}`;
 }
 
+const MINI_STAGE_LABELS = {
+  wake: "Wake word",
+  record: "Record",
+  vad: "VAD",
+  whisper: "Whisper",
+  brain: "Brain",
+  tts: "Speech",
+};
+
+// The stage badge next to Send mirrors the full pipeline panel: it shows the
+// currently running stage as a short label and takes that stage's state color
+// (active amber / done green / skipped dashed / error red / idle muted).
+function setMiniStage(state, label) {
+  el.pipelineMini.dataset.state = state;
+  el.pipelineMiniStage.textContent = label;
+}
+
+function syncMiniStage() {
+  const items = [...el.steps.children];
+  const active = items.find((li) => li.classList.contains("active"));
+  if (active) {
+    setMiniStage("active", MINI_STAGE_LABELS[active.dataset.step] || active.dataset.step);
+    return;
+  }
+  if (el.core.classList.contains("error")) {
+    setMiniStage("error", "Error");
+    return;
+  }
+  const done = items.filter((li) => li.classList.contains("done")).length;
+  if (done > 0 && done === items.length) {
+    setMiniStage("done", "Done");
+    return;
+  }
+  setMiniStage("idle", "Idle");
+}
+
 // The li keeps its status as its only class (tests read className directly),
 // so the state label lives in a child span that mark() keeps in sync.
 function mark(step, status) {
   const item = el.steps.querySelector(`[data-step="${step}"]`);
   item.className = status;
-  // The mini mirror in the conversation panel keeps the same status classes
-  // (its <li> holds no children — the CSS colors the li itself).
-  const miniItem = el.pipelineMiniSteps.querySelector(`[data-step="${step}"]`);
-  if (miniItem) miniItem.className = status;
   const state = item.querySelector(".step-state");
-  if (!state) return;
-  if (status === "active") {
-    stepTimers.set(step, performance.now());
-    state.textContent = "running";
-  } else if (status === "done") {
-    const started = stepTimers.get(step);
-    stepTimers.delete(step);
-    state.textContent = started
-      ? `done in ${((performance.now() - started) / 1000).toFixed(1)} s`
-      : "done";
-  } else if (status === "skipped") {
-    state.textContent = "skipped";
-  } else if (status === "error") {
-    state.textContent = "error";
-  } else {
-    stepTimers.delete(step);
-    state.textContent = "waiting";
+  if (state) {
+    if (status === "active") {
+      stepTimers.set(step, performance.now());
+      state.textContent = "running";
+    } else if (status === "done") {
+      const started = stepTimers.get(step);
+      stepTimers.delete(step);
+      state.textContent = started
+        ? `done in ${((performance.now() - started) / 1000).toFixed(1)} s`
+        : "done";
+    } else if (status === "skipped") {
+      state.textContent = "skipped";
+    } else if (status === "error") {
+      state.textContent = "error";
+    } else {
+      stepTimers.delete(step);
+      state.textContent = "waiting";
+    }
   }
+  syncMiniStage();
 }
 
 function resetSteps() {
@@ -1008,9 +1042,8 @@ async function withStepRetries(session, label, run) {
       if (attempt >= MAX_STEP_ATTEMPTS) throw error;
       log("retry", `${label} failed (attempt ${attempt}/${MAX_STEP_ATTEMPTS}): ${error.message}; retrying in ${STEP_RETRY_DELAY_MS} ms`);
       pipelineStatusOverride = `${label}: retry ${attempt + 1}/${MAX_STEP_ATTEMPTS} after failure (${error.message})`;
-      el.pipelineStatus.textContent = pipelineStatus();
-      el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
-      await delay(STEP_RETRY_DELAY_MS, session.signal);
+       el.pipelineStatus.textContent = pipelineStatus();
+       await delay(STEP_RETRY_DELAY_MS, session.signal);
     }
   }
   throw lastError;
@@ -1060,9 +1093,8 @@ function newSession() {
   syncEnableSwitch();
   for (const button of previewButtons) button.disabled = true;
   resetSteps();
-  el.pipelineStatus.textContent = pipelineStatus();
-  el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
-  log("session", `Started ${session.id}`);
+   el.pipelineStatus.textContent = pipelineStatus();
+   log("session", `Started ${session.id}`);
   return session;
 }
 
@@ -1333,7 +1365,6 @@ async function waitForCommandEnd(session, start, mode) {
         ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(silenceMs - silentMs))} ms more silence, or at the limit.`
         : `Waiting for command: ${(elapsed / 1000).toFixed(1)} s. ${Math.max(1, Math.ceil((commandWaitMs - (performance.now() - session.commandWaitStartedAt)) / 1000))} s of silence returns to wake listening. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
       el.pipelineStatus.textContent = pipelineStatus();
-      el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
     }
   }
   log("record", "Command limit reached; transcribing captured speech");
