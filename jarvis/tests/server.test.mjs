@@ -13,6 +13,11 @@ import { AudioBufferWindow } from "../public/audio.js";
 
 let upstream, backend, origin, endpoint, speechEndpoint, base;
 let mode = "success";
+// The cost-panel billing-API mocks: "down" makes every OpenRouter/OVHcloud
+// billing call fail (503), so the stale-data path of GET /api/costs is
+// testable. Independent of the brain `mode` above.
+let costsMode = "up";
+let costsOvhHeaders;
 // Captured by the history-tool / history-seed mock modes above.
 const historyToolOffers = [];
 const historyToolResults = [];
@@ -84,6 +89,58 @@ before(async () => {
     if (mode === "slow") {
       res.on("close", () => disconnected?.());
       return;
+    }
+    if (req.url.startsWith("/api/v1/") || req.url === "/auth/time"
+      || req.url.startsWith("/me/bill") || req.url.startsWith("/cloud/project")) {
+      // The OpenRouter / OVHcloud billing-API stand-ins for GET /api/costs.
+      // Dispatched before the brain `mode` branches so the cost panel can be
+      // tested up and down independently of the chat mock.
+      res.setHeader("content-type", "application/json");
+      if (costsMode === "down") return res.writeHead(503).end('{"error":"costs down"}');
+      if (req.url === "/api/v1/key") {
+        return res.end(JSON.stringify({ data: { limit: 100, limit_remaining: 42.5, usage: 57.5, usage_monthly: 12.25, usage_weekly: 3.5, usage_daily: 0.75, is_free_tier: false, free_model_daily_requests: { used: 10, limit: 1000, remaining: 990 } } }));
+      }
+      if (req.url === "/api/v1/credits") {
+        return res.end(JSON.stringify({ data: { total_credits: 100, total_usage: 57.5 } }));
+      }
+      if (req.url === "/auth/time") {
+        return res.end(String(Math.floor(Date.now() / 1000)));
+      }
+      if (req.url === "/me/bill") {
+        costsOvhHeaders = { app: req.headers["x-ovh-application"], consumer: req.headers["x-ovh-consumer"], signature: req.headers["x-ovh-signature"], timestamp: req.headers["x-ovh-timestamp"] };
+        return res.end(JSON.stringify(["B100", "B101", "B102"]));
+      }
+      const billMatch = req.url.match(/^\/me\/bill\/(B\d+)$/);
+      if (billMatch) {
+        const invoices = {
+          B100: { date: "2026-07-01", category: "cloud", priceWithTax: { value: 10.5 } },
+          B101: { date: "2026-08-01", category: "cloud", priceWithTax: { value: 20.25 } },
+          B102: { date: "2026-09-01", category: "ai", priceWithTax: { value: 5.75 } },
+        };
+        return res.end(JSON.stringify(invoices[billMatch[1]]));
+      }
+      if (req.url === "/cloud/project") {
+        return res.end(JSON.stringify(["proj-1"]));
+      }
+      if (req.url === "/cloud/project/proj-1/ai/endpoint") {
+        return res.end(JSON.stringify(["My-Model", "Other Model"]));
+      }
+      if (req.url === "/cloud/project/proj-1/usage/current") {
+        return res.end(JSON.stringify({
+          lastUpdate: "2026-10-17T12:00:00Z",
+          period: { from: "2026-10-01", to: "2026-10-31" },
+          resourcesUsage: [{
+            type: "ai-endpoints",
+            resources: [{ components: [
+              { name: "my-model-input_tokens", quantity: { value: 1000 }, totalPrice: 0.1 },
+              { name: "my-model-output_tokens", quantity: { value: 500 }, totalPrice: 0.3 },
+              { name: "other-model-input_tokens", quantity: { value: 100 }, totalPrice: 0.01 },
+              { name: "not-a-token-component", quantity: { value: 1 }, totalPrice: 0 },
+            ] }],
+          }],
+        }));
+      }
+      return res.end(JSON.stringify({}));
     }
     if (req.url.endsWith("audio/speech") && mode !== "failure") {
       res.writeHead(200, { "content-type": "audio/wav" }).end(await wavBuffer(0.2));
@@ -379,61 +436,13 @@ test("config advertises AI and Whisper selectors from the local profiles", async
   assert.deepEqual(config.whisperProfiles.map((profile) => profile.id), ["gpu-1", "vm103", "ovhcloud"]);
 });
 
-test("BRAIN_PROFILES restricts the advertised AI profiles to the allowlist", async (t) => {
-  const { process: child, origin: demo } = await startBackend({
-    BRAIN_PROFILES: "a1-deepseek,a1-qwen",
-    BRAIN_PROFILE_DEFAULT: "a1-qwen",
-  });
-  t.after(() => { child.kill(); });
-  const config = await (await auth(demo, "/api/config")).json();
-  // The private profiles are absent entirely — no selector entries at all —
-  // while the a1 profiles stay. The allowed default is preserved.
-  assert.deepEqual(config.aiProfiles.map((profile) => profile.id), ["a1-deepseek", "a1-qwen"]);
-  assert.equal(config.brainProfileDefault, "a1-qwen");
-});
-
-test("BRAIN_PROFILES excludes the default profile, the default falls back to a visible one", async (t) => {
-  const { process: child, origin: demo } = await startBackend({
-    BRAIN_PROFILES: "a1-qwen",
-    BRAIN_PROFILE_DEFAULT: "claudecode",
-  });
-  t.after(() => { child.kill(); });
-  const config = await (await auth(demo, "/api/config")).json();
-  assert.deepEqual(config.aiProfiles.map((profile) => profile.id), ["a1-qwen"]);
-  assert.equal(config.brainProfileDefault, "a1-qwen");
-});
-
-test("the default deployment serves index.html byte-identical (no brand injection)", async () => {
-  const served = await (await fetch(`${origin}/`)).text();
-  const onDisk = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
-  assert.equal(served, onDisk);
-});
-
-test("BRAND=a1 injects the a1 theme and logo into index.html only", async (t) => {
-  const { process: child, origin: a1 } = await startBackend({ BRAND: "a1" });
-  t.after(() => { child.kill(); });
-  const html = await (await fetch(`${a1}/`)).text();
-  assert.match(html, /<link rel="stylesheet" href="\/style\.css">\s*<link rel="stylesheet" href="\/theme-a1\.css">/);
-  assert.match(html, /<img class="brand-logo" src="\/logo-a1\.png" alt="a1"/);
-  const theme = await fetch(`${a1}/theme-a1.css`);
-  assert.equal(theme.status, 200);
-  assert.match(theme.headers.get("content-type"), /text\/css/);
-  const logo = await fetch(`${a1}/logo-a1.png`);
-  assert.equal(logo.status, 200);
-  assert.match(logo.headers.get("content-type"), /image\/png/);
-  // The on-disk file is never modified: the same request on the unbranded
-  // deployment stays byte-identical.
-  const onDisk = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
-  assert.doesNotMatch(onDisk, /theme-a1\.css/);
-});
-
 test("the Whisper selector routes a request to the requested server profile", async () => {
   mode = "success";
   const response = await transcribe(undefined, "/api/transcribe?language=en&whisperProfile=vm103");
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.profile, "vm103");
-  assert.equal(result.profileLabel, "vm103 on pve103");
+  assert.equal(result.profileLabel, "RW - VM103 - deepdml/faster-whisper-large-v3-turbo-ct2");
   assert.match(received.toString("latin1"), /name="model"\r?\n\r?\ndeepdml\/faster-whisper-large-v3-turbo-ct2\r?\n/);
 });
 
@@ -443,7 +452,7 @@ test("the Whisper selector can route transcription to OVHcloud whisper-large-v3"
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.profile, "ovhcloud");
-  assert.equal(result.profileLabel, "OVHcloud Whisper");
+  assert.equal(result.profileLabel, "OVHCloud - whisper-large-v3");
   assert.equal(receivedAuth, "Bearer test-ovh-stt");
   const body = received.toString("latin1");
   assert.match(body, /name="model"\r?\n\r?\nwhisper-large-v3\r?\n/);
@@ -697,7 +706,7 @@ test("the brain system prompt reports the MCP web-search state per request", asy
     await ask(mcpOrigin, { prompt: "Can you search the web?", sessionId: `mcp-${script}`, websearch: true });
     const body = JSON.parse(received.toString("utf8"));
     assert.match(body.messages[0].content, promptPattern);
-    if (searchPattern) assert.match(body.messages[1].content, searchPattern);
+    if (searchPattern) assert.match(body.messages[0].content, searchPattern);
     else assert.equal(body.messages.length, 2, "no search-results message");
   }
 });
@@ -1630,4 +1639,134 @@ test("the conversation store is a database: ?days= windows it and it survives a 
     ["first question", "second question"],
     JSON.stringify(survived.entries),
   );
+});
+
+test("costs endpoint is session-gated and reports unconfigured sections without keys", async (t) => {
+  // No session cookie: the /api gate answers 403, like every other route.
+  const anonymous = await fetch(`${origin}/api/costs`);
+  assert.equal(anonymous.status, 403);
+  // The default backend has no OPENROUTER_API_KEY / OVH_* credentials, so
+  // both sections are "configured: false" and the panel hides itself.
+  const response = await auth(origin, "/api/costs");
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.openrouter.configured, false);
+  assert.equal(body.ovhcloud.configured, false);
+  assert.ok(body.generated_at);
+});
+
+test("costs endpoint serves the billing view, caches it and degrades stale", async (t) => {
+  const costs = await startBackend({
+    OPENROUTER_API_KEY: "test-or-key",
+    OPENROUTER_BASE_URL: base,
+    OVH_APP_KEY: "test-app-key",
+    OVH_APP_SECRET: "test-app-secret",
+    OVH_CONSUMER_KEY: "test-consumer-key",
+    OVH_ENDPOINT: base,
+  });
+  t.after(async () => { costs.process.kill(); await once(costs.process, "exit"); });
+
+  costsMode = "up";
+  const response = await auth(costs.origin, "/api/costs");
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  // OpenRouter: the mock key + credits rows.
+  assert.equal(body.openrouter.configured, true);
+  assert.equal(body.openrouter.up, 1);
+  assert.equal(body.openrouter.balance, 42.5);
+  assert.equal(body.openrouter.used_monthly, 12.25);
+  assert.equal(body.openrouter.used_total, 57.5);
+  assert.equal(body.openrouter.is_free_tier, false);
+  assert.equal(body.openrouter.stale, false);
+  assert.ok(body.openrouter.fetched_at);
+  // OVHcloud: three invoices, newest last, and the live AI month.
+  assert.equal(body.ovhcloud.configured, true);
+  assert.equal(body.ovhcloud.up, 1);
+  assert.deepEqual(body.ovhcloud.invoices.map((invoice) => invoice.date), ["2026-07-01", "2026-08-01", "2026-09-01"]);
+  assert.ok(Math.abs(body.ovhcloud.total_eur - 36.5) < 1e-9);
+  assert.equal(body.ovhcloud.ai_current_month.month, "2026-10");
+  assert.equal(body.ovhcloud.ai_current_month.model, "My-Model");
+  assert.equal(body.ovhcloud.ai_current_month.input, 1100);
+  assert.equal(body.ovhcloud.ai_current_month.output, 500);
+  assert.ok(Math.abs(body.ovhcloud.ai_current_month.cost_eur - 0.41) < 1e-9);
+  // The OVH request carried the signed application/consumer headers.
+  assert.equal(costsOvhHeaders.app, "test-app-key");
+  assert.equal(costsOvhHeaders.consumer, "test-consumer-key");
+  assert.match(costsOvhHeaders.signature, /^\$1\$[0-9a-f]{40}$/);
+  assert.match(costsOvhHeaders.timestamp, /^\d{10}$/);
+  // The second call within the TTL serves the cache: same fetched_at.
+  const second = await (await auth(costs.origin, "/api/costs")).json();
+  assert.equal(second.ovhcloud.fetched_at, body.ovhcloud.fetched_at);
+  assert.equal(second.openrouter.fetched_at, body.openrouter.fetched_at);
+
+  // A fresh backend with the billing APIs down: no data yet, so the section
+  // reports up: 0 with the error and stale: null (nothing to be stale).
+  costsMode = "down";
+  const failed = await startBackend({
+    OPENROUTER_API_KEY: "test-or-key",
+    OPENROUTER_BASE_URL: base,
+    OVH_APP_KEY: "test-app-key",
+    OVH_APP_SECRET: "test-app-secret",
+    OVH_CONSUMER_KEY: "test-consumer-key",
+    OVH_ENDPOINT: base,
+  });
+  t.after(async () => { failed.process.kill(); await once(failed.process, "exit"); });
+  const down = await (await auth(failed.origin, "/api/costs")).json();
+  assert.equal(down.openrouter.up, 0);
+  assert.match(down.openrouter.error, /503/);
+  assert.equal(down.openrouter.stale, null);
+  assert.equal(down.ovhcloud.up, 0);
+  assert.equal(down.ovhcloud.stale, null);
+  costsMode = "up";
+});
+
+test("BRAIN_PROFILES restricts the advertised AI profiles to the allowlist", async (t) => {
+  const { process: child, origin: demo } = await startBackend({
+    BRAIN_PROFILES: "a1-deepseek,a1-qwen",
+    BRAIN_PROFILE_DEFAULT: "a1-qwen",
+  });
+  t.after(() => { child.kill(); });
+  const config = await (await auth(demo, "/api/config")).json();
+  // The private profiles are absent entirely — no selector entries at all —
+  // while the a1 profiles stay. The allowed default is preserved.
+  assert.deepEqual(config.aiProfiles.map((profile) => profile.id), ["a1-deepseek", "a1-qwen"]);
+  assert.equal(config.brainProfileDefault, "a1-qwen");
+});
+
+test("BRAIN_PROFILES excludes the default profile, the default falls back to a visible one", async (t) => {
+  const { process: child, origin: demo } = await startBackend({
+    BRAIN_PROFILES: "a1-qwen",
+    BRAIN_PROFILE_DEFAULT: "claudecode",
+  });
+  t.after(() => { child.kill(); });
+  const config = await (await auth(demo, "/api/config")).json();
+  assert.deepEqual(config.aiProfiles.map((profile) => profile.id), ["a1-qwen"]);
+  assert.equal(config.brainProfileDefault, "a1-qwen");
+});
+
+test("the default deployment serves index.html byte-identical (no brand injection)", async () => {
+  const served = await (await fetch(`${origin}/`)).text();
+  const onDisk = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.equal(served, onDisk);
+});
+
+test("BRAND=a1 injects the a1 theme and logo into index.html only", async (t) => {
+  const { process: child, origin: a1 } = await startBackend({ BRAND: "a1" });
+  t.after(() => { child.kill(); });
+  const html = await (await fetch(`${a1}/`)).text();
+  assert.match(html, /<link rel="stylesheet" href="\/style\.css">\s*<link rel="stylesheet" href="\/theme-a1\.css">/);
+  assert.match(html, /<img class="brand-logo" src="\/logo-a1\.png" alt="a1"/);
+  // The eyebrow logo sits inline to the LEFT of the "Jarvis web assistant"
+  // text (owner 2026-10-19) — not above it as a separate block.
+  assert.match(html, /<p class="eyebrow"><img class="brand-logo eyebrow-logo" src="\/logo-a1\.png" alt="a1" width="24" height="24"> Jarvis web assistant<\/p>/);
+  const theme = await fetch(`${a1}/theme-a1.css`);
+  assert.equal(theme.status, 200);
+  assert.match(theme.headers.get("content-type"), /text\/css/);
+  const logo = await fetch(`${a1}/logo-a1.png`);
+  assert.equal(logo.status, 200);
+  assert.match(logo.headers.get("content-type"), /image\/png/);
+  // The on-disk file is never modified: the same request on the unbranded
+  // deployment stays byte-identical.
+  const onDisk = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(onDisk, /theme-a1\.css/);
 });

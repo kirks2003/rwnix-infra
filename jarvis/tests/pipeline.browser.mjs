@@ -74,6 +74,7 @@ async function setup(t, transcribe, options = {}, pageBrowser = browser) {
     window.testTracks = [];
     window.ttsEvents = [];
     window.failNextTTS = 0;
+    window.hangTTSFrom = 0;
     const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async (...args) => {
       if (window.denyMicrophone) throw new DOMException("Permission denied", "NotAllowedError");
@@ -93,7 +94,9 @@ async function setup(t, transcribe, options = {}, pageBrowser = browser) {
         setTimeout(() => utterance.onerror?.({ error: "synthesis-failed" }), 25);
         return;
       }
-      if (!window.hangTTS) setTimeout(() => utterance.onend?.(), 25);
+      const hang = window.hangTTS ||
+        (window.hangTTSFrom > 0 && window.savedUtterances.length >= window.hangTTSFrom);
+      if (!hang) setTimeout(() => utterance.onend?.(), 25);
     };
     speechSynthesis.cancel = () => window.ttsEvents.push("cancel");
     speechSynthesis.resume = () => {};
@@ -161,6 +164,7 @@ async function setup(t, transcribe, options = {}, pageBrowser = browser) {
     await page.click("#saveVoiceButton");
   }
   if (options.hangTTS) await page.evaluate(() => { window.hangTTS = true; });
+  if (options.hangTTSFrom) await page.evaluate((value) => { window.hangTTSFrom = value; }, options.hangTTSFrom);
   await page.evaluate((value) => {
     window.silentInput = value.silent;
     window.denyMicrophone = value.denied;
@@ -175,7 +179,8 @@ test("real Chromium capture completes three answered turns with fresh valid audi
   // follow-up command window opens, so the next turns chain without the wake
   // word: one probe + completed utterance, then two command transcriptions.
   const { page, calls } = await setup(t, async () => ({ text: "Rocky! What time is it?" }));
-  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 35000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  await page.waitForFunction(() => window.savedUtterances.length >= 6, null, { timeout: 35000 });
   await page.click("#stopButton");
   assert.equal(calls.prompts.length, 3);
   assert.deepEqual(calls.prompts, Array(3).fill("What time is it?"));
@@ -198,7 +203,9 @@ test("Stop ignores late Whisper responses and allows a clean re-arm", { timeout:
   assert.equal(calls.prompts.length, 0);
   assert.equal(await page.textContent("#stageTitle"), "Stopped");
   await page.click("#armButton");
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 15000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Thinking line + "Done." answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 15000 });
   await page.click("#stopButton");
   assert.equal(calls.prompts.length, 1);
 });
@@ -210,6 +217,7 @@ test("an exhausted Whisper retry is a visible error, then recovers sequentially"
   const { page, calls } = await setup(t, async (n) => n <= 3
     ? { status: 502, error: "vm103 unavailable" }
     : { text: "Rocky recovered" });
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("core").classList.contains("error"));
   // The hero only shows the short error caption; server details live in the log.
   assert.match(await page.textContent("#log"), /vm103 unavailable/);
@@ -217,7 +225,7 @@ test("an exhausted Whisper retry is a visible error, then recovers sequentially"
   assert.match(await page.textContent("#log"), /wake probe failed \(attempt 1\/3\)/);
   assert.match(await page.textContent("#log"), /wake probe failed \(attempt 2\/3\)/);
   assert.match(await page.textContent("#log"), /Pipeline error/);
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 30000 });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 30000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["recovered"]);
   // The pipeline is strictly sequential: no two transcribe requests in flight.
@@ -230,7 +238,8 @@ test("a transient Whisper failure recovers on the bounded retry without an error
   const { page, calls } = await setup(t, async (n) => n === 1
     ? { status: 502, error: "vm103 unavailable" }
     : { text: "Rocky, what time is it?" });
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
   await page.click("#stopButton");
   const log = await page.textContent("#log");
   assert.match(log, /wake probe failed \(attempt 1\/3\): vm103 unavailable; retrying in 1000 ms/);
@@ -258,7 +267,11 @@ test("wake word plus stop cuts a speaking answer before it finishes", { timeout:
   // command and must cut the speech without a second brain round trip.
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : "Rocky stop",
-  }), { hangTTS: true });
+  }), { hangTTSFrom: 2 });
+  // Deterministic thinking line: the fixed random source picks the single-chunk
+  // line, so hangTTSFrom 2 hangs the answer (not a thinking chunk) and the brain
+  // round trip still fires before the stop command cuts the speech.
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech stopped by voice command"),
     null, { timeout: 20000 });
   assert.deepEqual(calls.prompts, ["What time is it?"]);
@@ -274,8 +287,12 @@ test("Jarvis off stops speech without overwriting the shown answer", { timeout: 
   const answer = "It is 14:05. I am completely operational.";
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : "background noise",
-  }), { hangTTS: true, answer });
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  }), { hangTTSFrom: 2, answer });
+  // Deterministic thinking line: the fixed random source picks the single-chunk
+  // line, so hangTTSFrom 2 hangs the first answer chunk (the thinking line and
+  // the brain round trip complete first) rather than a thinking chunk.
+  await page.evaluate(() => { Math.random = () => 0; });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
   assert.match(await page.textContent("#conversationText"), new RegExp(answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   await page.click("#enableSwitch");
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped");
@@ -290,8 +307,12 @@ test("Text only remains clickable while speaking and cuts current speech", { tim
   const answer = "It is 14:05. I am completely operational.";
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : "background noise",
-  }), { hangTTS: true, answer });
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  }), { hangTTSFrom: 2, answer });
+  // Deterministic thinking line: the fixed random source picks the single-chunk
+  // line, so hangTTSFrom 2 hangs the first answer chunk (the thinking line and
+  // the brain round trip complete first) rather than a thinking chunk.
+  await page.evaluate(() => { Math.random = () => 0; });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
   assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "true");
   assert.equal(await page.$eval("#speakSwitch", (button) => button.disabled), false);
   await page.click("#speakSwitch");
@@ -314,7 +335,11 @@ test("a bare stop word without the wake phrase cuts a speaking answer", { timeou
   // trip.
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : "stop",
-  }), { hangTTS: true });
+  }), { hangTTSFrom: 2 });
+  // Deterministic thinking line (see the wake-word-plus-stop test above): without
+  // the fixed random source hangTTSFrom 2 can hang a thinking chunk and block the
+  // brain round trip, so this test would pass only when the random line is short.
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech stopped by voice command"),
     null, { timeout: 20000 });
   assert.deepEqual(calls.prompts, ["What time is it?"]);
@@ -353,12 +378,13 @@ test("a stop word inside the echoed window cuts a speaking answer on a loud user
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : n === 3 ? "Der Regen bleibt bis morgen. Stopp" : "",
   }), {
-    hangTTS: true,
+    hangTTSFrom: 2,
     chat: async () => {
       await new Promise((resolve) => setTimeout(resolve, 3000));
       return { answer: "Done.", requestId: "brain-test" };
     },
   }, instance);
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("log").textContent.includes("Speech stopped by voice command"),
     null, { timeout: 30000 });
   const log = await page.textContent("#log");
@@ -389,10 +415,11 @@ test("wake-only response greets with the user's name, then transcribes the comma
   const { page, calls } = await setup(t, async (n) => ({ text: n <= 2 ? "Rocky." : "What time is it?" }), {
     config: { user: "Mila" },
   });
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command");
   // Utterance 1 is the spoken greeting naming the signed-in user, utterance
-  // 2 is the answer.
-  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 18000 });
+  // 2 is the thinking line, utterance 3 is the answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 3, null, { timeout: 18000 });
   await page.click("#stopButton");
   assert.equal(await page.evaluate(() => savedUtterances[0].text), "Yes, Mila.");
   assert.deepEqual(calls.prompts, ["What time is it?"]);
@@ -528,10 +555,11 @@ test("a command spoken right after the greeting over the echo is captured, not l
   const { page, calls } = await setup(t, async (n) => ({
     text: n === 1 ? "Rocky" : n === 2 ? "" : "What time is it?",
   }), { config: { user: "Roman" } }, instance);
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command");
-  // Utterance 1 is the spoken greeting, utterance 2 the answer to the repeated
-  // command.
-  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
+  // Utterance 1 is the spoken greeting, utterance 2 the thinking line of the
+  // repeated command, utterance 3 its answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 3, null, { timeout: 20000 });
   await page.click("#stopButton");
   assert.equal(await page.evaluate(() => savedUtterances[0].text), "Yes, Roman.");
   assert.deepEqual(calls.prompts, ["What time is it?"]);
@@ -565,8 +593,11 @@ test("a follow-up command right after the answer is captured without the wake wo
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky." : n === 3 ? "What time is it?" : "What was the second option?",
   }), { config: { user: "Roman" } });
-  // Utterance 1 is the spoken greeting, utterances 2 and 3 the two answers.
-  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Utterance 1 is the spoken greeting; each answer is preceded by its
+  // thinking line, so utterances 2 and 4 are thinking lines and 3 and 5 the
+  // two answers.
+  await page.waitForFunction(() => window.savedUtterances.length >= 5, null, { timeout: 30000 });
   await page.click("#stopButton");
   assert.equal(await page.evaluate(() => savedUtterances[0].text), "Yes, Roman.");
   assert.deepEqual(calls.prompts, ["What time is it?", "What was the second option?"]);
@@ -621,13 +652,13 @@ test("a thank-you after the answer gets a butler closing instead of a brain roun
   }));
   // Deterministic closing: the fixed random source picks the first line.
   await page.evaluate(() => { Math.random = () => 0; });
-  // Utterance 1 is the answer; the closing is spoken as its clauses
-  // ("You are most welcome." + "Standing by."), so the full closing is the
-  // join of everything after the answer.
-  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
+  // Utterance 1 is the thinking line, utterance 2 the answer; the closing is
+  // spoken as its clauses ("You are most welcome." + "Standing by."), so the
+  // full closing is the join of everything after the answer.
+  await page.waitForFunction(() => window.savedUtterances.length >= 4, null, { timeout: 30000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["What time is it?"]);
-  assert.equal(await page.evaluate(() => savedUtterances.slice(1).map((u) => u.text).join(" ")),
+  assert.equal(await page.evaluate(() => savedUtterances.slice(2).map((u) => u.text).join(" ")),
     "You are most welcome. Standing by.");
   assert.match(await page.textContent("#log"), /Acknowledgment "Thank you"/);
 });
@@ -641,13 +672,13 @@ test("a bye after the answer ends the turn with a butler farewell", { timeout: 4
   }));
   // Deterministic closing: the fixed random source picks the first line.
   await page.evaluate(() => { Math.random = () => 0; });
-  // Utterance 1 is the answer; the farewell "It was my pleasure. Goodbye."
-  // speaks as a single clause (the one-word "Goodbye." merges into it), so
-  // the full farewell is utterance 2.
-  await page.waitForFunction(() => window.savedUtterances.length >= 2, null, { timeout: 30000 });
+  // Utterance 1 is the thinking line, utterance 2 the answer; the farewell
+  // "It was my pleasure. Goodbye." speaks as a single clause (the one-word
+  // "Goodbye." merges into it), so the full farewell is utterance 3.
+  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["What time is it?"]);
-  assert.equal(await page.evaluate(() => savedUtterances.slice(1).map((u) => u.text).join(" ")),
+  assert.equal(await page.evaluate(() => savedUtterances.slice(2).map((u) => u.text).join(" ")),
     "It was my pleasure. Goodbye.");
   assert.match(await page.textContent("#log"), /Acknowledgment "Bye"/);
 });
@@ -672,15 +703,18 @@ test("an ok after the follow-up window closed still gets a butler closing in wak
   const { page, calls } = await setup(t, async (n) => ({
     text: n === 1 ? "Rocky" : n === 2 ? "Rocky, what time is it?" : n === 3 ? "Ok" : "",
   }), { config: { user: "Roman" } }, instance);
-  // Deterministic closing: the fixed random source picks the first line.
+  // Deterministic thinking line and closing: the fixed random source picks the
+  // first line of each, so the thinking line is a single chunk and the closing
+  // is its two clauses.
   await page.evaluate(() => { Math.random = () => 0; });
-  // Utterance 1 is the answer; the closing is spoken as its clauses
-  // ("Very good." + "Standing by."), so the full closing is the join of
-  // everything after the answer.
-  await page.waitForFunction(() => window.savedUtterances.length >= 3, null, { timeout: 30000 });
+  // The command rides in the completed utterance (not after a greeting), so
+  // there is no greeting: utterance 1 is the thinking line, 2 the answer, and
+  // the closing is spoken as its clauses ("Very good." + "Standing by."), so
+  // the full closing is the join of everything after the answer.
+  await page.waitForFunction(() => window.savedUtterances.length >= 4, null, { timeout: 30000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["what time is it?"]);
-  assert.equal(await page.evaluate(() => savedUtterances.slice(1).map((u) => u.text).join(" ")),
+  assert.equal(await page.evaluate(() => savedUtterances.slice(2).map((u) => u.text).join(" ")),
     "Very good. Standing by.");
   const logText = await page.textContent("#log");
   assert.match(logText, /Acknowledgment "Ok" after the spoken turn/);
@@ -713,8 +747,10 @@ test("an empty completed utterance after a wake probe asks for the command inste
   const { page, calls } = await setup(t, async (n) => ({
     text: n === 1 ? "Rocky" : n === 2 ? "" : "What time is it?",
   }));
-  // Utterance 1 is the spoken greeting, utterance 2 the answer.
-  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 25000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Utterance 1 is the spoken greeting, utterance 2 the thinking line,
+  // utterance 3 the answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 3, null, { timeout: 25000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["What time is it?"]);
 });
@@ -905,8 +941,9 @@ test("personal wake word is saved, restored after reload and used by the pipelin
   await page.reload();
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
   assert.equal(await page.inputValue("#wakeWordInput"), "Nova");
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.click("#armButton");
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 15000 });
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 15000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["hello there"]);
 });
@@ -928,7 +965,9 @@ test("Whisper log shows readable wake and command text, including empty results"
     text: n === 1 ? "" : n === 2 ? "background conversation" : "Rocky, hello",
     noSpeech: n === 1,
   }));
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 20000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  // Thinking line + "Done." answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
   await page.click("#stopButton");
   const log = await page.textContent("#log");
   assert.match(log, /Wake probe recognized: \(no speech recognized\)/);
@@ -1025,10 +1064,13 @@ test("HAL 9000 plays self-hosted TTS clauses instead of the browser voice", { ti
     answer: "It is 14:05. I am completely operational.",
     speak: async () => ({ status: 200 }),
   });
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("steps").querySelector('[data-step="tts"]').className === "done",
     null, { timeout: 25000 });
   await page.click("#stopButton");
-  assert.deepEqual(calls.speak, ["It is 14:05.", "I am completely operational."]);
+  // The thinking line rides the same self-hosted clause path as the answer.
+  assert.deepEqual(calls.speak,
+    ["A moment — let me think about what time is it.", "It is 14:05.", "I am completely operational."]);
   assert.equal(await page.evaluate(() => window.savedUtterances.length), 0);
   assert.match(await page.textContent("#log"), /HAL 9000 clause 2\/2/);
   assert.match(await page.textContent("#voiceStatus"), /kokoro \/ bm_george/);
@@ -1043,10 +1085,18 @@ test("HAL 9000 finishes the answer with the browser voice when self-hosted TTS f
     answer: "It is 14:05. I am completely operational.",
     speak: async (n) => ({ status: n === 1 ? 200 : 502 }),
   });
-  await page.waitForFunction(() => window.savedUtterances.length === 1, null, { timeout: 25000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  // The thinking line (call 1) plays self-hosted; the answer's first clause
+  // (call 2) fails, so the browser voice finishes from that clause on.
+  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 25000 });
   await page.click("#stopButton");
-  assert.deepEqual(calls.speak, ["It is 14:05.", "I am completely operational."]);
-  assert.equal(await page.evaluate(() => savedUtterances[0].text), "I am completely operational.");
+  // Call 1 (thinking) succeeds self-hosted; call 2 (first answer clause)
+  // fails, so the fallback voice speaks the remaining clauses itself and no
+  // third /api/speak call is ever made.
+  assert.deepEqual(calls.speak,
+    ["A moment — let me think about what time is it.", "It is 14:05."]);
+  assert.deepEqual(await page.evaluate(() => savedUtterances.map((u) => u.text)),
+    ["It is 14:05.", "I am completely operational."]);
   // The HAL fallback keeps its own cadence rather than the browser default.
   // The API stores these as 32-bit floats, so compare with a tolerance.
   const [rate, pitch] = await page.evaluate(() => [savedUtterances[0].rate, savedUtterances[0].pitch]);
@@ -1062,11 +1112,13 @@ test("HAL 9000 without a TTS backend keeps its cadence on the browser voice", { 
     voice: "hal9000",
     answer: "It is 14:05. I am completely operational.",
   });
-  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 25000 });
+  await page.evaluate(() => { Math.random = () => 0; });
+  await page.waitForFunction(() => window.savedUtterances.length === 3, null, { timeout: 25000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.speak, []);
+  // The thinking line speaks at the HAL cadence on the browser voice too.
   assert.deepEqual(await page.evaluate(() => savedUtterances.map((utterance) => utterance.text)),
-    ["It is 14:05.", "I am completely operational."]);
+    ["A moment — let me think about what time is it.", "It is 14:05.", "I am completely operational."]);
   assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.voice")), "hal9000");
   assert.match(await page.textContent("#voiceStatus"), /No TTS backend configured/);
 });
@@ -1114,13 +1166,15 @@ test("the speed slider scales the request and persists per browser", { timeout: 
   });
   assert.equal(await page.textContent("#voiceSpeedValue"), "1.50x");
   assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.voiceSpeed")), "1.5");
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.waitForFunction(() => document.getElementById("steps").querySelector('[data-step="tts"]').className === "done",
     null, { timeout: 25000 });
   // Stop overwrites the stage detail, so read the speaking stage from the log.
   assert.match(await page.textContent("#log"), /Speaking: HAL 9000 is reading the answer at 1\.50x/);
   await page.click("#stopButton");
-  // 1.04 profile speed scaled by 1.5, within the 0.5-2.0 the backend accepts.
-  assert.deepEqual(speeds, [1.56]);
+  // 1.04 profile speed scaled by 1.5, within the 0.5-2.0 the backend accepts;
+  // the thinking line and the answer each send one clause at that speed.
+  assert.deepEqual(speeds, [1.56, 1.56]);
   await page.reload();
   await page.waitForFunction(() => !document.getElementById("armButton").disabled);
   assert.equal(await page.inputValue("#voiceSpeed"), "1.5");
@@ -1172,14 +1226,20 @@ test("a failed speech output is retried and still speaks the answer", { timeout:
   // The answer text is already known, so a failed speech output must be
   // retried instead of discarding the answer and requiring the input again.
   const { page } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  // Deterministic thinking line: the fixed random source picks the single-chunk
+  // line, so the failed attempt 1, retried attempt 2 and the answer are exactly
+  // three utterances (a 2-chunk random line would push the count past 3).
+  await page.evaluate(() => { Math.random = () => 0; });
   await page.click("#stopButton");
   await page.evaluate(() => { window.failNextTTS = 1; });
   await typeManualPrompt(page, "What time is it?");
   await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Stopped",
     null, { timeout: 25000 });
-  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 15000 });
+  // The failure now lands on the thinking line, which is retried before the
+  // brain runs: thinking attempt 1 (failed), attempt 2, then the answer.
+  await page.waitForFunction(() => window.savedUtterances.length === 3, null, { timeout: 15000 });
   const log = await page.textContent("#log");
-  assert.match(log, /speech output failed \(attempt 1\/3\): Speech output failed: synthesis-failed/);
+  assert.match(log, /thinking speech failed \(attempt 1\/3\): Speech output failed: synthesis-failed/);
   assert.doesNotMatch(log, /Pipeline error/);
   assert.equal(await lastAnswerBody(page), "Done.");
 });
@@ -1237,7 +1297,14 @@ test("the History search panel builds its sliders from the backend limits and se
   assert.equal(await page.textContent("#historySearchDaysValue"), "30 days");
   assert.equal(await page.textContent("#historySearchMinScoreValue"), "0.62");
   await typeManualPrompt(page, "hello");
-  await page.waitForFunction(() => document.querySelectorAll("#conversationText .transcript-entry-answer").length > 0);
+  // Wait for the completed (non-pending) answer body: the pending entry is
+  // added before the brain request, so only completion proves the request
+  // that carries the historySearch knobs has arrived.
+  await page.waitForFunction(() => {
+    const bodies = document.querySelectorAll("#conversationText .transcript-entry-answer .transcript-body");
+    const last = bodies.length ? bodies[bodies.length - 1] : null;
+    return last !== null && !last.classList.contains("pending");
+  }, null, { timeout: 20000 });
   assert.equal(chats.at(-1).historySearch.days, 30, JSON.stringify(chats.at(-1).historySearch));
   assert.equal(chats.at(-1).historySearch.minScore, 0.62);
   // Untouched knobs still ride along at their backend defaults.
@@ -1480,10 +1547,14 @@ test("the silence slider adjusts the live stop delay and persists per browser", 
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 4 ? "Rocky, what time is it?" : "background noise",
   }));
+  await page.evaluate(() => { Math.random = () => 0; });
   assert.equal(await page.inputValue("#silenceDelay"), "250");
   assert.equal(await page.textContent("#silenceDelayValue"), "250 ms");
   await page.waitForFunction(() => document.getElementById("log").textContent.includes("request stt-2"),
     null, { timeout: 30000 });
+  // Let the first turn finish speaking (thinking line + "Done.") before the
+  // stop below, so the baseline utterance count is deterministic.
+  await page.waitForFunction(() => window.savedUtterances.length >= 2, null, { timeout: 10000 });
   await page.click("#stopButton");
   const before = calls.audio.length;
 
@@ -1504,6 +1575,7 @@ test("the silence slider adjusts the live stop delay and persists per browser", 
   await page.click("#armButton");
   await page.waitForTimeout(9000);
   assert.equal(calls.audio.length, before + 1, "5 s stop: the 2.8 s pauses must not end the command");
+  const utterancesBefore = await page.evaluate(() => window.savedUtterances.length);
 
   // Live adjust mid-recording: dropping the stop to 250 ms ends the pending
   // command at the next pause — no re-arm and no re-speaking.
@@ -1515,7 +1587,10 @@ test("the silence slider adjusts the live stop delay and persists per browser", 
   });
   await page.waitForFunction((n) => document.getElementById("log").textContent.includes(`request stt-${n}`),
     before + 2, { timeout: 25000 });
-  await page.waitForFunction(() => window.savedUtterances.length === 2, null, { timeout: 20000 });
+  // The second turn speaks the thinking line + "Done." on top of whatever the
+  // first turn already spoke.
+  await page.waitForFunction((n) => window.savedUtterances.length >= n, utterancesBefore + 2,
+    { timeout: 20000 });
   await page.click("#stopButton");
   assert.deepEqual(calls.prompts, ["what time is it?", "what time is it?"]);
   assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.silenceMs")), "250");

@@ -47,6 +47,83 @@ const DISCONNECT_SWEEP =
   "DETACH DELETE e " +
   "RETURN name";
 
+// Relevance annotation for the panel: the number of fact-edges (KNOWS
+// bookkeeping excluded) from the view's root to every node, so the UI can
+// offer Direct / Near / All. The root is the centred node when one is set,
+// otherwise the viewer's own :User account node — a type-less node named
+// after the user (:User nodes carry no `type`, entities always do). Nodes the
+// root cannot reach (e.g. the viewer's own isolated entities) get `hops:
+// null`. A null root or an empty subgraph is returned unchanged.
+function annotateSubgraphHops(result, { user, center } = {}) {
+  if (!result || !Array.isArray(result.nodes) || result.nodes.length === 0) return result;
+  let rootId = center || null;
+  if (!rootId && user) {
+    const own = result.nodes.find((node) => !node.type && node.name === user);
+    rootId = own ? own.id : null;
+  }
+  if (!rootId) return result;
+  const adjacency = new Map();
+  for (const edge of result.edges || []) {
+    if (!adjacency.has(edge.source)) adjacency.set(edge.source, new Set());
+    if (!adjacency.has(edge.target)) adjacency.set(edge.target, new Set());
+    adjacency.get(edge.source).add(edge.target);
+    adjacency.get(edge.target).add(edge.source);
+  }
+  const hops = new Map([[rootId, 0]]);
+  let frontier = [rootId];
+  while (frontier.length) {
+    const next = [];
+    for (const id of frontier) {
+      for (const neighbour of adjacency.get(id) || []) {
+        if (!hops.has(neighbour)) {
+          hops.set(neighbour, hops.get(id) + 1);
+          next.push(neighbour);
+        }
+      }
+    }
+    frontier = next;
+  }
+  for (const node of result.nodes) node.hops = hops.has(node.id) ? hops.get(node.id) : null;
+  return result;
+}
+
+// `owner` is a property on entity nodes, not a relationship: an owned
+// entity can have no fact edge touching its owner's user node at all (its
+// fact edges may point outside the fetched window), and the panel would
+// then draw it as a disconnected island. The view materialises the
+// ownership fact as an OWNS edge so every entity stays attached to the
+// account that owns it. View-level only: nothing is written to the store,
+// and any existing edge between the owner's user node and the entity (of
+// any type) already counts as the link.
+function materializeOwnership(byId, edges, access) {
+  const userById = new Map();
+  for (const entry of byId.values()) {
+    const a = access(entry);
+    if (a.user) userById.set(a.name, a.id);
+  }
+  const linked = new Set();
+  for (const edge of edges) {
+    const s = byId.get(edge.source);
+    const t = byId.get(edge.target);
+    if (!s || !t) continue;
+    const sa = access(s);
+    const ta = access(t);
+    if (sa.user) linked.add(`${sa.id}|${ta.id}`);
+    if (ta.user) linked.add(`${ta.id}|${sa.id}`);
+  }
+  for (const entry of byId.values()) {
+    const a = access(entry);
+    if (a.user || !a.owner) continue;
+    const ownerId = userById.get(a.owner);
+    if (!ownerId || ownerId === a.id) continue;
+    const key = `${ownerId}|${a.id}`;
+    if (linked.has(key)) continue;
+    linked.add(key);
+    edges.push({ source: ownerId, target: a.id, type: "OWNS", negative: false, firstSeen: null, lastSeen: null });
+    entry.isolated = false;
+  }
+}
+
 function sanitizeName(value) {
   return String(value == null ? "" : value).replace(/\s+/g, " ").trim().slice(0, 80);
 }
@@ -389,6 +466,7 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
       if (source) source.isolated = false;
       if (target) target.isolated = false;
     }
+    materializeOwnership(byId, edges, (entry) => ({ id: entry.id, name: entry.name, owner: entry.owner, user: entry.type === null }));
     return { byId, edges };
   }
 
@@ -487,7 +565,11 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
     // user's node or edge — the panel is per-user by construction. The admin
     // (`admin: true`, set by the backend for admin sessions only) gets the
     // whole graph: every user's nodes, entities and facts.
-    async subgraph({ user, limit = 60, center = null, admin = false } = {}) {
+    async subgraph(options) {
+      return annotateSubgraphHops(await this.subgraphCore(options), options);
+    },
+
+    async subgraphCore({ user, limit = 60, center = null, admin = false } = {}) {
       const cap = Math.min(120, Math.max(1, Number(limit) || 60));
       if (admin) {
         if (center) {
@@ -916,6 +998,7 @@ function createMemoryStore(users = []) {
         byId.get(edge.source).isolated = false;
         byId.get(edge.target).isolated = false;
       }
+      materializeOwnership(byId, worldEdges, (entry) => ({ id: entry.node.id, name: entry.node.name, owner: entry.node.owner, user: entry.node.props.role === "user" }));
       return { userNode: null, byId, drawnEdges: worldEdges };
     }
     const userNode = userNodeOf(user);
@@ -941,9 +1024,10 @@ function createMemoryStore(users = []) {
     for (const edge of drawnEdges) {
       if (!byId.has(edge.source)) byId.set(edge.source, { node: nodes.get(edge.source), isolated: false });
       if (!byId.has(edge.target)) byId.set(edge.target, { node: nodes.get(edge.target), isolated: false });
-      byId.get(edge.source).isolated = false;
-      byId.get(edge.target).isolated = false;
+     byId.get(edge.source).isolated = false;
+        byId.get(edge.target).isolated = false;
     }
+    materializeOwnership(byId, drawnEdges, (entry) => ({ id: entry.node.id, name: entry.node.name, owner: entry.node.owner, user: entry.node.props.role === "user" }));
     return { userNode, byId, drawnEdges };
   }
 
@@ -1018,7 +1102,11 @@ function createMemoryStore(users = []) {
     // and the fact edges between them, or a visible centre plus its
     // neighbours. Never another user's node or edge — except for the admin
     // (`admin: true`), whose view is the whole store.
-    async subgraph({ user, limit = 60, center = null, admin = false } = {}) {
+    async subgraph(options) {
+      return annotateSubgraphHops(await this.subgraphCore(options), options);
+    },
+
+    async subgraphCore({ user, limit = 60, center = null, admin = false } = {}) {
       const cap = Math.min(120, Math.max(1, Number(limit) || 60));
       const userNode = userNodeOf(user);
       const facts = edges.filter((edge) => edge.type !== "KNOWS");

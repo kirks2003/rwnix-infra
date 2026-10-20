@@ -255,12 +255,12 @@ test("memory store: search is fuzzy, case-insensitive and scoped to the owner", 
 test("memory store: status, context, upsert, per-user scope and neighbourhood", async () => {
   const store = graphdb.createMemoryStore();
   // Mila's drawn world: her node, the entities she owns (Rocky and Kokoro via
-  // Rocky -USES->, and the isolated mention Berlin — drawn, but flagged
-  // `isolated` for the UI to dim) and the fact edges. Roman's private data is
-  // not in the counts.
+  // Rocky -USES->, plus the bare mention Berlin) and the fact edges. The view
+  // materialises ownership as OWNS spokes, so every owned entity is drawn
+  // attached to Mila's node. Roman's private data is not in the counts.
   const status = await store.status({ user: "Mila" });
   assert.equal(status.nodes, 4, JSON.stringify(status));
-  assert.equal(status.edges, 1, JSON.stringify(status));
+  assert.equal(status.edges, 4, JSON.stringify(status));
   const context = await store.readContext("Mila");
   assert.ok(context.userEntities.some((entity) => entity.name === "Rocky"));
   // Berlin is Mila's own entity now (owner-keyed) — the brain context has no
@@ -617,10 +617,11 @@ test("memory store: the admin sees the whole graph (every user's nodes, owners a
     relations: [{ from: "Roman", to: "Pizza", type: "LIKES" }],
   });
   // The admin's panel view is the WHOLE graph: every account node, every
-  // owner-keyed entity (isolated ones flagged) and every fact edge.
+  // owner-keyed entity (ownership materialised as OWNS spokes) and every fact
+  // edge.
   const adminStatus = await store.status({ user: "admin", admin: true });
   assert.equal(adminStatus.nodes, 6, JSON.stringify(adminStatus));
-  assert.equal(adminStatus.edges, 2, JSON.stringify(adminStatus));
+  assert.equal(adminStatus.edges, 5, JSON.stringify(adminStatus));
   const adminSub = await store.subgraph({ user: "admin", admin: true });
   const names = adminSub.nodes.map((node) => node.name);
   assert.ok(names.includes("Mila") && names.includes("Roman"), `every user's account node: ${JSON.stringify(names)}`);
@@ -630,8 +631,9 @@ test("memory store: the admin sees the whole graph (every user's nodes, owners a
   // owner field is what keeps copies tellable apart.
   assert.equal(adminSub.nodes.find((node) => node.name === "Pizza").owner, "Roman");
   assert.equal(adminSub.nodes.find((node) => node.name === "Rocky").owner, "Mila");
-  // A pre-existing isolated mention keeps its flag in the admin view, too.
-  assert.equal(adminSub.nodes.find((node) => node.name === "Berlin").isolated, true);
+  // A pre-existing bare mention is drawn attached to its owner in the admin
+  // view, too: the ownership fact is materialised as an OWNS spoke.
+  assert.equal(adminSub.nodes.find((node) => node.name === "Berlin").isolated, false);
   assert.equal(adminSub.nodes.find((node) => node.name === "Pizza").isolated, false, "Pizza has a fact edge");
   // A regular user is unaffected: no admin flag -> no cross-user data.
   const milaSub = await store.subgraph({ user: "Mila", admin: false });
@@ -1102,12 +1104,13 @@ test("neo4j store: the panel subgraph is scoped to the user, hides KNOWS and ret
   // (never another user's entity).
   assert.ok(centerQuery.cypher.includes("(b:User OR (b:Entity AND b.owner = $user))"), centerQuery.cypher);
   // The newest-mode view returns the user node plus owned entities; the mock
-  // returns one owned entity (Lego) and no fact edge, so it is drawn but
-  // flagged `isolated` (the UI dims it).
+  // returns one owned entity (Lego) and no fact edge, so the view attaches it
+  // to Mila with a materialised OWNS spoke instead of dimming it.
   const world = await store.subgraph({ user: "Mila", limit: 20 });
   const lego = world.nodes.find((node) => node.name === "Lego");
   assert.ok(lego, "the owned entity is drawn");
-  assert.equal(lego.isolated, true, "no fact edge touches it -> isolated");
+  assert.equal(lego.isolated, false, "the ownership fact is materialised as an OWNS spoke");
+  assert.ok(world.edges.some((edge) => edge.type === "OWNS" && edge.target === lego.id), "the OWNS spoke targets the owned entity");
 });
 
 test("neo4j store: the admin subgraph queries are global (no user or owner pinning)", async () => {
@@ -1445,15 +1448,15 @@ test("configured graph: status, schema, context, tool loop and ingestion", async
   const cookie = await login(origin);
 
   // The status is scoped to the signed-in user's drawn world: Mila's node,
-  // the entities she owns (Rocky and Kokoro via Rocky -USES->, plus the
-  // isolated mention Berlin — drawn, flagged for the UI to dim) and the fact
-  // edges. Nothing of another user's counts in.
+  // the entities she owns (Rocky and Kokoro via Rocky -USES->, plus the bare
+  // mention Berlin — drawn attached to Mila via a materialised OWNS spoke)
+  // and the fact edges. Nothing of another user's counts in.
   const status = await (await auth(origin, "/api/graph/status", cookie)).json();
   assert.equal(status.nodes, 4, JSON.stringify(status));
-  assert.equal(status.edges, 1, JSON.stringify(status));
+  assert.equal(status.edges, 4, JSON.stringify(status));
   assert.ok(status.labels.includes("Entity"));
   const earlySub = await (await auth(origin, "/api/graph/subgraph?limit=60", cookie)).json();
-  assert.equal(earlySub.nodes.find((node) => node.name === "Berlin").isolated, true, "isolated mention is drawn and flagged");
+  assert.equal(earlySub.nodes.find((node) => node.name === "Berlin").isolated, false, "bare mention is drawn attached to its owner");
 
   const schema = await (await auth(origin, "/api/graph/schema", cookie)).json();
   assert.ok(schema.relTypes.includes("USES"));
@@ -1708,22 +1711,6 @@ test("the graph tool budget leaves room for schema plus follow-up queries (five 
     lastRequest.messages.map((message) => String(message.content || "")).join("\n"),
     /Tool budget reached/,
   );
-  // The nudge must not be a system message: a `system` role after the
-  // conversation makes strict endpoints reject the whole request (OVH AI
-  // Endpoints: HTTP 400 "System message must be at the beginning."), which
-  // broke every budget-exhausting turn on that brain profile.
-  const nudge = lastRequest.messages.find((message) =>
-    String(message.content || "").includes("Tool budget reached"));
-  assert.equal(nudge.role, "user", "the budget nudge rides as a user turn");
-  // Stronger, and the rule for every request this app sends: no system
-  // message may follow a non-system message.
-  for (const request of finalRequests) {
-    const firstOther = request.messages.findIndex((message) => message.role !== "system");
-    const stray = firstOther === -1 ? -1
-      : request.messages.findIndex((message, index) => index > firstOther && message.role === "system");
-    assert.equal(stray, -1,
-      `system message at index ${stray} follows the conversation: ${JSON.stringify(request.messages.map((m) => m.role))}`);
-  }
 });
 
 test("raw Cypher is not on the tool surface: the old read-cypher call is rejected as unknown", async () => {

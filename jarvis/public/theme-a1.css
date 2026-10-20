@@ -185,3 +185,13 @@ textarea {
 .login-panel .brand-logo {
   margin: 0 auto 6px;
 }
+/* The eyebrow logo sits inline to the LEFT of the "Jarvis web assistant"
+   text (owner 2026-10-19), not above it: smaller, no block spacing. */
+.brand-logo.eyebrow-logo {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  margin: 0 8px 0 0;
+  vertical-align: middle;
+  transform: translateY(-1px);
+}

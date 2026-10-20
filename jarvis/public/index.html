@@ -55,6 +55,20 @@
             </div>
           </div>
         </div>
+        <div id="costsPanel" class="costs-panel" hidden>
+          <div class="costs-section" id="openrouterCostsSection">
+            <p class="costs-title">OpenRouter</p>
+            <dl class="costs-grid" id="openrouterCosts"></dl>
+          </div>
+          <div class="costs-section" id="ovhcloudCostsSection">
+            <p class="costs-title">OVHcloud</p>
+            <dl class="costs-grid" id="ovhcloudCosts"></dl>
+          </div>
+          <div class="costs-footer">
+            <p class="costs-updated" id="costsUpdated" role="status"></p>
+            <button id="costsRefreshButton" class="costs-refresh" type="button" title="Refresh costs now">Refresh</button>
+          </div>
+        </div>
       </section>
 
       <section class="transcript app-ui">
@@ -64,6 +78,17 @@
           <form id="manualPromptForm" class="manual-prompt">
             <textarea id="manualPrompt" rows="2" aria-keyshortcuts="Control+Enter"
                       placeholder="Type a prompt here (when disarmed) and press Send or Ctrl+Enter..."></textarea>
+            <div id="pipelineMini" class="pipeline-mini">
+              <span id="pipelineMiniStatus" class="pipeline-mini-status" role="status">Idle.</span>
+              <ol id="pipelineMiniSteps" class="pipeline-mini-steps" aria-hidden="true">
+                <li data-step="wake" title="Wake word"></li>
+                <li data-step="record" title="Record command"></li>
+                <li data-step="vad" title="Stop after 1.5 s silence"></li>
+                <li data-step="whisper" title="Whisper transcription"></li>
+                <li data-step="brain" title="Brain"></li>
+                <li data-step="tts" title="Speech output"></li>
+              </ol>
+            </div>
             <button id="sendManualButton" type="submit" title="Send (Ctrl+Enter)" disabled>Send</button>
             <div class="transcript-controls">
               <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>
@@ -160,6 +185,14 @@
               <button id="graphView3dButton" type="button" disabled>3D</button>
               <button id="graphView2dButton" type="button" disabled>2D</button>
             </div>
+            <label class="graph-relevance" for="graphRelevance"
+                   title="How far out to show, in fact-hops from you. Direct = directly linked, Near = two hops, All = everything. Your own isolated entities always stay visible.">Relevance
+              <select id="graphRelevance">
+                <option value="direct">Direct</option>
+                <option value="near" selected>Near</option>
+                <option value="all">All</option>
+              </select>
+            </label>
             <button id="graphRemoveButton" type="button" hidden title="Remove the selected entity (and its links) from the knowledge graph"></button>
             <button id="graphRefreshButton" type="button" disabled>Refresh</button>
             <a class="graph-full-link" href="/graph.html" target="_blank" rel="noopener"
@@ -210,13 +243,19 @@
           <h2>Endpoint selectors</h2>
           <div class="endpoint-grid">
             <label for="aiProfileSelect">AI API endpoint</label>
-            <select id="aiProfileSelect" aria-describedby="aiProfileStatus" disabled></select>
+            <div class="endpoint-select">
+              <select id="aiProfileSelect" aria-describedby="aiProfileStatus" disabled></select>
+              <span id="aiProfileLed" class="endpoint-led" aria-hidden="true"></span>
+            </div>
             <p id="aiProfileStatus" role="status">Loading AI endpoint profiles.</p>
             <label for="whisperProfileSelect">Whisper server</label>
-            <select id="whisperProfileSelect" aria-describedby="whisperProfileStatus" disabled></select>
+            <div class="endpoint-select">
+              <select id="whisperProfileSelect" aria-describedby="whisperProfileStatus" disabled></select>
+              <span id="whisperProfileLed" class="endpoint-led" aria-hidden="true"></span>
+            </div>
             <p id="whisperProfileStatus" role="status">Loading Whisper servers.</p>
           </div>
-          <p class="endpoint-help">Saved in this browser only. Changes apply to the next prompt or transcription request.</p>
+          <p class="endpoint-help">Saved in this browser only. A new selection applies immediately: the LED runs a connection test, and a running pipeline is interrupted and restarted in its last state (Jarvis on/off, speak or text only).</p>
         </section>
 
         <section class="stage-preview" id="stagePreview">

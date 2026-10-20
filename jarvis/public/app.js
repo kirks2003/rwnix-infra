@@ -2,10 +2,11 @@ import { Microphone, abortError, delay, wakeCommand, normalizeWakePhrase, hasLou
 import { voiceProfiles, normalizeVoiceId, normalizeVoiceSpeed, scaledRate, splitForSpeech,
   pickSynthesisVoice, pickGermanSynthesisVoice, voiceSpeedRange, NeuralVoice, VoiceError,
   textForSpeech, isStopCommand, stopCommandIn, isPostSpeechStop,
-  acknowledgmentKind, acknowledgmentIn, pickClosing } from "./voice.js";
+  acknowledgmentKind, acknowledgmentIn, pickClosing, thinkingPhrase } from "./voice.js";
 import { CoreVisualizer } from "./visualizer.js";
 import { createGraph3D } from "./graph3d.js";
 import { renderGraph2d } from "./graph2d.js";
+import { renderMarkdown } from "./markdown.js";
 
 const el = Object.fromEntries([
   "core", "waveform", "levelReadout", "stageTitle", "stageDetail", "armButton", "stopButton",
@@ -14,15 +15,16 @@ const el = Object.fromEntries([
   "commandWait", "commandWaitValue", "commandWaitStatus",
   "conversationText",
   "historyDays", "historyDaysValue", "historyDaysStatus",
-  "log", "steps", "pipelineStatus", "manualPromptForm", "manualPrompt", "sendManualButton",
+  "log", "steps", "pipelineStatus", "pipelineMiniStatus", "pipelineMiniSteps",
+  "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
   "languageSwitch", "languageStatus",
-  "aiProfileSelect", "aiProfileStatus", "whisperProfileSelect", "whisperProfileStatus",
+  "aiProfileSelect", "aiProfileStatus", "aiProfileLed", "whisperProfileSelect", "whisperProfileStatus", "whisperProfileLed",
   "mcpSwitches",
   "speakSwitch", "speakStatus",
   "graphPanel", "graphStatus", "graphRefreshButton", "graphRemoveButton", "graphCanvas", "graph3dStage",
-  "graphView2dButton", "graphView3dButton", "graphSchema", "graphActivity",
+  "graphView2dButton", "graphView3dButton", "graphRelevance", "graphSchema", "graphActivity",
   "graphNodeSize", "graphNodeSizeValue", "graphTextSize", "graphTextSizeValue",
   "panelsToggle", "panelsBelow",
   "historySearchPanel", "historySearchReset", "historySearchStatus", "historySearchEngine",
@@ -34,6 +36,7 @@ const el = Object.fromEntries([
   "historySearchStrongScore", "historySearchStrongScoreValue",
   "loginPanel", "loginForm", "loginUsername", "loginPassword", "loginButton", "loginStatus",
   "userLine", "enableSwitch", "signOutButton",
+  "costsPanel", "openrouterCostsSection", "openrouterCosts", "ovhcloudCostsSection", "ovhcloudCosts", "costsUpdated", "costsRefreshButton",
 ].map((id) => [id, document.getElementById(id)]));
 const steps = ["wake", "record", "vad", "whisper", "brain", "tts"];
 const sessionId = crypto.randomUUID();
@@ -44,6 +47,7 @@ const languageStorageKey = "jarvis.language";
 const speakEnabledStorageKey = "jarvis.speakEnabled";
 const panelsStorageKey = "jarvis.panelsVisible";
 const graphSizesStorageKey = "jarvis.graphSizes";
+const graphRelevanceStorageKey = "jarvis.graphRelevance";
 const silenceStorageKey = "jarvis.silenceMs";
 const commandWaitStorageKey = "jarvis.commandWaitMs";
 const historyDaysStorageKey = "jarvis.historyDays";
@@ -191,12 +195,15 @@ function setAiProfile(value, persist) {
     || profiles.find((entry) => entry.configured !== false);
   if (!profile) {
     el.aiProfileStatus.textContent = "No AI endpoint profile is configured on this server.";
+    el.aiProfileStatus.dataset.base = el.aiProfileStatus.textContent;
+    endpointLedState(el.aiProfileLed, "");
     el.aiProfileSelect.disabled = true;
     return;
   }
   aiProfileId = profile.id;
   el.aiProfileSelect.value = aiProfileId;
   el.aiProfileStatus.textContent = `Active: ${profile.label} (${profile.profile || profile.model}).`;
+  el.aiProfileStatus.dataset.base = el.aiProfileStatus.textContent;
   if (persist) {
     try {
       localStorage.setItem(aiProfileStorageKey, aiProfileId);
@@ -216,12 +223,15 @@ function setWhisperProfile(value, persist) {
   const profile = profiles.find((entry) => entry.id === value) || profiles[0];
   if (!profile) {
     el.whisperProfileStatus.textContent = "No Whisper server is configured on this server.";
+    el.whisperProfileStatus.dataset.base = el.whisperProfileStatus.textContent;
+    endpointLedState(el.whisperProfileLed, "");
     el.whisperProfileSelect.disabled = true;
     return;
   }
   whisperProfileId = profile.id;
   el.whisperProfileSelect.value = whisperProfileId;
   el.whisperProfileStatus.textContent = `Active: ${profile.label} (${profile.model}).`;
+  el.whisperProfileStatus.dataset.base = el.whisperProfileStatus.textContent;
   if (persist) {
     try {
       localStorage.setItem(whisperProfileStorageKey, whisperProfileId);
@@ -233,8 +243,69 @@ function setWhisperProfile(value, persist) {
   log("settings", `Whisper server: ${profile.label}`);
 }
 
-el.aiProfileSelect.addEventListener("change", () => setAiProfile(el.aiProfileSelect.value, true));
-el.whisperProfileSelect.addEventListener("change", () => setWhisperProfile(el.whisperProfileSelect.value, true));
+// Green/red LED next to a selector: neutral gray, amber while the connection
+// test runs, green on success, red on failure.
+function endpointLedState(led, state) {
+  led.classList.remove("ok", "fail", "testing");
+  if (state) led.classList.add(state);
+}
+
+// Asks the server to verify one endpoint (brain: a minimal chat completion,
+// whisper: a silent WAV through the real failover path) and reports the
+// result in the LED + the status line. Not tied to a pipeline session, so an
+// armed pipeline keeps running while the test is in flight.
+async function testEndpoint(kind, id, led, status) {
+  if (!id) return;
+  endpointLedState(led, "testing");
+  const base = status.dataset.base || status.textContent;
+  status.dataset.base = base;
+  status.textContent = `${base} · testing connection…`;
+  try {
+    const response = await fetch("/api/endpoint-test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, id }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(120000),
+    });
+    const data = await response.json();
+    const ok = response.ok && data.ok === true;
+    endpointLedState(led, ok ? "ok" : "fail");
+    const detail = ok ? `connection OK (${data.ms} ms)` : `connection failed: ${data.error || `HTTP ${response.status}`}`;
+    status.textContent = `${base} · ${detail}`;
+    log("settings", `Endpoint test ${kind} ${id}: ${ok ? `OK in ${data.ms} ms` : `FAILED (${data.error || response.status})`}`);
+  } catch (error) {
+    endpointLedState(led, "fail");
+    status.textContent = `${base} · connection failed: ${error.message}`;
+    log("settings", `Endpoint test ${kind} ${id}: FAILED (${error.message})`);
+  }
+}
+
+// A new endpoint selection applies immediately, even mid-pipeline: the
+// running session is aborted (in-flight Whisper/brain/TTS requests die with
+// it) and, if Jarvis was armed, it is armed again so the pipeline resumes in
+// its last state. The speak/text-only switch is a persisted setting and is
+// never touched here.
+function interruptAndResumePipeline(reason) {
+  if (current) {
+    log("settings", `${reason}; interrupting running pipeline and re-arming.`);
+    stop(`${reason}; pipeline restarted with the new endpoint.`);
+    armJarvis();
+  } else {
+    log("settings", `${reason}; pipeline was off, stays off.`);
+  }
+}
+
+el.aiProfileSelect.addEventListener("change", () => {
+  setAiProfile(el.aiProfileSelect.value, true);
+  testEndpoint("brain", aiProfileId, el.aiProfileLed, el.aiProfileStatus);
+  interruptAndResumePipeline("AI endpoint changed");
+});
+el.whisperProfileSelect.addEventListener("change", () => {
+  setWhisperProfile(el.whisperProfileSelect.value, true);
+  testEndpoint("whisper", whisperProfileId, el.whisperProfileLed, el.whisperProfileStatus);
+  interruptAndResumePipeline("Whisper endpoint changed");
+});
 
 // Silence-stop slider: how long the microphone must stay quiet before a
 // recorded command is sent to Whisper. The server default (SILENCE_MS) is only
@@ -598,6 +669,7 @@ let graphView = "3d"; // "3d" is the default; "2d" is the static SVG view.
 let graph3d = null; // created lazily on first switch to the 3D view
 let graph3dFailed = false; // WebGL unavailable -> stick to 2D
 let lastSubgraph = null; // kept so the 3D scene can be (re)filled on view switch
+let graphRelevance = "near"; // "direct" (≤1 hop) | "near" (≤2) | "all"; persisted per browser
 
 // Display scales for the graph views, from the two sliders (50–200%):
 // node size (entities + their names) and link-text size. Both views apply
@@ -614,7 +686,7 @@ function applyGraphScales() {
   if (graph3d) graph3d.setNodeScale(graphScales.node);
   // The 2D view renders the node geometry from the scale at draw time:
   // re-render the current world (deterministic layout -> no position jump).
-  if (lastSubgraph && !el.graphCanvas.hasAttribute("hidden")) renderGraph(lastSubgraph);
+  if (lastSubgraph && !el.graphCanvas.hasAttribute("hidden")) renderGraph(filterSubgraph(lastSubgraph, graphRelevance));
 }
 
 function onGraphScaleInput() {
@@ -709,11 +781,13 @@ async function loadGraph(center) {
       el.graphRemoveButton.toggleAttribute("hidden", true);
       return;
     }
-    el.graphStatus.textContent = `${status.nodes} nodes · ${status.edges} links${graphCenter ? " · neighbourhood" : ""}`;
     lastSubgraph = subgraph;
     updateRemoveButton(subgraph);
-    if (graphView === "3d" && graph3d) graph3d.update(subgraph);
-    else renderGraph(subgraph);
+    const visible = filterSubgraph(subgraph, graphRelevance);
+    const hiddenCount = subgraph.nodes.length - visible.nodes.length;
+    el.graphStatus.textContent = `${status.nodes} nodes · ${status.edges} links${graphCenter ? " · neighbourhood" : ""}${hiddenCount > 0 ? ` · ${visible.nodes.length} shown` : ""}`;
+    if (graphView === "3d" && graph3d) graph3d.update(visible);
+    else renderGraph(visible);
     el.graphSchema.textContent = [
       schema.labels?.length ? `Labels: ${schema.labels.join(", ")}` : "",
       schema.relTypes?.length ? `Links: ${schema.relTypes.join(", ")}` : "",
@@ -785,6 +859,30 @@ el.graphRemoveButton.addEventListener("click", async () => {
   }
 });
 
+// Relevance filter: the backend annotates every node with `hops` — the
+// number of fact-edges (KNOWS bookkeeping excluded) from the view's root
+// (the centred node, or your own account node). "all" keeps everything;
+// "direct" keeps the root + its direct neighbours; "near" keeps two hops.
+// Nodes the root cannot reach (`hops === null`, e.g. your own isolated
+// entities) always stay, and an edge survives only if both endpoints do.
+// A subgraph without `hops` (older backend) is returned unchanged.
+function filterSubgraph(subgraph, relevance) {
+  if (!subgraph || !Array.isArray(subgraph.nodes) || subgraph.nodes.length === 0) return subgraph;
+  const hasHops = subgraph.nodes.some((node) => node.hops !== undefined);
+  if (!hasHops) return subgraph;
+  const threshold = relevance === "direct" ? 1 : relevance === "near" ? 2 : Infinity;
+  if (threshold === Infinity) return subgraph;
+  const kept = new Set();
+  for (const node of subgraph.nodes) {
+    if (node.hops === null || node.hops === undefined || node.hops <= threshold) kept.add(node.id);
+  }
+  const nodes = subgraph.nodes.filter((node) => kept.has(node.id));
+  const edges = Array.isArray(subgraph.edges)
+    ? subgraph.edges.filter((edge) => kept.has(edge.source) && kept.has(edge.target))
+    : [];
+  return { ...subgraph, nodes, edges };
+}
+
 // The 2D view: the shared renderer draws into the panel's SVG (viewBox
 // 640x320), scaled by the "Entities" slider.
 function renderGraph(subgraph) {
@@ -800,6 +898,16 @@ function renderGraph(subgraph) {
 el.graphRefreshButton.addEventListener("click", () => loadGraph(null));
 el.graphView3dButton.addEventListener("click", () => setGraphView("3d"));
 el.graphView2dButton.addEventListener("click", () => setGraphView("2d"));
+el.graphRelevance.addEventListener("change", () => {
+  graphRelevance = el.graphRelevance.value;
+  try {
+    localStorage.setItem(graphRelevanceStorageKey, graphRelevance);
+  } catch {
+    // Storage unavailable (private mode): the filter still works for the
+    // session.
+  }
+  loadGraph();
+});
 
 function log(scope, message, data) {
   const line = `[${new Date().toLocaleTimeString()}] ${scope}: ${message}`;
@@ -828,6 +936,7 @@ function stage(kind, title, detail, active = null) {
   else if (kind !== "transcribing") wakeIdle = false;
   pipelineStatusOverride = kind === "error" ? `Error: ${detail}` : null;
   el.pipelineStatus.textContent = pipelineStatus();
+  el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
   log("stage", `${title}: ${detail}`);
 }
 
@@ -844,6 +953,10 @@ function pipelineStatus() {
 function mark(step, status) {
   const item = el.steps.querySelector(`[data-step="${step}"]`);
   item.className = status;
+  // The mini mirror in the conversation panel keeps the same status classes
+  // (its <li> holds no children — the CSS colors the li itself).
+  const miniItem = el.pipelineMiniSteps.querySelector(`[data-step="${step}"]`);
+  if (miniItem) miniItem.className = status;
   const state = item.querySelector(".step-state");
   if (!state) return;
   if (status === "active") {
@@ -896,6 +1009,7 @@ async function withStepRetries(session, label, run) {
       log("retry", `${label} failed (attempt ${attempt}/${MAX_STEP_ATTEMPTS}): ${error.message}; retrying in ${STEP_RETRY_DELAY_MS} ms`);
       pipelineStatusOverride = `${label}: retry ${attempt + 1}/${MAX_STEP_ATTEMPTS} after failure (${error.message})`;
       el.pipelineStatus.textContent = pipelineStatus();
+      el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
       await delay(STEP_RETRY_DELAY_MS, session.signal);
     }
   }
@@ -947,6 +1061,7 @@ function newSession() {
   for (const button of previewButtons) button.disabled = true;
   resetSteps();
   el.pipelineStatus.textContent = pipelineStatus();
+  el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
   log("session", `Started ${session.id}`);
   return session;
 }
@@ -1218,6 +1333,7 @@ async function waitForCommandEnd(session, start, mode) {
         ? `Recording: ${(elapsed / 1000).toFixed(1)} s. Stops after ${Math.max(0, Math.round(silenceMs - silentMs))} ms more silence, or at the limit.`
         : `Waiting for command: ${(elapsed / 1000).toFixed(1)} s. ${Math.max(1, Math.ceil((commandWaitMs - (performance.now() - session.commandWaitStartedAt)) / 1000))} s of silence returns to wake listening. Mic level ${Math.round(buffer.level * 1000) / 10}%.`;
       el.pipelineStatus.textContent = pipelineStatus();
+      el.pipelineMiniStatus.textContent = el.pipelineStatus.textContent;
     }
   }
   log("record", "Command limit reached; transcribing captured speech");
@@ -1429,24 +1545,46 @@ function formatTranscriptTime(ts) {
   return new Date(ts).toLocaleString(language === "de" ? "de-DE" : "en-GB", { dateStyle: "medium", timeStyle: "short" });
 }
 
-function transcriptEntry(text, ts, role) {
+function transcriptEntry(text, ts, role, sources) {
   const entry = document.createElement("div");
   entry.className = `transcript-entry transcript-entry-${role}`;
+  const head = document.createElement("div");
+  head.className = "transcript-head";
   const time = document.createElement("time");
   time.className = "transcript-time";
   time.dateTime = new Date(ts).toISOString();
   time.textContent = `${formatTranscriptTime(ts)} · ${role === "prompt" ? "You" : "Jarvis"}`;
-  const body = document.createElement("p");
+  head.append(time);
+  appendSourceTag(head, role, sources);
+  const body = document.createElement("div");
   body.className = "transcript-body";
-  body.textContent = text;
+  // Answers render as Markdown (structured output); prompts stay verbatim. The
+  // raw Markdown is kept on the element so Copy always copies the source text.
+  body._rawMarkdown = text;
+  if (role === "answer") body.innerHTML = renderMarkdown(text);
+  else body.textContent = text;
   const copy = document.createElement("button");
   copy.type = "button";
   copy.className = "transcript-copy";
   copy.textContent = "Copy";
   copy.title = "Copy this text to the clipboard in markdown format";
   copy.addEventListener("click", () => copyEntryText(copy, body));
-  entry.append(time, body, copy);
+  entry.append(head, body, copy);
   return entry;
+}
+
+// Adds the "· web search + graph" attribution tag to an answer's timestamp row
+// when the brain actually used those sources this turn.
+function appendSourceTag(head, role, sources) {
+  if (!head || role === "prompt" || !sources || !(sources.websearch || sources.graph)) return;
+  const parts = [];
+  if (sources.websearch) parts.push("web search");
+  if (sources.graph) parts.push("graph");
+  const tag = document.createElement("span");
+  tag.className = "transcript-source";
+  tag.textContent = `· ${parts.join(" + ")}`;
+  tag.title = `This answer used: ${parts.join(", ")}`;
+  head.append(tag);
 }
 
 // The panel prints the brain's markdown verbatim, so the element's text IS
@@ -1454,7 +1592,7 @@ function transcriptEntry(text, ts, role) {
 // selection fallback covers plain-HTTP access.
 async function copyEntryText(button, body) {
   if (button.disabled) return;
-  const text = body.textContent;
+  const text = body._rawMarkdown ?? body.textContent;
   let ok = false;
   try {
     if (navigator.clipboard) {
@@ -1505,16 +1643,19 @@ function beginTurn(prompt) {
   return pending;
 }
 
-function completeTurn(pending, answer) {
+function completeTurn(pending, answer, sources) {
   const body = pending.querySelector(".transcript-body");
   body.classList.remove("pending");
-  body.textContent = answer;
+  body._rawMarkdown = answer;
+  body.innerHTML = renderMarkdown(answer);
+  appendSourceTag(pending.querySelector(".transcript-head"), "answer", sources);
   scrollTranscripts();
 }
 
 function failTurn(pending, message) {
   const body = pending.querySelector(".transcript-body");
   body.classList.remove("pending");
+  body._rawMarkdown = `Failed: ${message}`;
   body.textContent = `Failed: ${message}`;
   scrollTranscripts();
 }
@@ -1556,13 +1697,49 @@ async function loadConversationHistory() {
   }
 }
 
+// A short butler line voiced over the brain call so the wait is heard, not
+// silent. It reuses the normal speech path (Stop button, engine selection and
+// the voice wake-watch) and is tied to the just-spoken command. It fully
+// finishes before the brain request, so it never overlaps the answer's own
+// speech. A stop word cut into the line ends the turn before the brain runs;
+// a real command spoken over it replaces the pending turn.
+async function speakThinking(session, prompt) {
+  if (!speakEnabled) return false;
+  const phrase = thinkingPhrase(language, prompt);
+  log("tts", `Thinking: ${phrase}`);
+  const speech = new AbortController();
+  session.speech = speech;
+  try {
+    const followUp = await withStepRetries(session, "thinking speech", () => speak(session, phrase, speech));
+    check(session);
+    if (followUp === null) return false;
+    if (isStopCommand(followUp)) {
+      log("tts", `Speech stopped by voice command "${followUp}".`);
+      session.mic.beep();
+      return true;
+    }
+    log("tts", `Thinking line interrupted by voice command: ${JSON.stringify(followUp)}`);
+    await answer(session, followUp);
+    return true;
+  } finally {
+    if (session.speech === speech) session.speech = null;
+  }
+}
+
 async function answer(session, prompt) {
   check(session);
   const pending = beginTurn(prompt);
   let answerShown = false;
+  stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
   try {
+    // true = the thinking line was cut by voice (stop or replacement command)
+    // or the turn was already answered in its place: skip the brain request
+    // and drop the pending entry, because no answer was ever produced.
+    if (await speakThinking(session, prompt)) {
+      pending.remove();
+      return;
+    }
     const result = await withStepRetries(session, "brain", async () => {
-      stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
       const data = await request(session, "/api/chat", {
         method: "POST", headers: { "content-type": "application/json" },
         // The brain answers as the wake word's name, so the active phrase
@@ -1574,7 +1751,7 @@ async function answer(session, prompt) {
     });
     log("brain", `Request ${result.requestId} completed`);
     mark("brain", "done");
-    completeTurn(pending, result.answer);
+    completeTurn(pending, result.answer, result.sources);
     answerShown = true;
     recordTurn(prompt, result.answer);
     // Ingestion of this turn runs server-side after the response; give it a
@@ -1837,7 +2014,10 @@ function fatal(session, error) {
   log("error", error.stack || error.message);
 }
 
-el.armButton.addEventListener("click", async () => {
+// Arms Jarvis (opens the microphone, unlocks the browser voice, starts wake
+// listening). Shared by the Arm button, the hero enable switch and the
+// endpoint-change restart, so all three stay on exactly one code path.
+async function armJarvis() {
   if (!config) return;
   const session = newSession();
   stage("prompting", "Opening microphone", "Allow microphone access. You can minimize the window once armed.");
@@ -1852,7 +2032,8 @@ el.armButton.addEventListener("click", async () => {
   } catch (error) {
     fatal(session, error);
   }
-});
+}
+el.armButton.addEventListener("click", () => armJarvis());
 el.stopButton.addEventListener("click", () => stop());
 // The hero's enable/disable toggle: the second face of Arm/Stop. Disabling
 // while armed runs the normal stop path; enabling runs the normal arm path
@@ -1864,6 +2045,20 @@ el.enableSwitch.addEventListener("click", () => {
     return;
   }
   el.armButton.click();
+});
+
+// Alt+J toggles the armed pipeline (arm wake listening / disarm), the keyboard
+// face of the hero's enable switch. Uses the physical key code so it is
+// layout-independent, and is ignored while typing in a text field so it never
+// fights the manual-prompt or settings inputs.
+window.addEventListener("keydown", (event) => {
+  if (!event.altKey || event.code !== "KeyJ") return;
+  const target = event.target;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+  if (!config) return;
+  event.preventDefault();
+  if (current) stop();
+  else armJarvis();
 });
 
 // Direct prompt input in the Conversation panel: same flow as the old manual prompt
@@ -2048,6 +2243,8 @@ el.signOutButton.addEventListener("click", async () => {
   } catch {
     // Local sign-out still applies; the session just stays valid server-side.
   }
+  stopCostsPolling();
+  el.costsPanel.hidden = true;
   log("session", "Signed out.");
   showLogin();
 });
@@ -2099,6 +2296,102 @@ el.voiceSelect.replaceChildren(...voiceGroups.map(([group, label]) => {
   }
   return optgroup;
 }));
+// --- Cost panel (OpenRouter credits + OVHcloud billing) ---------------------
+// The backend polls the billing APIs itself (OpenRouter every 5 minutes,
+// OVHcloud hourly) and serves the cached view at GET /api/costs; the panel
+// just re-fetches that view every 60 seconds while the page is visible.
+// A section whose credentials are absent comes back "configured: false" and
+// is hidden; a billing-API outage serves the last good data flagged stale.
+let costsTimer = null;
+const costsEur = new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" });
+
+function costsRows(rows) {
+  return rows.map(([label, text]) => {
+    const row = document.createElement("div");
+    row.className = "costs-row";
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = text;
+    row.append(dt, dd);
+    return row;
+  });
+}
+
+function renderCosts(value) {
+  const or = value.openrouter || {};
+  const ovh = value.ovhcloud || {};
+  el.openrouterCostsSection.hidden = or.configured === false;
+  el.ovhcloudCostsSection.hidden = ovh.configured === false;
+  el.costsPanel.hidden = el.openrouterCostsSection.hidden && el.ovhcloudCostsSection.hidden;
+  if (or.configured !== false) {
+    const rows = [
+      ["Balance", or.balance === null || or.balance === undefined ? "—" : costsEur.format(or.balance)],
+      ["Used this month", or.used_monthly === null || or.used_monthly === undefined ? "—" : costsEur.format(or.used_monthly)],
+      ["Used lifetime", or.used_total === null || or.used_total === undefined ? "—" : costsEur.format(or.used_total)],
+    ];
+    if (or.is_free_tier && or.free_model_daily) rows.push(["Free requests left", String(or.free_model_daily.remaining)]);
+    if (or.error) rows.push(["Status", or.stale ? `stale: ${or.error}` : or.error]);
+    el.openrouterCosts.replaceChildren(...costsRows(rows));
+  }
+  if (ovh.configured !== false) {
+    const rows = [];
+    const ai = ovh.ai_current_month;
+    if (ai) rows.push([
+      `AI usage ${ai.month}`,
+      costsEur.format(ai.cost_eur),
+    ]);
+    // The in/out token counts get their own left-aligned row below the
+    // AI usage line (owner 2026-10-19): two short rows instead of one
+    // long wrapping line in the narrow cost column.
+    if (ai) rows.push([
+      "Tokens",
+      `${Math.round(ai.input).toLocaleString()} in / ${Math.round(ai.output).toLocaleString()} out`,
+    ]);
+    if (ovh.error) rows.push(["Status", ovh.stale ? `stale: ${ovh.error}` : ovh.error]);
+    el.ovhcloudCosts.replaceChildren(...costsRows(rows));
+  }
+  const generated = value.generated_at ? Date.parse(value.generated_at) : NaN;
+  const age = Number.isNaN(generated) ? null : Math.max(0, Math.round((Date.now() - generated) / 1000));
+  el.costsUpdated.textContent = age === null ? "" : `updated ${age}s ago`;
+}
+
+async function loadCosts(force) {
+  let response;
+  try {
+    // force=true (the panel's manual "Refresh" button) bypasses the backend
+    // TTL cache with ?fresh=1; the 60 s poll uses the cached view.
+    const url = force ? "/api/costs?fresh=1" : "/api/costs";
+    response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(20000) });
+  } catch {
+    el.costsUpdated.textContent = "costs unavailable";
+    return;
+  }
+  if (!response.ok) {
+    el.costsUpdated.textContent = `costs unavailable (HTTP ${response.status})`;
+    return;
+  }
+  const value = await response.json().catch(() => null);
+  if (!value) {
+    el.costsUpdated.textContent = "costs unavailable";
+    return;
+  }
+  renderCosts(value);
+}
+
+function stopCostsPolling() {
+  if (costsTimer) clearInterval(costsTimer);
+  costsTimer = null;
+}
+
+function startCostsPolling() {
+  stopCostsPolling();
+  loadCosts();
+  costsTimer = setInterval(() => { if (!document.hidden) loadCosts(); }, 60000);
+}
+
+el.costsRefreshButton.addEventListener("click", () => { loadCosts(true); });
+
 async function loadConfig(userFromLogin) {
   stage("standby", "Loading", "Loading runtime configuration.");
   const response = await fetch("/api/config", { cache: "no-store", signal: AbortSignal.timeout(10000) });
@@ -2136,9 +2429,9 @@ async function loadConfig(userFromLogin) {
     }
     config = value;
     el.aiProfileSelect.replaceChildren(...selectOptions(config.aiProfiles || [], (profile) =>
-      `${profile.label} — ${profile.profile || profile.model}${profile.configured === false ? " (not configured)" : ""}`));
+      profile.label + (profile.configured === false ? " (not configured)" : "")));
     el.whisperProfileSelect.replaceChildren(...selectOptions(config.whisperProfiles || [], (profile) =>
-      `${profile.label} — ${profile.model}`));
+      profile.label));
     let savedAiProfile = null;
     let savedWhisperProfile = null;
     try {
@@ -2151,6 +2444,9 @@ async function loadConfig(userFromLogin) {
     setWhisperProfile(savedWhisperProfile || "gpu-1", false);
     el.aiProfileSelect.disabled = false;
     el.whisperProfileSelect.disabled = false;
+    // Show the connection state of both active endpoints right away.
+    testEndpoint("brain", aiProfileId, el.aiProfileLed, el.aiProfileStatus);
+    testEndpoint("whisper", whisperProfileId, el.whisperProfileLed, el.whisperProfileStatus);
     el.wakeWordStatus.textContent = `Server default: "${config.wakePhrase}". Apply a personal wake word for this browser.`;
     try {
       const saved = localStorage.getItem(wakeWordStorageKey);
@@ -2259,6 +2555,17 @@ async function loadConfig(userFromLogin) {
     graphScales.node = Number(el.graphNodeSize.value) / 100;
     graphScales.text = Number(el.graphTextSize.value) / 100;
     applyGraphScales();
+    // Restore the persisted relevance filter before the first render.
+    let savedRelevance = null;
+    try {
+      savedRelevance = localStorage.getItem(graphRelevanceStorageKey);
+    } catch (error) {
+      log("settings", "Could not load graph relevance setting");
+    }
+    if (savedRelevance === "direct" || savedRelevance === "near" || savedRelevance === "all") {
+      graphRelevance = savedRelevance;
+      el.graphRelevance.value = savedRelevance;
+    }
     el.graphRefreshButton.disabled = false;
     setGraphView("3d"); // the live 3D view is the default panel view
     loadGraph();
@@ -2277,6 +2584,7 @@ async function loadConfig(userFromLogin) {
     el.armButton.disabled = el.sendManualButton.disabled = false;
     el.enableSwitch.disabled = false;
     for (const button of previewButtons) button.disabled = false;
+    startCostsPolling();
     stage("standby", "Standby", "Arm Jarvis to start wake listening. Microphone audio stays local until a probe or command is sent.");
     log("build", "PCM lifecycle v3");
 }

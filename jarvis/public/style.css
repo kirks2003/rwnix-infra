@@ -152,25 +152,39 @@ body:not(.authenticated) .app-ui {
   gap: 18px;
 }
 
+/* 20 / 60 / 20 split: the Jarvis animation left (20%), the state text
+   middle (60%), the costs panel right (20%). Only the costs column is a
+   boxed panel — the animation and the state text are borderless, floating
+   free like the old two-column look. */
 .hero {
-  grid-template-columns: minmax(126px, 168px) 1fr;
-  align-items: center;
+  /* minmax(0, Xfr) lets each column shrink below its content's min-content
+     width, so the 20/60/20 ratios hold even when the wide .state middle
+     column (heading + controls row) is present. 1fr : 3fr : 1fr = 20/60/20. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 3fr) minmax(0, 1fr);
+  align-items: stretch;
   min-height: 196px;
+  /* A little breathing room between the costs panel's bottom edge and the
+     Conversation panel below it. */
+  margin-bottom: 18px;
 }
 
+/* Free (no box): the animation floats centered in the left column with no
+   panel border or background — the pre-panel look, beside the borderless
+   state text. */
 .core-wrap {
   display: grid;
   gap: 10px;
   justify-items: center;
-  margin: auto;
+  align-content: center;
 }
 
 .core {
   --stage-color: var(--cyan);
   position: relative;
-  /* Rings, reactor and the viewBox-scaled waveform all follow this size. */
-  width: 110px;
-  height: 110px;
+  /* Rings, reactor and the viewBox-scaled waveform all follow this size.
+     ~30% bigger than the original 110px (110 * 1.3 = 143). */
+  width: 143px;
+  height: 143px;
   margin: 0;
   border-radius: 50%;
   filter: brightness(calc(1 + var(--audio-level, 0) * 0.35));
@@ -597,6 +611,43 @@ button:disabled {
   font-size: 0.8rem;
 }
 
+.endpoint-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.endpoint-select select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Green/red connection-test LED next to each endpoint selector: neutral
+   gray while unknown, amber while the test runs, green on success,
+   red on failure. */
+.endpoint-led {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #64748b;
+}
+
+.endpoint-led.testing {
+  background: #f59e0b;
+}
+
+.endpoint-led.ok {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.8);
+}
+
+.endpoint-led.fail {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);
+}
+
 .endpoint-help {
   margin: 8px 0 0;
   color: var(--muted);
@@ -637,8 +688,9 @@ progress {
   grid-template-rows: auto 1fr auto;
   gap: 10px;
   align-content: start;
-  /* Two 80% shrink passes from the original 560px (560 * 0.8 * 0.8). */
-  min-height: 358px;
+  /* 560 * 0.8 * 0.8 * 0.75 — the 2026-10-19 owner pass scales the panel to
+     75% of its previous vertical size; font sizes are unchanged. */
+  min-height: 269px;
   padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
   border-radius: 11px;
@@ -670,11 +722,11 @@ progress {
    first, scrollable inside the panel with a visible scrollbar (the window
    is the History slider's day count, see /api/conversation in server.js). */
 .transcript-list {
-  /* 250% taller than before (46px / 182px), then two 80% shrink passes
-     (161/637 -> 129/510 -> 103/408) so the panel takes less of the
-     screen; the font size is unchanged. */
-  min-height: 103px;
-  max-height: 408px;
+  /* 250% taller than before (46px / 182px), two 80% shrink passes
+     (161/637 -> 129/510 -> 103/408), then the 2026-10-19 owner pass scales
+     the list to 75% (103/408 -> 77/306) with the font size unchanged. */
+  min-height: 77px;
+  max-height: 306px;
   display: grid;
   gap: 14px;
   align-content: start;
@@ -731,6 +783,30 @@ progress {
   letter-spacing: 0.05em;
 }
 
+/* The timestamp row also carries the answer's source attribution tag
+   (web search / graph) to the right of "… · Jarvis". */
+.transcript-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.transcript-entry-prompt .transcript-head {
+  justify-content: flex-end;
+}
+
+.transcript-source {
+  color: var(--accent-text);
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid rgba(66, 217, 255, 0.25);
+  border-radius: 3px;
+  padding: 1px 5px;
+  opacity: 0.9;
+}
+
 .transcript-body {
   margin: 0;
   white-space: pre-wrap;
@@ -775,6 +851,80 @@ progress {
   margin: 0;
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+/* Rendered Markdown inside an answer body (prompts stay pre-wrap verbatim).
+   The body is a <div> whose children are the renderer's block elements. */
+.transcript-entry-answer .transcript-body {
+  white-space: normal;
+}
+.transcript-entry-answer .transcript-body > :first-child { margin-top: 0; }
+.transcript-entry-answer .transcript-body > :last-child { margin-bottom: 0; }
+.transcript-entry-answer .transcript-body p { margin: 0 0 0.5em; }
+.transcript-entry-answer .transcript-body ul,
+.transcript-entry-answer .transcript-body ol { margin: 0 0 0.5em; padding-left: 1.3em; }
+.transcript-entry-answer .transcript-body li { margin: 0.15em 0; }
+.transcript-entry-answer .transcript-body li > ul,
+.transcript-entry-answer .transcript-body li > ol { margin: 0.1em 0; }
+.transcript-entry-answer .transcript-body h1,
+.transcript-entry-answer .transcript-body h2,
+.transcript-entry-answer .transcript-body h3,
+.transcript-entry-answer .transcript-body h4,
+.transcript-entry-answer .transcript-body h5,
+.transcript-entry-answer .transcript-body h6 {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.2;
+  color: var(--text);
+}
+.transcript-entry-answer .transcript-body h1 { font-size: 1.18em; }
+.transcript-entry-answer .transcript-body h2 { font-size: 1.1em; }
+.transcript-entry-answer .transcript-body h3 { font-size: 1.04em; }
+.transcript-entry-answer .transcript-body h4,
+.transcript-entry-answer .transcript-body h5,
+.transcript-entry-answer .transcript-body h6 { font-size: 0.98em; }
+.transcript-entry-answer .transcript-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86em;
+  background: rgba(66, 217, 255, 0.12);
+  border-radius: 3px;
+  padding: 0.08em 0.35em;
+}
+.transcript-entry-answer .transcript-body pre {
+  margin: 0 0 0.5em;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.30);
+  border: 1px solid rgba(66, 217, 255, 0.18);
+  border-radius: 5px;
+  overflow-x: auto;
+}
+.transcript-entry-answer .transcript-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.84em;
+}
+.transcript-entry-answer .transcript-body blockquote {
+  margin: 0 0 0.5em;
+  padding-left: 0.8em;
+  border-left: 2px solid rgba(66, 217, 255, 0.35);
+  color: var(--muted);
+}
+.transcript-entry-answer .transcript-body a { color: var(--cyan); text-decoration: underline; }
+.transcript-entry-answer .transcript-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 0.5em;
+}
+.transcript-entry-answer .transcript-body th,
+.transcript-entry-answer .transcript-body td {
+  border: 1px solid rgba(66, 217, 255, 0.22);
+  padding: 3px 8px;
+}
+.transcript-entry-answer .transcript-body hr {
+  border: none;
+  border-top: 1px solid rgba(66, 217, 255, 0.2);
+  margin: 0.6em 0;
 }
 
 /* Knowledge graph: third panel inside #panelsBelow, right under the
@@ -886,6 +1036,25 @@ progress {
 
 .graph-views button.active {
   opacity: 1;
+}
+
+.graph-relevance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8em;
+  opacity: 0.8;
+}
+
+.graph-relevance select {
+  font: inherit;
+  font-size: 0.95em;
+  color: inherit;
+  background: rgba(66, 217, 255, 0.08);
+  border: 1px solid rgba(66, 217, 255, 0.25);
+  border-radius: 6px;
+  padding: 2px 6px;
+  cursor: pointer;
 }
 
 /* The live 3D view: the canvas fills the stage, labels float on top. The
@@ -1219,7 +1388,11 @@ html.graph-full {
   border-radius: 12px;
   padding: 10px 12px;
   color: var(--text);
-  background: #02050b;
+  /* Theme variable instead of a hardcoded near-black: the a1 white-label
+     theme's generic `textarea` rule loses this specificity fight, so the
+     input must pick up its background from the theme (--panel: dark on the
+     default theme, white on a1). */
+  background: var(--panel);
   font: inherit;
   resize: vertical;
 }
@@ -1232,6 +1405,71 @@ html.graph-full {
 /* The History day slider sits on its own row below Send. */
 .manual-prompt .transcript-controls {
   grid-column: 1 / -1;
+}
+
+/* Compact pipeline mirror above the History slider row: the status text
+   left, the six step dots right. ~25% of the full pipeline panel height —
+   one line, no step names (the title attribute carries them). */
+.pipeline-mini {
+  /* Shares its row with the Send button (col 2) instead of taking the full
+     width, so the History strip below keeps its own row. */
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 2px 0;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.pipeline-mini-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-mini-steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pipeline-mini-steps li {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--muted);
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+}
+
+.pipeline-mini-steps li.active {
+  border-color: var(--amber);
+  border-top-color: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
+.pipeline-mini-steps li.done {
+  border-color: var(--green);
+  background: var(--green);
+  box-shadow: 0 0 12px rgba(45, 255, 191, 0.5);
+}
+
+.pipeline-mini-steps li.skipped {
+  border-color: #789;
+  border-style: dashed;
+}
+
+.pipeline-mini-steps li.error {
+  border-color: var(--red);
+  background: rgba(255, 76, 106, 0.3);
+  box-shadow: 0 0 14px rgba(255, 76, 106, 0.5);
 }
 
 .panel {
@@ -1518,4 +1756,96 @@ menu {
   color: var(--muted);
   font-size: 0.82rem;
   margin: 6px 0 0;
+}
+
+/* --- Cost panel (OpenRouter credits + OVHcloud billing) ------------------- */
+/* The hero's right column (33% wide), aligned with the animation panel on
+   the left: same box, stretched to the same height, content centered
+   vertically. Each section is a compact label/value stack. Hidden entirely
+   until /api/costs reports at least one configured section. */
+.costs-panel {
+  display: flex;
+  flex-direction: column;
+  /* stretch: the sections fill the panel width so the label/value rows span
+     it (no empty band on the right); .costs-updated stays centered via its
+     own align-self. */
+  align-items: stretch;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.1));
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+#costsPanel[hidden] {
+  display: none;
+}
+
+.costs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+}
+
+.costs-title {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.costs-grid {
+  margin: 0;
+  display: grid;
+  /* One full-width column: each .costs-row spans the panel width and holds
+     its own label/value pair (see .costs-row below). Stacking rows here
+     instead of using max-content/1fr keeps one row per line. */
+  grid-template-columns: 1fr;
+  gap: 3px;
+  font-size: 0.82rem;
+}
+
+.costs-row {
+  display: grid;
+  /* label (max-content) left, value (1fr, right-aligned) right — the 1fr
+     track shrinks so long values (the OVH AI-usage line) wrap instead of
+     overflowing the fixed 20% column. */
+  grid-template-columns: max-content 1fr;
+  gap: 0 14px;
+}
+
+.costs-grid dt {
+  color: var(--muted);
+}
+
+.costs-grid dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.costs-updated {
+  margin: 0;
+  align-self: center;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.costs-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.costs-refresh {
+  padding: 3px 9px;
+  font-size: 0.55rem;
+  color: var(--muted);
+  background: rgba(2, 5, 11, 0.4);
 }

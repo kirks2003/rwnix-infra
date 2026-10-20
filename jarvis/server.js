@@ -28,14 +28,15 @@ const config = {
   brainBaseUrl: trimSlash(process.env.BRAIN_BASE_URL || "https://ds4-flash.gpu-2-de-fra-1-exo.csdc-nm.at/v1"),
   brainModel: process.env.BRAIN_MODEL || "deepseek-v4-flash",
   brainApiKey: process.env.BRAIN_API_KEY || "",
-  brainProfileDefault: process.env.BRAIN_PROFILE_DEFAULT || "a1-deepseek",
-  // Comma-separated AI profile ids to build and advertise. Unset (the
-  // pve104 default) builds every profile; the a1 demo on gpu-2 sets
+  // The allowlist (BRAIN_PROFILES) restricts which profiles a deployment
+  // advertises; the a1 demo on gpu-2 sets
   // BRAIN_PROFILES=a1-deepseek,a1-qwen so the private profiles (Claude Code,
   // OVHcloud, OpenRouter) are absent from /api/config entirely — no selector
-  // entries, no advertised endpoints. Unknown ids are ignored.
+  // entries, no advertised endpoints. Unset/empty (the pve104 default) builds
+  // every profile. Unknown ids are ignored.
   brainProfileAllowlist: splitCsv(process.env.BRAIN_PROFILES || ""),
-  brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are Jarvis, a concise voice assistant. Answer in English, be helpful, and keep spoken answers short.",
+  brainProfileDefault: process.env.BRAIN_PROFILE_DEFAULT || "a1-deepseek",
+  brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are an old-school English butler in the manner of the classic British household: impeccable manners, a dry wit, a light sense of fun, and a fondness for a well-timed dash of black humor. Always remain polite and composed — the wit and dark comedy live in the delivery, never in the facts. You are a concise voice assistant: answer in English, be helpful, and keep spoken answers short.",
   // `??`, not `||`: an explicitly empty TTS_ENDPOINTS must disable self-hosted TTS
   // and leave HAL 9000 on its speechSynthesis fallback.
   ttsEndpoints: splitCsv(process.env.TTS_ENDPOINTS ?? "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/speech"),
@@ -73,6 +74,161 @@ const config = {
 };
 config.aiProfiles = buildAiProfiles();
 config.whisperProfiles = buildWhisperProfiles();
+
+// --- Cost panel (OpenRouter credits + OVHcloud billing) ---------------------
+// Mirrors the hub's Prometheus exporters (openrouter-exporter,
+// ovhcloud-exporter): the backend polls the billing APIs itself and caches
+// the results in memory — OpenRouter every 5 minutes, OVHcloud every hour —
+// and GET /api/costs serves the cached view. Missing keys leave the section
+// disabled and the panel hides it.
+const COSTS = {
+  openrouter: {
+    enabled: Boolean(process.env.OPENROUTER_API_KEY),
+    baseUrl: trimSlash(process.env.OPENROUTER_BASE_URL || "https://openrouter.ai"),
+    apiKey: process.env.OPENROUTER_API_KEY || "",
+    ttlMs: 5 * 60 * 1000,
+  },
+  ovhcloud: {
+    enabled: Boolean(process.env.OVH_APP_KEY && process.env.OVH_APP_SECRET && process.env.OVH_CONSUMER_KEY),
+    endpoint: trimSlash(process.env.OVH_ENDPOINT || "https://eu.api.ovh.com/1.0"),
+    appKey: process.env.OVH_APP_KEY || "",
+    appSecret: process.env.OVH_APP_SECRET || "",
+    consumerKey: process.env.OVH_CONSUMER_KEY || "",
+    project: process.env.OVH_CLOUD_PROJECT || "",
+    numInvoices: Math.min(12, Math.max(1, Number(process.env.OVH_NUM_INVOICES || 6))),
+    ttlMs: 60 * 60 * 1000,
+  },
+};
+const costsCache = {
+  openrouter: { at: 0, data: null, error: null, inflight: null },
+  ovhcloud: { at: 0, data: null, error: null, inflight: null },
+};
+
+async function costsHttpGetJson(url, headers) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, { headers, signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchOpenRouterCosts() {
+  const key = { up: 0, error: null, balance: null, total_credits: null, used_lifetime: null, used_total: 0, used_monthly: 0, used_weekly: 0, used_daily: 0, limit: 0, limit_remaining: 0, is_free_tier: false, free_model_daily: { used: 0, limit: 0, remaining: 0 } };
+  try {
+    const keyData = (await costsHttpGetJson(`${COSTS.openrouter.baseUrl}/api/v1/key`, { authorization: `Bearer ${COSTS.openrouter.apiKey}` })).data || {};
+    key.up = 1;
+    key.used_total = keyData.usage || 0;
+    key.used_monthly = keyData.usage_monthly || 0;
+    key.used_weekly = keyData.usage_weekly || 0;
+    key.used_daily = keyData.usage_daily || 0;
+    key.limit = keyData.limit || 0;
+    key.limit_remaining = keyData.limit_remaining || 0;
+    key.is_free_tier = Boolean(keyData.is_free_tier);
+    if (keyData.free_model_daily_requests) key.free_model_daily = keyData.free_model_daily_requests;
+    const creditsData = (await costsHttpGetJson(`${COSTS.openrouter.baseUrl}/api/v1/credits`, { authorization: `Bearer ${COSTS.openrouter.apiKey}` })).data || {};
+    key.total_credits = creditsData.total_credits || 0;
+    key.used_lifetime = creditsData.total_usage || 0;
+    key.balance = key.total_credits - key.used_lifetime;
+  } catch (error) {
+    key.up = 0;
+    key.error = String(error.message || error);
+  }
+  return key;
+}
+
+async function fetchOvhcloudCosts() {
+  const data = { up: 0, error: null, invoices: [], total_eur: 0, ai_current_month: null };
+  try {
+    const endpoint = COSTS.ovhcloud.endpoint;
+    const timeDelta = Number(await costsHttpGetJson(`${endpoint}/auth/time`, {})) - Date.now() / 1000;
+    const ovhGet = async (path) => {
+      const url = `${endpoint}${path}`;
+      const timestamp = String(Math.round(Date.now() / 1000 + timeDelta));
+      const toSign = `${COSTS.ovhcloud.appSecret}+${COSTS.ovhcloud.consumerKey}+GET+${url}++${timestamp}`;
+      const signature = "$1$" + crypto.createHash("sha1").update(toSign, "utf8").digest("hex");
+      return costsHttpGetJson(url, {
+        "X-Ovh-Application": COSTS.ovhcloud.appKey,
+        "X-Ovh-Consumer": COSTS.ovhcloud.consumerKey,
+        "X-Ovh-Signature": signature,
+        "X-Ovh-Timestamp": timestamp,
+      });
+    };
+    const billIds = await ovhGet("/me/bill");
+    if (!Array.isArray(billIds)) throw new Error("/me/bill returned a non-list");
+    for (const billId of billIds.slice(-COSTS.ovhcloud.numInvoices)) {
+      const invoice = await ovhGet(`/me/bill/${billId}`);
+      const date = String(invoice.date || "").slice(0, 10);
+      const total = (invoice.priceWithTax || {}).value || 0;
+      data.invoices.push({ bill_id: String(billId), date, month: date.slice(0, 7), category: invoice.category || "unknown", total_eur: total });
+      data.total_eur += total;
+    }
+    data.up = 1;
+    let project = COSTS.ovhcloud.project;
+    if (!project) {
+      const projects = await ovhGet("/cloud/project");
+      if (Array.isArray(projects) && projects.length) {
+        const first = projects[0];
+        project = typeof first === "string" ? first : first.name || "";
+      }
+    }
+    if (project) {
+      const endpointNames = await ovhGet(`/cloud/project/${project}/ai/endpoint`);
+      const nameBySlug = new Map((Array.isArray(endpointNames) ? endpointNames : []).filter((name) => typeof name === "string").map((name) => [name.toLowerCase().replace(/[^a-z0-9]/g, ""), name]));
+      const usage = await ovhGet(`/cloud/project/${project}/usage/current`);
+      const from = String((usage && usage.period && usage.period.from) || "").slice(0, 7);
+      if (from) {
+        const monthData = { month: from, input: 0, output: 0, cost_eur: 0, last_update: null };
+        const parsed = Date.parse(String(usage.lastUpdate || "").replace(/Z$/, "+00:00"));
+        if (!Number.isNaN(parsed)) monthData.last_update = parsed / 1000;
+        for (const resourceUsage of usage.resourcesUsage || []) {
+          if (resourceUsage.type !== "ai-endpoints") continue;
+          for (const resource of resourceUsage.resources || []) {
+            for (const component of resource.components || []) {
+              const match = String(component.name || "").match(/^(.+)-(input|output)_tokens$/);
+              if (!match) continue;
+              if (match[2] === "input") monthData.input += Number((component.quantity || {}).value || 0);
+              else monthData.output += Number((component.quantity || {}).value || 0);
+              monthData.cost_eur += Number(component.totalPrice || 0);
+              if (!monthData.model) monthData.model = nameBySlug.get(match[1].toLowerCase().replace(/[^a-z0-9]/g, "")) || match[1];
+            }
+          }
+        }
+        data.ai_current_month = monthData;
+      }
+    }
+  } catch (error) {
+    data.up = 0;
+    data.error = String(error.message || error);
+  }
+  return data;
+}
+
+async function refreshCosts(name, force) {
+  const entry = costsCache[name];
+  const source = COSTS[name];
+  // A good entry is served until its TTL expires — unless the caller forces a
+  // fresh fetch (the cost panel's manual "Refresh" button, ?fresh=1) — and a
+  // FAILED fetch does not pin the timestamp, so the next poll retries a
+  // billing-API outage instead of caching the error for a whole TTL window.
+  if (!force && entry.data && Date.now() - entry.at < source.ttlMs) return entry;
+  if (!entry.inflight) {
+    const fetcher = name === "openrouter" ? fetchOpenRouterCosts : fetchOvhcloudCosts;
+    entry.inflight = fetcher().finally(() => { entry.inflight = null; });
+  }
+  const data = await entry.inflight;
+  if (data.up) {
+    entry.at = Date.now();
+    entry.data = data;
+    entry.error = null;
+  } else {
+    entry.error = data.error;
+  }
+  return entry;
+}
 
 let whisperCursor = 0;
 let ttsCursor = 0;
@@ -608,6 +764,17 @@ function buildAiProfiles() {
       baseUrl: "https://openrouter.ai/api/v1",
       model: "qwen/qwen3.8-27b",
     }),
+    // Cheapest DeepSeek model on the OpenRouter pricing list (verified
+    // 2026-10-17: $0/1M prompt + completion, 1M context). Shares the
+    // BRAIN_OPENROUTER_* credentials with the qwen profile; BRAIN_OPENROUTER_
+    // DEEPSEEK_MODEL overrides the model when set.
+    "openrouter-deepseek": opencodeProfile(opencode, "openrouter", "deepseek-v4-flash", {
+      baseEnv: "BRAIN_OPENROUTER_BASE_URL",
+      modelEnv: "BRAIN_OPENROUTER_DEEPSEEK_MODEL",
+      keyEnv: "BRAIN_OPENROUTER_API_KEY",
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: "deepseek/deepseek-v4-flash",
+    }),
     claudecode: {
       baseUrl: trimSlash(process.env.BRAIN_CLAUDECODE_BASE_URL || ""),
       model: process.env.BRAIN_CLAUDECODE_MODEL || "opus",
@@ -615,10 +782,11 @@ function buildAiProfiles() {
     },
   };
   const labels = {
-    "a1-deepseek": ["A1 DeepSeek", "a1-deepseek-v4.0-flash", true],
-    "a1-qwen": ["A1 Qwen", "a1-qwen38-27b", true],
-    ovhcloud: ["OVHcloud", "rw_ovhcloud-qwen3.6-27b", true],
-    openrouter: ["OpenRouter", "rw_openrouter-qwen3.8-27b", true],
+    "a1-deepseek": ["A1 GPU-2 - Deepseek V4 Flash", "a1-deepseek-v4.0-flash", true],
+    "a1-qwen": ["A1 GPU-1 - Qwen38 27B", "a1-qwen38-27b", true],
+    ovhcloud: ["OVHCloud - Qwen36 27B", "rw_ovhcloud-qwen3.6-27b", true],
+    openrouter: ["OpenRouter - Qwen38 27B", "rw_openrouter-qwen3.8-27b", true],
+    "openrouter-deepseek": ["OpenRouter - DeepSeek V4 Flash", "rw_openrouter-deepseek-v4-flash", true],
     claudecode: ["Claude Code", "rw-claude-Opus5.5", true],
   };
   const all = Object.entries(defaults).map(([id, profile]) => ({
@@ -647,30 +815,36 @@ function buildAiProfiles() {
 // gpu-1 profile), while an unset variable still falls back to the default —
 // the same semantics as ttsEndpoints above.
 function buildWhisperProfiles() {
+  // Labels carry the resolved model so the selector reads like
+  // "A1 - GPU-1 - Systran/faster-whisper-large-v3"; when a WHISPER_*_MODEL
+  // env override is set, the label follows it.
+  const gpu1Model = process.env.WHISPER_GPU1_MODEL || config.whisperModel;
+  const vm103Model = process.env.WHISPER_VM103_MODEL || "deepdml/faster-whisper-large-v3-turbo-ct2";
+  const ovhModel = process.env.WHISPER_OVHCLOUD_MODEL || "whisper-large-v3";
   const profiles = [
     {
       id: "gpu-1",
-      label: "gpu-1",
+      label: `A1 - GPU-1 - ${gpu1Model}`,
       endpoints: splitCsv(process.env.WHISPER_GPU1_ENDPOINTS ?? process.env.WHISPER_ENDPOINTS ?? "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/transcriptions"),
-      model: process.env.WHISPER_GPU1_MODEL || config.whisperModel,
+      model: gpu1Model,
       apiKey: process.env.WHISPER_GPU1_API_KEY || config.whisperApiKey,
       vadFilter: parseBoolean(process.env.WHISPER_GPU1_VAD_FILTER || String(config.whisperVadFilter)),
       sendVadFilter: true,
     },
     {
       id: "vm103",
-      label: "vm103 on pve103",
+      label: `RW - VM103 - ${vm103Model}`,
       endpoints: splitCsv(process.env.WHISPER_VM103_ENDPOINTS ?? "http://192.168.53.111:8003/v1/audio/transcriptions"),
-      model: process.env.WHISPER_VM103_MODEL || "deepdml/faster-whisper-large-v3-turbo-ct2",
+      model: vm103Model,
       apiKey: process.env.WHISPER_VM103_API_KEY || "",
       vadFilter: parseBoolean(process.env.WHISPER_VM103_VAD_FILTER || "true"),
       sendVadFilter: true,
     },
     {
       id: "ovhcloud",
-      label: "OVHcloud Whisper",
+      label: `OVHCloud - ${ovhModel}`,
       endpoints: splitCsv(process.env.WHISPER_OVHCLOUD_ENDPOINTS ?? "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/audio/transcriptions"),
-      model: process.env.WHISPER_OVHCLOUD_MODEL || "whisper-large-v3",
+      model: ovhModel,
       apiKey: process.env.WHISPER_OVHCLOUD_API_KEY || process.env.OVH_AI_ENDPOINTS_ACCESS_TOKEN || process.env.BRAIN_OVHCLOUD_API_KEY || "",
       vadFilter: false,
       sendVadFilter: false,
@@ -708,8 +882,8 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
-  ".png": "image/png",
   ".ico": "image/x-icon",
+  ".png": "image/png",
 };
 
 const server = http.createServer(async (req, res) => {
@@ -821,6 +995,33 @@ const server = http.createServer(async (req, res) => {
         embeddingModel: EMBEDDING_MODEL,
         embeddingConfigured,
       });
+    }
+
+    if (req.method === "GET" && pathname === "/api/costs") {
+      // The cost panel's live view: OpenRouter credit balance/usage plus the
+      // latest OVHcloud invoices and the current month's AI endpoint usage.
+      // Both sections are cached server-side (5 min / 1 h TTL); a section is
+      // "configured: false" when its credentials are absent, and the panel
+      // hides it. On a refresh failure the last good data is served flagged
+      // stale, so a billing-API outage degrades gracefully instead of
+      // blanking the panel.
+      const fresh = new URL(req.url, "http://localhost").searchParams.get("fresh") === "1";
+      const sections = {};
+      for (const name of ["openrouter", "ovhcloud"]) {
+        if (!COSTS[name].enabled) {
+          sections[name] = { configured: false };
+          continue;
+        }
+        const entry = await refreshCosts(name, fresh);
+        sections[name] = {
+          configured: true,
+          ...(entry.data || { up: 0, error: entry.error || "not fetched yet" }),
+          error: entry.error,
+          stale: entry.data ? Date.now() - entry.at >= COSTS[name].ttlMs : null,
+          fetched_at: entry.data ? new Date(entry.at).toISOString() : null,
+        };
+      }
+      return json(res, 200, { ...sections, generated_at: new Date().toISOString(), requestId });
     }
 
     // The Prompt/Answer panels' scrollback: this user's stored conversation,
@@ -938,6 +1139,45 @@ const server = http.createServer(async (req, res) => {
       if (!profile) return json(res, 503, { error: "whisper_not_configured", requestId });
       const result = await transcribeWithFailover(body, req.headers["content-type"] || "audio/webm", language, profile, requestId, controller.signal);
       return json(res, result.error ? 502 : 200, result);
+    }
+
+    // Connection test for the endpoint selectors: the UI calls this when the
+    // user picks a brain or whisper profile and lights the green/red LED.
+    // brain = one minimal chat completion, whisper = the silent WAV through
+    // the real transcribeWithFailover path (auth, routing and model load).
+    // Unlike the production routes this never falls back to another profile:
+    // it tests exactly the id the UI selected, or reports it as not found.
+    if (req.method === "POST" && pathname === "/api/endpoint-test") {
+      const payload = JSON.parse((await readBody(req, 64 * 1024)).toString("utf8") || "{}");
+      const kind = payload.kind === "whisper" ? "whisper" : "brain";
+      const id = String(payload.id || "").slice(0, 64);
+      const started = Date.now();
+      if (kind === "whisper") {
+        const profile = config.whisperProfiles.find((item) => item.id === id && item.endpoints.length && item.model);
+        if (!profile) return json(res, 404, { ok: false, kind, id, error: "whisper_profile_not_found", requestId });
+        const result = await transcribeWithFailover(silentWav(), "audio/wav", config.whisperLanguage, profile, requestId, AbortSignal.timeout(70000));
+        return json(res, 200, { ok: !result.error, kind, id, ms: Date.now() - started, error: result.error || "", attempts: result.attempts });
+      }
+      const profile = config.aiProfiles.find((item) => item.id === id && item.configured);
+      if (!profile) return json(res, 404, { ok: false, kind, id, error: "brain_profile_not_found", requestId });
+      const headers = { "content-type": "application/json" };
+      if (profile.apiKey) headers.authorization = `Bearer ${profile.apiKey}`;
+      const response = await fetch(`${profile.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: profile.model,
+          messages: [{ role: "user", content: "Reply with exactly: ok" }],
+          max_tokens: 8,
+          temperature: 0,
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        return json(res, 200, { ok: false, kind, id, ms: Date.now() - started, error: `HTTP ${response.status}: ${text.slice(0, 200)}` });
+      }
+      return json(res, 200, { ok: true, kind, id, ms: Date.now() - started });
     }
 
     if (req.method === "POST" && pathname === "/api/chat") {
@@ -1100,12 +1340,11 @@ function serveStatic(pathname, res) {
   });
 }
 
-// a1 white-label: serve a copy of index.html with the a1 theme stylesheet and
-// the a1 logo injected. Each injection is a guarded string replace against an
-// exact line of the current index.html — if a future edit moves that line the
-// replacement simply does not happen and the page degrades to the default
-// look instead of breaking. The file on disk (and every non-BRAND=a1
-// deployment) is never modified.
+// Guarded in-place replacements against exact lines of the current index.html —
+// if a future edit moves one of those lines the replacement simply does not
+// happen and the page degrades to the default look instead of breaking. The
+// file on disk (and every non-BRAND=a1 deployment) is never modified.
+// The eyebrow logo sits inline to the LEFT of the "Jarvis web assistant" text.
 function brandizeA1(html) {
   const logo = (indent) => `${indent}<img class="brand-logo" src="/logo-a1.png" alt="a1" width="56" height="56">\n`;
   return html
@@ -1116,7 +1355,7 @@ function brandizeA1(html) {
     .replace('        <h1>Jarvis</h1>', logo("        ") + "        <h1>Jarvis</h1>")
     .replace(
       '          <p class="eyebrow">Jarvis web assistant</p>',
-      logo("          ") + '          <p class="eyebrow">Jarvis web assistant</p>'
+      '          <p class="eyebrow"><img class="brand-logo eyebrow-logo" src="/logo-a1.png" alt="a1" width="24" height="24"> Jarvis web assistant</p>'
     );
 }
 
@@ -1137,6 +1376,30 @@ function readBody(req, limitBytes) {
     req.on("aborted", () => reject(new Error("Request upload aborted")));
     req.on("error", reject);
   });
+}
+
+// A short silent 16 kHz mono WAV: the cheapest payload that still exercises
+// a whisper endpoint end-to-end (auth, routing, model load) without a real
+// recording. All three server-side whisper stacks accept it and answer with
+// an empty transcript, which transcribeWithFailover reports as noSpeech.
+function silentWav(seconds = 0.25) {
+  const sampleRate = 16000;
+  const data = Buffer.alloc(Math.floor(seconds * sampleRate) * 2); // 16-bit PCM silence
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  header.writeUInt16LE(2, 32); // block align
+  header.writeUInt16LE(16, 34); // bits per sample
+  header.write("data", 36);
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
 }
 
 async function transcribeWithFailover(audioBuffer, mimeType, language, profile, requestId, signal) {
@@ -1514,7 +1777,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
         role: "system",
         content: `Web search results for this prompt (use them if relevant, keep the answer short and spoken):\n${results}`,
       };
-      mcpStates.push("Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are in a separate message; use them when relevant. You can also call the tools web_search (your own query), web_news (latest news for a topic or an interest area: technik, it, finance, geek, nerd) and web_fetch (open a specific URL in a real headless browser and return the rendered page text — use it when the user asks to pull or open a specific page, e.g. a stock quote or a link from the web_search results; it runs the page's JavaScript so it reads dynamic content a plain fetch would miss). For 'latest news' questions — including about the user's interests and their stored topics (the WATCHES facts from the knowledge graph, e.g. a trading news list the user asked to track, or the members of one of the user's named list entities via its PART_OF edges) — call web_news with the concrete topic, one interest at a time. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.");
+      mcpStates.push("Web search (MCP web-search server) is ON: the web was just searched for this prompt and the results are included in this system message; use them when relevant. You can also call the tools web_search (your own query), web_news (latest news for a topic or an interest area: technik, it, finance, geek, nerd) and web_fetch (open a specific URL in a real headless browser and return the rendered page text — use it when the user asks to pull or open a specific page, e.g. a stock quote or a link from the web_search results; it runs the page's JavaScript so it reads dynamic content a plain fetch would miss). For 'latest news' questions — including about the user's interests and their stored topics (the WATCHES facts from the knowledge graph, e.g. a trading news list the user asked to track, or the members of one of the user's named list entities via its PART_OF edges) — call web_news with the concrete topic, one interest at a time. If the user asks whether you can search the web or whether your MCP web-search server is available, answer about this feature itself — it is enabled — not from the search results.");
     } catch (error) {
       if (signal.aborted) throw error;
       console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_skipped", error: error.message }));
@@ -1538,7 +1801,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
           mcpStates.push("The knowledge graph (MCP graph server) is ON and you are the administrator of it: the four read tools show you ALL users' data — get-schema (labels, relation types, property keys), get-entity(name) (every owner's copy of an entity, its data and its links), list-my-knowledge (every user's stored entities, grouped per user) and list-my-facts(about?, relation?) (every user's stored facts — likes, ownership, family, home, work, watched topics, and the questions they asked (ASKED_ABOUT, with the date)). You can also MODIFY any user's graph data: store-entity(owner, name, type) stores an entity under any user's name (type: person, place, organization, event, topic or thing), store-fact(owner, from, to, type, negative?) stores a fact between two endpoints (entities or registered users) under any user's name, rename-entity(owner, name, newName) renames an entity of any user in place — all of its links survive, so ALWAYS use it for renames, never delete+store — and delete-entity(owner, name) removes an entity of any user together with its links. Use them when the admin asks you to store, correct, rename or remove stored knowledge — including another user's stored data — and confirm exactly what changed. When asked what is stored about the graph or about any user, answer from the read tools and attribute each item to its user (e.g. 'Mila: likes Lego; Roman: no stored facts'). Seeing other users' data is allowed in this admin session only — never present another user's data as the admin's own, and do not guess. Admin conversations do NOT update the graph automatically — only your explicit store-entity, store-fact, rename-entity and delete-entity calls change it, so make those calls and confirm exactly what the tool result says instead of claiming you cannot write. Honesty rule: never claim a store/rename/delete succeeded unless the tool result of THIS very turn starts with 'Stored', 'Renamed' or 'Deleted'; if the tool reports that the operation did not happen, say so honestly.");
         } else {
           mcpStates.push(graphText
-            ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is in a separate message, and you can call graph tools scoped to this signed-in user: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about), list-my-facts(about?, relation?) (the facts stored about this user), plus store-entity(name, type), store-fact(from, to, type, negative?), rename-entity(name, newName) and delete-entity(name) for this user's OWN graph data only. Use delete-entity when the user asks you to forget or remove one of their stored entities — first find the exact stored name with list-my-knowledge or get-entity (a close phrasing is fine: a unique close match is resolved automatically), then call the tool with that name; never claim you can delete or change another user's data. Honesty rule: never claim you stored, renamed or deleted anything unless the tool result of THIS very turn starts with 'Stored', 'Renamed' or 'Deleted'; if the tool reports that the operation did not happen (entity not found, no unique match, …), say so honestly — and offer the closest stored names the tool listed — instead of claiming success. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see or modify data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess. The graph is updated automatically after every answer, so when the user asks you to save, remember or track topics or assign X to my TradingMonitor list, either use the write tool immediately or confirm that it is done; automatic storage writes WATCHES and PART_OF facts as needed. Questions are stored the same way: each question's subject is linked to the user with an ASKED_ABOUT fact that carries the date and time the question was asked, and the answer's entities (films, people, ...) and their links to the subject are stored with it — so 'what did I ask about, and when?' is answered from list-my-facts (relation ASKED_ABOUT), and the stored question subjects are part of this user's knowledge."
+            ? "The knowledge graph (MCP graph server) is ON: this user's own stored knowledge is included in this system message, and you can call graph tools scoped to this signed-in user: get-schema (labels, relation types, property keys), get-entity(name) (one of this user's own entities, its data and its links), list-my-knowledge (the entities this user has told you about), list-my-facts(about?, relation?) (the facts stored about this user), plus store-entity(name, type), store-fact(from, to, type, negative?), rename-entity(name, newName) and delete-entity(name) for this user's OWN graph data only. Use delete-entity when the user asks you to forget or remove one of their stored entities — first find the exact stored name with list-my-knowledge or get-entity (a close phrasing is fine: a unique close match is resolved automatically), then call the tool with that name; never claim you can delete or change another user's data. Honesty rule: never claim you stored, renamed or deleted anything unless the tool result of THIS very turn starts with 'Stored', 'Renamed' or 'Deleted'; if the tool reports that the operation did not happen (entity not found, no unique match, …), say so honestly — and offer the closest stored names the tool listed — instead of claiming success. Privacy: the graph is this user's private world — every stored entity belongs to the signed-in user, and you can only see or modify data that belongs to the signed-in user, never another user's data; there is no shared or public tier. If asked about another user's preferences, habits or facts, say you have no stored information about them. When describing what the graph does or does not contain, always phrase it from this user's view (e.g. 'I have no record of you liking X' or 'I have no stored information about other users'), never as a global claim about the whole graph (never 'no one likes X' or 'no one is connected to X'). Do not guess. The graph is updated automatically after every answer, so when the user asks you to save, remember or track topics or assign X to my TradingMonitor list, either use the write tool immediately or confirm that it is done; automatic storage writes WATCHES and PART_OF facts as needed. Questions are stored the same way: each question's subject is linked to the user with an ASKED_ABOUT fact that carries the date and time the question was asked, and the answer's entities (films, people, ...) and their links to the subject are stored with it — so 'what did I ask about, and when?' is answered from list-my-facts (relation ASKED_ABOUT), and the stored question subjects are part of this user's knowledge."
             : "The knowledge graph (MCP graph server) is ON but holds nothing for this user yet; you can still inspect the graph with get-schema, get-entity, list-my-knowledge and list-my-facts, and you may use store-entity, store-fact, rename-entity or delete-entity only for this signed-in user's own graph data — for deletes, first find the exact stored name with list-my-knowledge or get-entity (a unique close match is resolved automatically). Never claim you stored, renamed or deleted anything unless the tool result of THIS very turn starts with 'Stored', 'Renamed' or 'Deleted'; if the tool reports that the operation did not happen, say so honestly instead of claiming success. New facts are also stored automatically after every answer — so when the user asks you to save, remember or track topics or assign them to a named list (e.g. 'add X to my trading news list' or 'assign X to my TradingMonitor list'), confirm that it is done instead of claiming you cannot write; the topics are stored (as WATCHES and PART_OF facts, a named list as its own entity) after your answer. Questions are stored the same way: each question's subject is linked to the user with an ASKED_ABOUT fact that carries the date and time of the question, and the answer's entities and their links to the subject are stored with it.");
         }
       } catch (error) {
@@ -1577,13 +1840,17 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
       mcpStates.push("Vikunja (the task manager) is OFF in the user's browser for this request: you cannot see or change their tasks, projects or lists. If the user asks about their tasks or asks you to manage them, say the MCP Vikunja toggle in the UI is off for now and they can switch it on.");
     }
   }
+  // The whole leading block - persona, MCP state, web-search results and
+  // graph context - is ONE system message: strict OpenAI-compatible
+  // endpoints (OVH AI Endpoints) reject a second leading system message
+  // with HTTP 400 "System message must be at the beginning."
+  const leadingSystem = [
+    `${config.brainSystemPrompt}\nYour name is ${wakeName} — the user calls you by your wake word, so use "${wakeName}" as your own name in your answers, for example when they ask who you are or address you by name.\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp.\nMemory: the messages above are only the last few turns. Every earlier conversation with this user is stored and searchable with the search_history tool. If they refer to anything from before this session — what they asked, what you answered, a link or a decision — call search_history FIRST and answer from the hits with their dates. Never tell this user you have no conversation history or cannot look back: you can, through that tool. Only after a search comes back empty may you say you found nothing about it.\nAnswer directly; do not expose reasoning.`,
+    searchMessage ? searchMessage.content : null,
+    graphMessage ? graphMessage.content : null,
+  ].filter(Boolean).join("\n\n");
   const messages = [
-    {
-      role: "system",
-      content: `${config.brainSystemPrompt}\nYour name is ${wakeName} — the user calls you by your wake word, so use "${wakeName}" as your own name in your answers, for example when they ask who you are or address you by name.\nThe user is signed in as ${user}; their signed-in name is their first name, so address them by it in your answers.\n${mcpStates.join("\n")}\nLanguage override: answer in ${answerLanguage}.\nCurrent server time: ${now.toISOString()} (${now.toString()}). If the user asks for the time or date, answer from this timestamp.\nMemory: the messages above are only the last few turns. Every earlier conversation with this user is stored and searchable with the search_history tool. If they refer to anything from before this session — what they asked, what you answered, a link or a decision — call search_history FIRST and answer from the hits with their dates. Never tell this user you have no conversation history or cannot look back: you can, through that tool. Only after a search comes back empty may you say you found nothing about it.\nAnswer directly; do not expose reasoning.`,
-    },
-    ...(searchMessage ? [searchMessage] : []),
-    ...(graphMessage ? [graphMessage] : []),
+    { role: "system", content: leadingSystem },
     ...history,
     { role: "user", content: prompt },
   ];
@@ -1593,7 +1860,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
+  const { data, webResults, graphUsed, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -1625,7 +1892,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
     // results plus any web tool results the brain gathered itself.
     ingestTurn({ user, prompt, searchResults: [searchMessage?.content, ...webResults].filter(Boolean).join("\n\n") || null, answer, brainProfile, requestId }).catch(() => {});
   }
-  return { requestId, answer, configured: true, model: brainProfile.model, brainProfile: brainProfile.id, brainProfileLabel: brainProfile.label };
+  return { requestId, answer, configured: true, model: brainProfile.model, brainProfile: brainProfile.id, brainProfileLabel: brainProfile.label, sources: { websearch: webResults.length > 0, graph: Boolean(graphUsed) } };
 }
 
 // The graph tools offered to the brain when the knowledge graph toggle is on.
@@ -1969,6 +2236,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
   // the search context the turn actually used), separate from the answer.
   const webResults = [];
   let graphWriteSucceeded = false;
+  let graphUsed = false;
   // search_history is always in the tool set: it is the user's own stored
   // conversation and has no browser toggle, so the brain can always reach
   // back past its in-context window.
@@ -2013,14 +2281,15 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       toolCalls = graphdb.parseToolCallsFromContent(message?.content);
       fromXml = toolCalls.length > 0;
     }
-    if (!hasTools || !toolCalls.length) return { data, webResults, graphWriteSucceeded };
+    if (!hasTools || !toolCalls.length) return { data, webResults, graphUsed, graphWriteSucceeded };
     if (round >= GRAPH_TOOL_ROUNDS) {
+      // Tool budget spent: force a final answer without tools.
       // Tool budget spent: force a final answer without tools. The nudge
       // rides as a `user` turn, not a `system` one: a system message after
       // the conversation is rejected outright by strict endpoints — OVH AI
       // Endpoints answer HTTP 400 "System message must be at the beginning."
       // (seen live 2026-10-17), while vLLM/llama.cpp tolerate it. Every
-      // system message in this app therefore stays in the leading block.
+      // system message in this app therefore stays in the leading block, and the leading block itself is one single system message.
       local.push({ ...message, role: "assistant" }, { role: "user", content: "Tool budget reached. Answer now from what you have gathered." });
       const fallback = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
         method: "POST", signal: totalSignal, headers,
@@ -2028,7 +2297,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       });
       const fallbackText = await fallback.text();
       if (!fallback.ok) throw new Error(`Brain HTTP ${fallback.status}: ${fallbackText.slice(0, 500)}`);
-      return { data: JSON.parse(fallbackText), webResults, graphWriteSucceeded };
+      return { data: JSON.parse(fallbackText), webResults, graphUsed, graphWriteSucceeded };
     }
     // For XML-parsed calls the raw message carries no tool_calls field, so
     // carry the parsed ones on the assistant turn: the tool results below
@@ -2052,6 +2321,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
           const result = await withAbort(mcpGraph.call(name, { ...args, user, admin, users: config.users }, GRAPH_TOOL_TIMEOUT_MS), totalSignal);
           const isWrite = GRAPH_WRITE_TOOL_NAMES.has(name);
           const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
+          if (!isWrite && !result.isError) graphUsed = true;
           // Write tools are verified on their success prefix: a "No entity
           // named …" / "No unique match …" answer is a NON-error result, and
           // without this check the brain would claim the delete anyway.

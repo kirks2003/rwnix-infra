@@ -21,8 +21,8 @@ const TYPE_COLORS = {
 const USER_COLOR = 0x42d9ff;
 const EDGE_COLOR = 0x42d9ff;
 const BACKGROUND = 0x02050b;
-const MAX_NODES = 80;
-const MAX_EDGES = 160;
+const MAX_NODES = 200; // >= the server-side admin world (accounts + newest entities + edge backfill)
+const MAX_EDGES = 320; // >= the server-side edge LIMIT 300
 // The 2D layout's physics constants, reused so both views settle similarly.
 const REPULSION = 1400;
 const SPRING_LENGTH = 70;
@@ -66,7 +66,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   scene.add(keyLight);
 
   const sphereGeometry = new THREE.SphereGeometry(1, 20, 14);
-  const edgeMaterial = new THREE.LineBasicMaterial({ color: EDGE_COLOR, transparent: true, opacity: 0.25 });
+  const edgeMaterial = new THREE.LineBasicMaterial({ color: EDGE_COLOR, transparent: true, opacity: 0.6 });
   let edgeLines = null;
   const raycaster = new THREE.Raycaster();
 

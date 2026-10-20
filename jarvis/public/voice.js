@@ -391,6 +391,58 @@ export function pickClosing(language, kind, random = Math.random) {
   return lines[Math.floor(random() * lines.length)];
 }
 
+// Short butler lines spoken while the brain is thinking, in the active answer
+// language. When the turn carries a real command, a {topic} slot holds a short
+// echo of it so the voiced pause is tied to what the user just asked; with no
+// command (rare) a generic line is used instead.
+export const THINKING_LINES = {
+  en: {
+    withTopic: [
+      "A moment — let me think about {topic}.",
+      "One moment, if you please. Looking into {topic}.",
+      "Very well. Let me consider {topic}.",
+      "Just a moment. Let me consult my notes on {topic}.",
+    ],
+    generic: [
+      "One moment. Let me think that through.",
+      "A moment, if you please.",
+      "Very well. Just a moment.",
+    ],
+  },
+  de: {
+    withTopic: [
+      "Einen Moment — ich überlege, {topic}.",
+      "Einen Augenblick, bitte. Ich schaue nach: {topic}.",
+      "Sehr gut. Ich prüfe das: {topic}.",
+      "Nur einen Moment. Ich blättere nach: {topic}.",
+    ],
+    generic: [
+      "Einen Moment. Lassen Sie mich das überlegen.",
+      "Einen Augenblick, bitte.",
+      "Sehr gut. Nur einen Moment.",
+    ],
+  },
+};
+
+// The first few words of the transcript as a short topic echo (trailing
+// punctuation stripped). null when there is nothing to echo.
+function thinkingTopic(transcript, maxWords = 8) {
+  const words = String(transcript || "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  if (!words.length) return null;
+  const cut = words.slice(0, maxWords).join(" ").replace(/[.!?,;:…]+$/g, "");
+  if (words.length <= maxWords) return cut;
+  return `${cut} …`;
+}
+
+export function thinkingPhrase(language, transcript, random = Math.random) {
+  const lang = language === "de" ? "de" : "en";
+  const topic = thinkingTopic(transcript);
+  const set = THINKING_LINES[lang];
+  const lines = topic ? set.withTopic : set.generic;
+  const template = lines[Math.floor(random() * lines.length)];
+  return topic ? template.replace("{topic}", topic) : template;
+}
+
 export const voiceSpeedRange = { min: 0.6, max: 1.6, step: 0.05, default: 1 };
 
 // The slider is a multiplier on the profile's own speed, so "1.00" always means
