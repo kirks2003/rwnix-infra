@@ -114,12 +114,18 @@ button {
 }
 
 /* Transcript */
+.transcript-list {
+  scrollbar-color: #DA291C rgba(27, 27, 29, 0.06);
+}
 .transcript-panel {
   border: 1px solid rgba(27, 27, 29, 0.14);
   box-shadow: 0 20px 80px rgba(0, 0, 0, 0.10);
 }
 .transcript-list::-webkit-scrollbar-track {
   background: rgba(27, 27, 29, 0.06);
+}
+.transcript-list::-webkit-scrollbar-thumb {
+  background: #DA291C;
 }
 .transcript-copy {
   border-color: rgba(27, 27, 29, 0.2);
