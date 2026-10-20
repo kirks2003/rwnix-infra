@@ -7,12 +7,13 @@ owner's private LLM links, minus all graph data, rebranded to a1.
 
 Mirror of this document: `romeowindi/a1-jarvis` (private repo, a1 side).
 The two copies must stay in sync; the rwnix-infra copy is maintained by the
-owner, the a1-jarvis copy is the a1-side reference. **Status 2026-10-10: the
-mirror repo does not exist yet** — it belongs to the `romeowindi` account,
-which this repo's deploy token cannot create. Until the owner creates it
-(empty repo + `kirks2003` as collaborator, or a romeowindi token is provided
-so the agent can create and push it), the rwnix-infra copy is the single
-source of truth.
+owner, the a1-jarvis copy is the a1-side reference. **Status 2026-10-20: the
+mirror repo exists and is current** — it was created on the `romeowindi`
+account and the agent pushes it with the owner-provided `romeowindi` token
+(the 2026-10-20 badge record landed as `18aa1cc`, the follow-up six-chip +
+white-a1 record as `6476809`). The a1-side docs are sanitized (no
+mesh/repo-internal details by design); the rwnix-infra copy remains the
+authoritative record.
 
 ## Binding rules
 
