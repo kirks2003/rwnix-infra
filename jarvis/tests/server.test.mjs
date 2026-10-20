@@ -674,7 +674,7 @@ test("the brain system prompt reports the MCP web-search state per request", asy
       if (message.method === "initialize") {
         result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-websearch", version: "1.0.0" } };
       } else if (message.method === "tools/call") {
-        result = { isError: ${isError}, content: [{ type: "text", text: "Mock web search result: 42." }] };
+        result = { isError: ${isError}, content: [{ type: "text", text: "Mock web search result: 42." }], structuredContent: { sources: ["mock.example"] } };
       } else {
         result = {};
       }
@@ -696,18 +696,22 @@ test("the brain system prompt reports the MCP web-search state per request", asy
   // Toggle on: a working search tells the brain it is on and delivers results;
   // a failed search tells it the feature is on but this search had no results.
   const cases = [
-    [okScript, /Web search \(MCP web-search server\) is ON: the web was just searched/, /Mock web search result/],
-    [failScript, /is ON, but the search for this prompt returned no results/, null],
+    [okScript, /Web search \(MCP web-search server\) is ON: the web was just searched/, /Mock web search result/, ["mock.example"]],
+    [failScript, /is ON, but the search for this prompt returned no results/, null, []],
   ];
-  for (const [script, promptPattern, searchPattern] of cases) {
+  for (const [script, promptPattern, searchPattern, expectedSources] of cases) {
     const { process: child, origin: mcpOrigin } = await startBackend({ MCP_SEARCH_SCRIPT: script });
     t.after(async () => { child.kill(); await once(child, "exit"); });
     mode = "success";
-    await ask(mcpOrigin, { prompt: "Can you search the web?", sessionId: `mcp-${script}`, websearch: true });
+    const response = await ask(mcpOrigin, { prompt: "Can you search the web?", sessionId: `mcp-${script}`, websearch: true });
+    const chat = await response.json();
     const body = JSON.parse(received.toString("utf8"));
     assert.match(body.messages[0].content, promptPattern);
     if (searchPattern) assert.match(body.messages[0].content, searchPattern);
     else assert.equal(body.messages.length, 2, "no search-results message");
+    // The source names behind the search ride back in the turn's attribution.
+    assert.equal(chat.sources.websearch, Boolean(searchPattern));
+    assert.deepEqual(chat.sources.websearchSources, expectedSources);
   }
 });
 
@@ -727,7 +731,7 @@ test("the brain gets web_search and web_news tools and can fetch live news", asy
       if (message.method === "initialize") {
         result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-websearch", version: "1.0.0" } };
       } else if (message.method === "tools/call") {
-        result = { isError: false, content: [{ type: "text", text: "Mock " + message.params.name + " result: 42. args=" + JSON.stringify(message.params.arguments || {}) }] };
+        result = { isError: false, content: [{ type: "text", text: "Mock " + message.params.name + " result: 42. args=" + JSON.stringify(message.params.arguments || {}) }], structuredContent: { sources: ["news.example"] } };
       } else {
         result = {};
       }
@@ -743,6 +747,9 @@ test("the brain gets web_search and web_news tools and can fetch live news", asy
   });
   const result = await response.json();
   assert.equal(result.answer, "Fresh news delivered.");
+  // The tool result's source names ride back in the turn's attribution.
+  assert.equal(result.sources.websearch, true);
+  assert.deepEqual(result.sources.websearchSources, ["news.example"]);
   // The final request (after the tool round) still offers all three web
   // tools...
   const body = JSON.parse(received.toString("utf8"));
@@ -1178,9 +1185,9 @@ test("each user keeps an isolated prompt history", async () => {
 test("the conversation log stores finished turns per user, windowed to 24 days", async () => {
   const mila = await login(origin, "Mila");
   const roman = await login(origin, "Roman");
-  const post = (cookie, prompt, answer) => auth(origin, "/api/conversation", {
+  const post = (cookie, prompt, answer, sources) => auth(origin, "/api/conversation", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, answer }),
+    body: JSON.stringify({ prompt, answer, sources }),
   }, cookie);
   // A turn needs both sides: the panels show prompt AND answer.
   const bad = await post(mila, "only a prompt", "");
@@ -1203,6 +1210,23 @@ test("the conversation log stores finished turns per user, windowed to 24 days",
   // the only entry Mila has, so the served list is exactly it.
   assert.ok(Date.now() - Date.parse(entry.ts) < 24 * 60 * 60 * 1000, "a fresh turn is inside the window");
   assert.equal(milaLog.entries.length, 1, JSON.stringify(milaLog.entries));
+  // The turn's source attribution (site names, deduped, never URLs)
+  // round-trips through the store...
+  const sourced = await post(mila, "what is the state of the mesh?", "All hubs green.", ["mesh.example", "mesh.example", ""]);
+  assert.equal(sourced.status, 200);
+  const sourcedEntry = (await sourced.json()).entry;
+  assert.deepEqual(sourcedEntry.sources, ["mesh.example"], JSON.stringify(sourcedEntry));
+  // ...and comes back in the owner's GET, while the sourceless turn stays
+  // sourceless.
+  const milaLog2 = await (await auth(origin, "/api/conversation", {}, mila)).json();
+  assert.equal(milaLog2.entries.length, 2, JSON.stringify(milaLog2.entries));
+  assert.deepEqual(milaLog2.entries.at(0).sources, null);
+  assert.deepEqual(milaLog2.entries.at(-1).sources, ["mesh.example"]);
+  // Garbage in the sources field never reaches the store.
+  const junky = await post(mila, "junk sources", "ok", { not: "an array" });
+  assert.equal(junky.status, 200);
+  const junkyLog = await (await auth(origin, "/api/conversation", {}, mila)).json();
+  assert.deepEqual(junkyLog.entries.at(-1).sources, null);
 });
 
 test("the brain can search the user's stored conversation, scoped to that user", async (t) => {

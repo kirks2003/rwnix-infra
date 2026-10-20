@@ -1374,7 +1374,7 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   await page.waitForFunction((baseline) => window.savedUtterances.length > baseline, spokenBeforeFirst,
     { timeout: 15000 });
   const spokenAfterFirst = await page.evaluate(() => window.savedUtterances.length);
-  assert.deepEqual(stored, [{ prompt: "What time is it?", answer: "Done." }], JSON.stringify(stored));
+  assert.deepEqual(stored, [{ prompt: "What time is it?", answer: "Done.", sources: null }], JSON.stringify(stored));
   // Speak off: the next answer stays in the panel, and nothing is spoken.
   assert.equal(await page.getAttribute("#speakSwitch", "aria-checked"), "true");
   await page.click("#speakSwitch");
@@ -1387,8 +1387,8 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   assert.equal(await page.evaluate(() => window.savedUtterances.length), spokenAfterFirst,
     "text-only mode speaks nothing");
   assert.deepEqual(stored, [
-    { prompt: "What time is it?", answer: "Done." },
-    { prompt: "What is two plus two?", answer: "Done." },
+    { prompt: "What time is it?", answer: "Done.", sources: null },
+    { prompt: "What is two plus two?", answer: "Done.", sources: null },
   ], JSON.stringify(stored));
   const panel = await page.evaluate(() => ({
     prompts: [...document.querySelectorAll("#conversationText .transcript-entry-prompt")].map((entry) => entry.textContent),

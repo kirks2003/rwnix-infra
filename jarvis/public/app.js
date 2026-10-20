@@ -645,6 +645,7 @@ function setPanelsVisible(value, persist) {
   }
   panelsVisible = Boolean(value);
   el.panelsBelow.hidden = !panelsVisible;
+  document.body.classList.toggle("panels-off", !panelsVisible);
   el.panelsToggle.setAttribute("aria-checked", String(panelsVisible));
   if (persist) {
     try {
@@ -1589,7 +1590,11 @@ function transcriptEntry(text, ts, role, sources) {
 function appendSourceTag(head, role, sources) {
   if (!head || role === "prompt" || !sources || !(sources.websearch || sources.graph)) return;
   const parts = [];
-  if (sources.websearch) parts.push("web search");
+  if (sources.websearch) {
+    const names = (Array.isArray(sources.websearchSources) ? sources.websearchSources : [])
+      .map((name) => String(name || "").trim()).filter(Boolean);
+    parts.push(names.length ? `web search: ${names.join(" · ")}` : "web search");
+  }
   if (sources.graph) parts.push("graph");
   const tag = document.createElement("span");
   tag.className = "transcript-source";
@@ -1674,11 +1679,11 @@ function failTurn(pending, message) {
 // Fire-and-forget: the backend stores the turn under the signed-in user, so
 // the panels can show it after a reload; a failed post never blocks the
 // pipeline (the turn already happened).
-function recordTurn(prompt, answer) {
+function recordTurn(prompt, answer, sources) {
   fetch("/api/conversation", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ prompt, answer }),
+    body: JSON.stringify({ prompt, answer, sources: Array.isArray(sources) ? sources.slice(0, 8) : null }),
     signal: AbortSignal.timeout(10000),
     cache: "no-store",
   }).catch(() => {});
@@ -1694,7 +1699,8 @@ async function loadConversationHistory() {
     for (const entry of entries) {
       const ts = Date.parse(entry.ts) || Date.now();
       el.conversationText.append(transcriptEntry(entry.prompt, ts, "prompt"));
-      el.conversationText.append(transcriptEntry(entry.answer, ts, "answer"));
+      el.conversationText.append(transcriptEntry(entry.answer, ts, "answer",
+        Array.isArray(entry.sources) && entry.sources.length ? { websearch: true, websearchSources: entry.sources } : null));
     }
     if (!entries.length) {
       const empty = document.createElement("p");
@@ -1764,7 +1770,7 @@ async function answer(session, prompt) {
     mark("brain", "done");
     completeTurn(pending, result.answer, result.sources);
     answerShown = true;
-    recordTurn(prompt, result.answer);
+    recordTurn(prompt, result.answer, result.sources?.websearchSources);
     // Ingestion of this turn runs server-side after the response; give it a
     // moment, then refresh the graph panel so the new facts show up.
     if (mcpFlags.graph) setTimeout(() => loadGraph(), 4000);

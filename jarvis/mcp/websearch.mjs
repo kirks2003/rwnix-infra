@@ -49,8 +49,9 @@ import dns from "node:dns/promises";
 import {
   cleanHtml, decodeDuckDuckGoHref, decodeBingUrl, mergeResults, formatSearchResults,
   normalizeUrlForDedupe, browserHeaders, INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems,
-  isSafeFetchUrl, isBlockedIp, htmlToText,
-} from "./engines.mjs";
+   sourceHost, searchSourceNames, newsSourceNames,
+   isSafeFetchUrl, isBlockedIp, htmlToText,
+ } from "./engines.mjs";
 
 const TOOL = {
   name: "web_search",
@@ -143,7 +144,10 @@ async function handleMessage(message) {
       try {
         const { merged, instant } = await searchWeb(query, maxResults, lang);
         if (!merged.length && !instant) return respond(id, { content: [{ type: "text", text: "No results found." }] });
-        return respond(id, { content: [{ type: "text", text: formatSearchResults(merged, instant) }] });
+        return respond(id, {
+          content: [{ type: "text", text: formatSearchResults(merged, instant) }],
+          structuredContent: { sources: searchSourceNames(merged) },
+        });
       } catch (error) {
         return respond(id, { content: [{ type: "text", text: `Search failed: ${error.message}` }], isError: true });
       }
@@ -178,7 +182,10 @@ async function handleNews(id, arguments_) {
   try {
     const items = await searchNews(topic, maxResults, lang);
     if (!items.length) return respond(id, { content: [{ type: "text", text: "No news found." }] });
-    return respond(id, { content: [{ type: "text", text: formatNewsItems(items) }] });
+    return respond(id, {
+      content: [{ type: "text", text: formatNewsItems(items) }],
+      structuredContent: { sources: newsSourceNames(items) },
+    });
   } catch (error) {
     return respond(id, { content: [{ type: "text", text: `News search failed: ${error.message}` }], isError: true });
   }
@@ -358,7 +365,10 @@ async function handleFetch(id, arguments_) {
   try {
     const result = await fetchWithBrowser(url, maxChars, lang);
     console.log(JSON.stringify({ level: "info", msg: "webfetch_success", url: url.slice(0, 200), ms: Date.now() - started, chars: result.text.length, browser: true }));
-    return respond(id, { content: [{ type: "text", text: result.text }] });
+    return respond(id, {
+      content: [{ type: "text", text: result.text }],
+      structuredContent: { sources: [sourceHost(url)].filter(Boolean) },
+    });
   } catch (browserError) {
     // The page may simply be slow or walled for the browser; a plain
     // browser-header fetch is a degraded but real fallback (no JavaScript).
@@ -366,7 +376,10 @@ async function handleFetch(id, arguments_) {
       const html = await fetchText(url, { headers: browserHeaders(lang, true) });
       const text = `${htmlToText(html, maxChars)}\n\n[fetched without JavaScript — dynamic page content may be missing]`;
       console.log(JSON.stringify({ level: "info", msg: "webfetch_fallback", url: url.slice(0, 200), ms: Date.now() - started, error: browserError.message.slice(0, 120) }));
-      return respond(id, { content: [{ type: "text", text }] });
+      return respond(id, {
+        content: [{ type: "text", text }],
+        structuredContent: { sources: [sourceHost(url)].filter(Boolean) },
+      });
     } catch (fallbackError) {
       console.log(JSON.stringify({ level: "warn", msg: "webfetch_failure", url: url.slice(0, 200), ms: Date.now() - started, error: fallbackError.message.slice(0, 120) }));
       return respond(id, { content: [{ type: "text", text: `Fetch failed: ${fallbackError.message}` }], isError: true });

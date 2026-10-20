@@ -325,3 +325,38 @@ export function formatNewsItems(items) {
     })
     .join("\n\n");
 }
+
+// The attribution behind a web result: the site the user will recognise
+// (hostname without the "www." prefix), never the raw URL — the UI renders
+// it as text.
+export function sourceHost(url) {
+  try {
+    let host = new URL(String(url || "")).hostname.toLowerCase();
+    if (host.startsWith("www.")) host = host.slice(4);
+    return host;
+  } catch {
+    return "";
+  }
+}
+
+export function searchSourceNames(merged, maxNames = 6) {
+  const names = [];
+  for (const result of Array.isArray(merged) ? merged : []) {
+    const host = sourceHost(result?.url);
+    if (host && !names.includes(host)) names.push(host);
+    if (names.length >= maxNames) break;
+  }
+  return names;
+}
+
+export function newsSourceNames(items, maxNames = 6) {
+  const names = [];
+  // Newest first, like formatNewsItems, so the first names are the freshest.
+  const ordered = [...(items || [])].sort((a, b) => (b.date || 0) - (a.date || 0));
+  for (const item of ordered) {
+    const source = String(item?.source || "").trim() || sourceHost(item?.url);
+    if (source && !names.includes(source)) names.push(source);
+    if (names.length >= maxNames) break;
+  }
+  return names;
+}

@@ -261,7 +261,8 @@ function openConversationDb(dbPath) {
       user TEXT NOT NULL,
       ts TEXT NOT NULL,
       prompt TEXT NOT NULL,
-      answer TEXT NOT NULL
+      answer TEXT NOT NULL,
+      sources TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_conversations_user_ts ON conversations (user, ts);
     -- One embedding per stored turn, for semantic search. Separate table so a
@@ -274,10 +275,12 @@ function openConversationDb(dbPath) {
       vec BLOB NOT NULL
     );
   `);
+  const hasSources = db.prepare("PRAGMA table_info(conversations)").all().some((column) => column.name === "sources");
+  if (!hasSources) db.exec("ALTER TABLE conversations ADD COLUMN sources TEXT");
   return {
     db,
-    insert: db.prepare("INSERT INTO conversations (user, ts, prompt, answer) VALUES (@user, @ts, @prompt, @answer)"),
-    selectWindow: db.prepare("SELECT ts, prompt, answer FROM conversations WHERE user = @user AND ts >= @floor ORDER BY ts ASC, id ASC"),
+    insert: db.prepare("INSERT INTO conversations (user, ts, prompt, answer, sources) VALUES (@user, @ts, @prompt, @answer, @sources)"),
+    selectWindow: db.prepare("SELECT ts, prompt, answer, sources FROM conversations WHERE user = @user AND ts >= @floor ORDER BY ts ASC, id ASC"),
     // The brain's short-term memory after a restart: the newest turns of this
     // user, newest first (the caller reverses them into chronological order).
     // Turns of this user that have no vector yet for the current model — the
@@ -295,7 +298,7 @@ function openConversationDb(dbPath) {
       JOIN conversation_embeddings e ON e.conversation_id = c.id AND e.model = @model
       WHERE c.user = @user AND c.ts >= @floor`),
     countEmbedded: db.prepare(`SELECT COUNT(*) AS n FROM conversation_embeddings WHERE model = @model`),
-    selectRecent: db.prepare("SELECT ts, prompt, answer FROM conversations WHERE user = @user ORDER BY ts DESC, id DESC LIMIT @limit"),
+    selectRecent: db.prepare("SELECT ts, prompt, answer, sources FROM conversations WHERE user = @user ORDER BY ts DESC, id DESC LIMIT @limit"),
     // Free-text search over this user's own stored turns, newest first. The
     // term list is variable, so the WHERE clause is built per call — the
     // terms themselves are always bound parameters, never interpolated, and
@@ -318,6 +321,29 @@ function openConversationDb(dbPath) {
 function escapeLike(term) {
   return term.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
+
+// The source attribution stored with a turn: short site/portal names (never
+// raw URLs, never markup). The client sends back what the server put in the
+// turn's sources; anything that is not a short string is dropped before it
+// can reach the DB or another browser.
+function conversationSourcesFromPayload(value) {
+  if (!Array.isArray(value)) return null;
+  const names = [...new Set(value.map((name) => String(name || "").trim()).filter((name) => name && name.length <= 64))].slice(0, 8);
+  return names.length ? JSON.stringify(names) : null;
+}
+
+function conversationStoredSources(value) {
+  if (!value) return null;
+  try {
+    const names = JSON.parse(value);
+    if (!Array.isArray(names)) return null;
+    const clean = names.map((name) => String(name || "")).filter(Boolean);
+    return clean.length ? clean : null;
+  } catch {
+    return null;
+  }
+}
+
 const conversationStore = openConversationDb(CONVERSATION_DB_PATH);
 
 // --- Semantic search over the stored conversation -------------------------
@@ -1033,7 +1059,7 @@ const server = http.createServer(async (req, res) => {
       const days = conversationDaysFromUrl(req.url);
       if (days === null) return json(res, 400, { error: "invalid_days", requestId });
       const floor = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-      const entries = conversationStore.selectWindow.all({ user: req.user, floor });
+      const entries = conversationStore.selectWindow.all({ user: req.user, floor }).map((row) => ({ ...row, sources: conversationStoredSources(row.sources) }));
       return json(res, 200, { requestId, entries });
     }
 
@@ -1042,12 +1068,12 @@ const server = http.createServer(async (req, res) => {
       const prompt = String(payload.prompt || "").trim().slice(0, 4000);
       const answer = String(payload.answer || "").trim().slice(0, 8000);
       if (!prompt || !answer) return json(res, 400, { error: "prompt_and_answer_required", requestId });
-      const entry = { ts: new Date().toISOString(), prompt, answer };
+      const entry = { ts: new Date().toISOString(), prompt, answer, sources: conversationSourcesFromPayload(payload.sources) };
       conversationStore.insert.run({ user: req.user, ...entry });
       // Fire-and-forget: the turn is stored either way, and an embedding
       // failure only means this turn is keyword-only until the next backfill.
       backfillEmbeddings().catch(() => {});
-      return json(res, 200, { requestId, entry });
+      return json(res, 200, { requestId, entry: { ...entry, sources: conversationStoredSources(entry.sources) } });
     }
 
     // Per-user isolation: every graph endpoint is scoped to the signed-in
@@ -1716,8 +1742,22 @@ async function vikunjaToolsFor(client, signal) {
   return client.tools;
 }
 
+// The source attribution behind an MCP web tool result: the structured
+// sources list the web-search server returns (site/portal names, never raw
+// URLs). Missing or malformed shapes degrade to no attribution.
+function sourceNamesFromMcp(result) {
+  const names = result?.structuredContent?.sources;
+  if (!Array.isArray(names)) return [];
+  return [...new Set(names.map((name) => String(name || "").trim()).filter(Boolean))].slice(0, 8);
+}
+
+function mergeSourceNames(...lists) {
+  return [...new Set(lists.flat().map((name) => String(name || "").trim()).filter(Boolean))].slice(0, 8);
+}
+
 // Runs the web_search tool of the MCP server and resolves with the result
-// text; the caller treats a failure as "answer without search results".
+// text plus the source names behind it; the caller treats a failure as
+// "answer without search results".
 async function webSearch(query, requestId, signal) {
   const started = Date.now();
   try {
@@ -1725,7 +1765,7 @@ async function webSearch(query, requestId, signal) {
     const text = (result.content || []).map((item) => item.text || "").join("\n").trim();
     if (result.isError || !text) throw new Error(text || "web search returned no results");
     console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_success", ms: Date.now() - started, chars: text.length }));
-    return text;
+    return { text, sources: sourceNamesFromMcp(result) };
   } catch (error) {
     if (signal.aborted) throw error;
     console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_failure", ms: Date.now() - started, error: error.message }));
@@ -1769,10 +1809,12 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
   // MCP server tells the brain which of the browser's MCP switches are on, so
   // it does not deny an enabled feature or claim results for a disabled one.
   let searchMessage = null;
+  let searchSources = [];
   const mcpStates = [];
   if (mcpFlags.websearch) {
     try {
-      const results = await webSearch(prompt, requestId, signal);
+      const { text: results, sources: sourcesFromSearch } = await webSearch(prompt, requestId, signal);
+      searchSources = sourcesFromSearch;
       searchMessage = {
         role: "system",
         content: `Web search results for this prompt (use them if relevant, keep the answer short and spoken):\n${results}`,
@@ -1860,7 +1902,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults, graphUsed, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
+  const { data, webResults, webSources, graphUsed, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -1892,7 +1934,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
     // results plus any web tool results the brain gathered itself.
     ingestTurn({ user, prompt, searchResults: [searchMessage?.content, ...webResults].filter(Boolean).join("\n\n") || null, answer, brainProfile, requestId }).catch(() => {});
   }
-  return { requestId, answer, configured: true, model: brainProfile.model, brainProfile: brainProfile.id, brainProfileLabel: brainProfile.label, sources: { websearch: webResults.length > 0, graph: Boolean(graphUsed) } };
+  return { requestId, answer, configured: true, model: brainProfile.model, brainProfile: brainProfile.id, brainProfileLabel: brainProfile.label, sources: { websearch: webResults.length > 0 || searchSources.length > 0, graph: Boolean(graphUsed), websearchSources: mergeSourceNames(searchSources, webSources) } };
 }
 
 // The graph tools offered to the brain when the knowledge graph toggle is on.
@@ -2235,6 +2277,9 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
   // Web tool results collected for post-turn ingestion (the extractor reads
   // the search context the turn actually used), separate from the answer.
   const webResults = [];
+  // The source names behind every web tool result of this turn — the
+  // attribution the UI shows with the answer.
+  const webSources = [];
   let graphWriteSucceeded = false;
   let graphUsed = false;
   // search_history is always in the tool set: it is the user's own stored
@@ -2281,7 +2326,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       toolCalls = graphdb.parseToolCallsFromContent(message?.content);
       fromXml = toolCalls.length > 0;
     }
-    if (!hasTools || !toolCalls.length) return { data, webResults, graphUsed, graphWriteSucceeded };
+    if (!hasTools || !toolCalls.length) return { data, webResults, webSources, graphUsed, graphWriteSucceeded };
     if (round >= GRAPH_TOOL_ROUNDS) {
       // Tool budget spent: force a final answer without tools.
       // Tool budget spent: force a final answer without tools. The nudge
@@ -2297,7 +2342,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       });
       const fallbackText = await fallback.text();
       if (!fallback.ok) throw new Error(`Brain HTTP ${fallback.status}: ${fallbackText.slice(0, 500)}`);
-      return { data: JSON.parse(fallbackText), webResults, graphUsed, graphWriteSucceeded };
+      return { data: JSON.parse(fallbackText), webResults, webSources, graphUsed, graphWriteSucceeded };
     }
     // For XML-parsed calls the raw message carries no tool_calls field, so
     // carry the parsed ones on the assistant turn: the tool results below
@@ -2360,7 +2405,12 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
           const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
           const detail = (name === "web_news" ? args.topic : name === "web_fetch" ? args.url : args.query) || "";
           console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_tool", tool: name, detail: String(detail).slice(0, 300), ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));
-          if (!result.isError) webResults.push(`${name} (${detail}):\n${resultText}`);
+          if (!result.isError) {
+            webResults.push(`${name} (${detail}):\n${resultText}`);
+            for (const sourceName of sourceNamesFromMcp(result)) {
+              if (!webSources.includes(sourceName)) webSources.push(sourceName);
+            }
+          }
           local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
         } catch (error) {
           if (totalSignal.aborted) throw error;

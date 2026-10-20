@@ -676,7 +676,7 @@ progress {
 }
 
 .transcript {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* The conversation panel. Deliberately NOT
@@ -685,6 +685,7 @@ progress {
    min-height, which pushed the conversation off the first screen. */
 .transcript-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto 1fr auto;
   gap: 10px;
   align-content: start;
@@ -728,6 +729,7 @@ progress {
   min-height: 77px;
   max-height: 306px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   align-content: start;
   overflow-y: auto;
@@ -766,8 +768,18 @@ progress {
 
 .transcript-entry {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 3px;
   max-width: min(860px, 100%);
+}
+
+body.panels-off .transcript-panel {
+  min-height: 538px;
+}
+
+body.panels-off .transcript-list {
+  min-height: 154px;
+  max-height: 612px;
 }
 
 /* Prompts ("You") sit on the right in the standard --text color; answers
@@ -1671,7 +1683,7 @@ menu {
   }
 
   .hero, .transcript {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .manual-prompt {

@@ -6,6 +6,7 @@ import {
   cleanHtml, decodeDuckDuckGoHref, decodeBingUrl, normalizeUrlForDedupe, mergeResults, formatSearchResults,
   INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems, browserHeaders,
   isSafeFetchUrl, isBlockedIp, htmlToText,
+  sourceHost, searchSourceNames, newsSourceNames,
 } from "../mcp/engines.mjs";
 
 test("cleanHtml strips tags and named plus numeric entities", () => {
@@ -261,6 +262,39 @@ test("formatNewsItems sorts newest first and tags source, date and URL", () => {
   const text = formatNewsItems(items);
   assert.equal(text, "1. New — Feed B (2026-10-05)\nhttps://a.test/2\nS\n\n2. Old — Feed A (2026-10-01)\nhttps://a.test/1\n\n\n3. Undated — Feed C\nhttps://a.test/3\n");
   assert.equal(formatNewsItems([]), "");
+});
+
+test("sourceHost reads the portal name from a URL, never the raw address", () => {
+  assert.equal(sourceHost("https://www.heise.de/news/article?x=1"), "heise.de");
+  assert.equal(sourceHost("https://en.wikipedia.org/wiki/Foo/Bar"), "en.wikipedia.org");
+  assert.equal(sourceHost("https://sub.domain.example.co.uk:8443/a/b"), "sub.domain.example.co.uk");
+  assert.equal(sourceHost("http://intranet.local/page"), "intranet.local");
+  assert.equal(sourceHost("not a url"), "");
+  assert.equal(sourceHost(""), "");
+  assert.equal(sourceHost(null), "");
+});
+
+test("searchSourceNames keeps first-seen portal order and drops duplicates", () => {
+  assert.deepEqual(searchSourceNames([
+    { title: "a", url: "https://www.a.example/x", snippet: "" },
+    { title: "b", url: "https://b.example/y", snippet: "" },
+    { title: "c", url: "https://www.a.example/z", snippet: "" },
+    { title: "d", snippet: "" },
+    { title: "e", url: "garbage", snippet: "" },
+  ]), ["a.example", "b.example"]);
+  assert.deepEqual(searchSourceNames([]), []);
+  assert.deepEqual(searchSourceNames(null), []);
+});
+
+test("newsSourceNames follows the newest-first order of formatNewsItems", () => {
+  // The feed name is the portal label; an item without one falls back to the host.
+  assert.deepEqual(newsSourceNames([
+    { title: "Old", url: "https://old.example/1", source: "Feed A", date: Date.parse("2026-10-01T00:00:00Z") },
+    { title: "New", url: "https://new.example/2", source: "Feed B", date: Date.parse("2026-10-05T00:00:00Z") },
+    { title: "Undated", url: "https://undated.example/3", source: "", date: 0 },
+  ]), ["Feed B", "Feed A", "undated.example"]);
+  assert.deepEqual(newsSourceNames([]), []);
+  assert.deepEqual(newsSourceNames(null), []);
 });
 
 function startMcpServer() {
