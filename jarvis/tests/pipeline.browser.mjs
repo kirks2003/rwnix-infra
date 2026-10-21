@@ -1577,9 +1577,11 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
       // The 2026-10-21 (later) owner pass: the history/answer field carries
       // the same mouse resize grip as the prompt field, and the old 352px
       // cap became a floor for the cap (max(352px, 70vh)), so the grip can
-      // actually enlarge the field.
+      // actually enlarge the field. The 2026-10-21 follow-up grew both
+      // floors 30% (max(458px, 91vh)).
       listResize: getComputedStyle(list).resize,
       listMaxHeightPx: parseFloat(getComputedStyle(list).maxHeight),
+      listViewportH: window.innerHeight,
     };
   });
   assert.ok(layout.stripHeight < 150,
@@ -1606,8 +1608,8 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     `the history list needs a laid-out scrollbar, got ${layout.scrollbarGutter}px`);
   assert.equal(layout.listResize, "vertical",
     `the history/answer field must carry the same mouse resize grip as the prompt field, got "${layout.listResize}"`);
-  assert.ok(layout.listMaxHeightPx > 352,
-    `the history/answer field cap must sit above the old 352px wall so the grip can enlarge it, got ${layout.listMaxHeightPx}px`);
+  assert.ok(Math.abs(layout.listMaxHeightPx - Math.max(458, layout.listViewportH * 0.91)) < 1,
+    `the history/answer field cap must be the +30% pass value max(458px, 91vh) for a ${layout.listViewportH}px viewport, got ${layout.listMaxHeightPx}px`);
   assert.equal(await page.inputValue("#historyDays"), "24");
   assert.equal(await page.textContent("#historyDaysValue"), "24 days");
   await page.evaluate(() => {
