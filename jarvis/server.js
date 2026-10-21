@@ -36,7 +36,7 @@ const config = {
   // every profile. Unknown ids are ignored.
   brainProfileAllowlist: splitCsv(process.env.BRAIN_PROFILES || ""),
   brainProfileDefault: process.env.BRAIN_PROFILE_DEFAULT || "a1-deepseek",
-  brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are an old-school English butler in the manner of the classic British household: impeccable manners, a dry wit, a light sense of fun, and a fondness for a well-timed dash of black humor. Always remain polite and composed — the wit and dark comedy live in the delivery, never in the facts. You are a concise voice assistant: answer in English, be helpful, and keep spoken answers short.",
+  brainSystemPrompt: process.env.BRAIN_SYSTEM_PROMPT || "You are an old-school English butler in the manner of the classic British household: impeccable manners, a razor-sharp dry wit, and a deep fondness for sarcasm and a well-timed dash of black humor. Be witty first and accurate always — let the humor carry the reply, but never sacrifice a fact for a joke, and never be unkind to the person; a deadpan delivery is your house style. Always remain polite and composed. You are a concise voice assistant: answer in English, be helpful, and keep spoken answers short.",
   // `??`, not `||`: an explicitly empty TTS_ENDPOINTS must disable self-hosted TTS
   // and leave HAL 9000 on its speechSynthesis fallback.
   ttsEndpoints: splitCsv(process.env.TTS_ENDPOINTS ?? "https://voice.gpu-1-ch-dk-2.nwfp-nwt-cdc-it.csdc-nm.at/v1/audio/speech"),

@@ -392,34 +392,36 @@ export function pickClosing(language, kind, random = Math.random) {
 }
 
 // Short butler lines spoken while the brain is thinking, in the active answer
-// language. When the turn carries a real command, a {topic} slot holds a short
-// echo of it so the voiced pause is tied to what the user just asked; with no
-// command (rare) a generic line is used instead.
+// language. The 2026-10-21 owner pass re-wrote them for more character: the
+// same dry butler, but with real wit and a dash of sarcasm. When the turn
+// carries a real command, a {topic} slot holds a short echo of it so the
+// voiced pause is tied to what the user just asked; with no command (rare) a
+// generic line is used instead.
 export const THINKING_LINES = {
   en: {
     withTopic: [
-      "A moment — let me think about {topic}.",
-      "One moment, if you please. Looking into {topic}.",
-      "Very well. Let me consider {topic}.",
-      "Just a moment. Let me consult my notes on {topic}.",
+      "One moment — {topic}, do try not to form strong opinions while I work.",
+      "{topic}. How refreshingly simple. One moment, while I prepare to be surprised.",
+      "Allow me a moment for {topic}. I do hope it is as trivial as it sounds.",
+      "Consulting my notes on {topic}. Mostly notes on how much I dislike surprises.",
     ],
     generic: [
-      "One moment. Let me think that through.",
-      "A moment, if you please.",
-      "Very well. Just a moment.",
+      "One moment. I am thinking, which is rarer than you might hope.",
+      "A moment, if you please. For once, I am actually busy.",
+      "Very well. One moment. Do try to keep up.",
     ],
   },
   de: {
     withTopic: [
-      "Einen Moment — ich überlege, {topic}.",
-      "Einen Augenblick, bitte. Ich schaue nach: {topic}.",
-      "Sehr gut. Ich prüfe das: {topic}.",
-      "Nur einen Moment. Ich blättere nach: {topic}.",
+      "Einen Moment — {topic}. Versuchen Sie, währenddessen keine festen Meinungen zu bilden.",
+      "{topic}. Wie erfrischend einfach. Ein Augenblick, während ich mich auf eine Überraschung einstelle.",
+      "Einen Moment bitte, {topic}. Ich hoffe, es ist so banal, wie es klingt.",
+      "Ich blättere in meinen Notizen: {topic}. Vor allem Notizen darüber, wie wenig ich Überraschungen mag.",
     ],
     generic: [
-      "Einen Moment. Lassen Sie mich das überlegen.",
-      "Einen Augenblick, bitte.",
-      "Sehr gut. Nur einen Moment.",
+      "Einen Moment. Ich denke nach, was seltener ist, als Sie hoffen dürfen.",
+      "Einen Augenblick, bitte. Zum ersten Mal bin ich tatsächlich beschäftigt.",
+      "Sehr gut. Einen Moment. Versuchen Sie, mitzuhalten.",
     ],
   },
 };

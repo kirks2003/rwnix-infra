@@ -1193,7 +1193,7 @@ test("HAL 9000 plays self-hosted TTS clauses instead of the browser voice", { ti
   await page.click("#stopButton");
   // The thinking line rides the same self-hosted clause path as the answer.
   assert.deepEqual(calls.speak,
-    ["A moment — let me think about what time is it.", "It is 14:05.", "I am completely operational."]);
+    ["One moment — what time is it, do try not to form strong opinions while I work.", "It is 14:05.", "I am completely operational."]);
   assert.equal(await page.evaluate(() => window.savedUtterances.length), 0);
   assert.match(await page.textContent("#log"), /HAL 9000 clause 2\/2/);
   assert.match(await page.textContent("#voiceStatus"), /kokoro \/ bm_george/);
@@ -1217,7 +1217,7 @@ test("HAL 9000 finishes the answer with the browser voice when self-hosted TTS f
   // fails, so the fallback voice speaks the remaining clauses itself and no
   // third /api/speak call is ever made.
   assert.deepEqual(calls.speak,
-    ["A moment — let me think about what time is it.", "It is 14:05."]);
+    ["One moment — what time is it, do try not to form strong opinions while I work.", "It is 14:05."]);
   assert.deepEqual(await page.evaluate(() => savedUtterances.map((u) => u.text)),
     ["It is 14:05.", "I am completely operational."]);
   // The HAL fallback keeps its own cadence rather than the browser default.
@@ -1241,7 +1241,7 @@ test("HAL 9000 without a TTS backend keeps its cadence on the browser voice", { 
   assert.deepEqual(calls.speak, []);
   // The thinking line speaks at the HAL cadence on the browser voice too.
   assert.deepEqual(await page.evaluate(() => savedUtterances.map((utterance) => utterance.text)),
-    ["A moment — let me think about what time is it.", "It is 14:05.", "I am completely operational."]);
+    ["One moment — what time is it, do try not to form strong opinions while I work.", "It is 14:05.", "I am completely operational."]);
   assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.voice")), "hal9000");
   assert.match(await page.textContent("#voiceStatus"), /No TTS backend configured/);
 });

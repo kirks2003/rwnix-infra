@@ -492,7 +492,9 @@ button:disabled {
   margin: 0;
   max-width: 220px;
   color: var(--muted);
-  font-size: 0.75rem;
+  /* 0.9rem = the 2026-10-21 owner pass: the MCP server text in the compact
+     panel was enlarged by 20% (0.75rem -> 0.9rem). */
+  font-size: 0.9rem;
   text-align: center;
 }
 
@@ -567,7 +569,9 @@ button:disabled {
 }
 
 .lang-switch-compact .lang-option {
-  font-size: 0.62rem;
+  /* 0.744rem = 0.62rem enlarged by 20% (2026-10-21 owner pass, same scale
+     as the MCP server labels and the Send button). */
+  font-size: 0.744rem;
 }
 
 .lang-switch-compact .lang-knob {
@@ -712,8 +716,10 @@ progress {
   align-content: start;
   /* 560 * 0.8 * 0.8 * 0.75 — the 2026-10-19 owner pass scales the panel to
       75% of its previous vertical size; font sizes are unchanged. The
-      2026-10-21 owner pass makes the panel ~10% taller (269px -> 296px). */
-  min-height: 296px;
+      2026-10-21 owner pass makes the panel ~10% taller (269px -> 296px),
+      and the follow-up pass makes the conversation history area >= 15%
+      taller (296px -> 341px floor, list 77/306 -> 89/352). */
+  min-height: 341px;
   padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
   border-radius: 11px;
@@ -745,11 +751,13 @@ progress {
    first, scrollable inside the panel with a visible scrollbar (the window
    is the History slider's day count, see /api/conversation in server.js). */
 .transcript-list {
-  /* 250% taller than before (46px / 182px), two 80% shrink passes
-     (161/637 -> 129/510 -> 103/408), then the 2026-10-19 owner pass scales
-     the list to 75% (103/408 -> 77/306) with the font size unchanged. */
-  min-height: 77px;
-  max-height: 306px;
+ /* 250% taller than before (46px / 182px), two 80% shrink passes
+      (161/637 -> 129/510 -> 103/408), then the 2026-10-19 owner pass scales
+      the list to 75% (103/408 -> 77/306) with the font size unchanged. The
+      2026-10-21 follow-up pass makes the history area >= 15% taller
+      (77/306 -> 89/352). */
+  min-height: 89px;
+  max-height: 352px;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
@@ -795,13 +803,15 @@ progress {
   max-width: min(860px, 100%);
 }
 
+/* The 2026-10-21 >= 15% history-height pass scales the panels-off values
+   the same way (538 -> 619, 154 -> 178, 612 -> 704). */
 body.panels-off .transcript-panel {
-  min-height: 538px;
+  min-height: 619px;
 }
 
 body.panels-off .transcript-list {
-  min-height: 154px;
-  max-height: 612px;
+  min-height: 178px;
+  max-height: 704px;
 }
 
 /* Prompts ("You") sit on the right in the standard --text color; answers
@@ -1427,8 +1437,10 @@ html.graph-full {
   border: 1px solid rgba(66, 217, 255, 0.35);
   border-radius: 12px;
   /* Extra right/bottom padding keeps typed text clear of the in-field Send
-     button in the bottom-right corner. */
-  padding: 10px 74px 42px 12px;
+     button in the bottom-right corner. The 2026-10-21 owner pass halves the
+     field vertically (rows 2 -> 1, padding 10px/42px -> 6px/18px: 84px ->
+     ~41px) while the right padding stays wide enough for the button. */
+  padding: 6px 74px 18px 12px;
   color: var(--text);
   /* Theme variable instead of a hardcoded near-black: the a1 white-label
      theme's generic `textarea` rule loses this specificity fight, so the
@@ -1474,7 +1486,8 @@ html.graph-full {
   margin: 0;
   max-width: 160px;
   color: var(--muted);
-  font-size: 0.75rem;
+  /* 0.9rem = +20% with the rest of the compact MCP row (2026-10-21). */
+  font-size: 0.9rem;
   text-align: center;
 }
 

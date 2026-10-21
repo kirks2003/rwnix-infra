@@ -536,9 +536,11 @@ function createGraphStore({ uri, database, readUser, readPassword, writeUser, wr
     // Never another user's node or edge — except for the admin, whose view is
     // the whole graph (every user's world at once).
     async status({ user, admin = false } = {}) {
-      // 60 = the panel's default /api/graph/subgraph?limit=60.
+      // 200 = the panel's default /api/graph/subgraph?limit=200 (raised from
+      // 60 on 2026-10-21 so the initial view shows the whole small graph
+      // instead of a 60-node window).
       const [world, labelRows, relRows] = await Promise.all([
-        visibleWorld(user, 60, null, admin),
+        visibleWorld(user, 200, null, admin),
         // db.labels()/db.relationshipTypes() read the token store: the answer
         // costs the same on ten nodes as on ten million. The equivalent
         // "MATCH (n) UNWIND labels(n)" is a full scan of the graph, and the

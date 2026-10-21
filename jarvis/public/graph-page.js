@@ -98,7 +98,7 @@ async function loadGraph(center) {
   try {
     const [status, subgraph] = await Promise.all([
       fetch("/api/graph/status", { cache: "no-store" }).then((response) => response.json()),
-      fetch(`/api/graph/subgraph?limit=60${graphCenter ? `&center=${encodeURIComponent(graphCenter)}` : ""}`, { cache: "no-store" }).then((response) => response.json()),
+      fetch(`/api/graph/subgraph?limit=200${graphCenter ? `&center=${encodeURIComponent(graphCenter)}` : ""}`, { cache: "no-store" }).then((response) => response.json()),
     ]);
     if (status.error) {
       el.graphStatus.textContent = status.error === "graph_unavailable" ? `Unreachable: ${status.message || "database down"}` : "Not available";

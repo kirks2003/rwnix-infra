@@ -33,10 +33,13 @@ export function renderGraph2d(svg, subgraph, { nodeScale = 1, userName = null, o
     || highlight.nodeIds?.has(edge.source)
     || highlight.nodeIds?.has(edge.target);
   svg.replaceChildren();
-  const nodes = (subgraph.nodes || []).slice(0, 80);
+  // 200/320 match the 3D view's caps and the panel's /api/graph/subgraph
+  // limit (raised from 60 to 200 on 2026-10-21), so the 2D view shows the
+  // full fetched world instead of silently truncating it.
+  const nodes = (subgraph.nodes || []).slice(0, 200);
   if (!nodes.length) return;
   const ids = new Set(nodes.map((node) => node.id));
-  const edges = (subgraph.edges || []).filter((edge) => ids.has(edge.source) && ids.has(edge.target)).slice(0, 160);
+  const edges = (subgraph.edges || []).filter((edge) => ids.has(edge.source) && ids.has(edge.target)).slice(0, 320);
   const position = new Map();
   nodes.forEach((node, index) => {
     const angle = (index / nodes.length) * Math.PI * 2;
