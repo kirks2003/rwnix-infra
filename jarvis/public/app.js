@@ -1658,6 +1658,15 @@ async function listen(session) {
           break;
         }
         mark("whisper", "done");
+        // A stop command spoken WITH the wake word disarms the voice command
+        // mode entirely (text-only until the enable switch re-arms wake
+        // listening). It takes precedence over the post-speech fallback below,
+        // which only acknowledges a bare stop and keeps the session armed.
+        if (isStopCommand(prompt)) {
+          log("wake", `Wake-word stop command ${JSON.stringify(prompt)}; disarming the voice command mode.`);
+          stop("Disarmed by voice — text-only mode. Click the enable switch to wake listening again.");
+          return;
+        }
         // A stop command heard shortly after a spoken answer is not a prompt
         // for the brain; it just confirms the speech is over. The burst-gated
         // match covers the echoed window, exactly like the wake pipeline above.
@@ -1690,12 +1699,21 @@ async function listen(session) {
           const commandWindow = await waitForCommandEnd(session, buffer.end, "post-speech");
           if (!commandWindow) break;
           const rawCommand = await withStepRetries(session, "command transcription", () => transcribe(session, commandWindow, "command"));
-          const followUp = wakeCommand(rawCommand, config.wakePhrase) ?? rawCommand.trim();
+          const wakeHit = wakeCommand(rawCommand, config.wakePhrase);
+          const followUp = wakeHit ?? rawCommand.trim();
           if (!followUp) {
             log("wake", "No command after the answer; returning to wake listening.");
             break;
           }
           mark("whisper", "done");
+          // A stop command spoken WITH the wake word disarms the voice command
+          // mode, same as in wake listening; a bare stop (no wake word) stays
+          // the post-speech escape hatch below and keeps the window open.
+          if (wakeHit !== null && isStopCommand(wakeHit)) {
+            log("wake", `Wake-word stop command ${JSON.stringify(wakeHit)} in the follow-up window; disarming the voice command mode.`);
+            stop("Disarmed by voice — text-only mode. Click the enable switch to wake listening again.");
+            return;
+          }
           // A stop word inside the follow-up window is the same escape hatch
           // (the user cut the answer and then says "stop" again, or the
           // window's audio carries the stop over the answer's echo):

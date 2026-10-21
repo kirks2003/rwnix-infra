@@ -455,19 +455,37 @@ test("a stop word inside the echoed window cuts a speaking answer on a loud user
   assert.deepEqual(calls.prompts, ["What time is it?"], "the stop word must not start a brain round trip");
 });
 
-test("a stop command right after the spoken answer is not sent to the brain", { timeout: 30000 }, async (t) => {
+test("a wake-word stop command right after the spoken answer disarms voice mode", { timeout: 30000 }, async (t) => {
   // The answer speaks and finishes on its own (25 ms mock), then the
   // follow-up command window opens. The next burst is transcribed as
-  // "Rocky stop": inside the post-speech window it must be treated as a
-  // speech stop (acknowledged, window stays open), not as a prompt for the
-  // brain.
+  // "Rocky stop": a stop command WITH the wake word disarms the voice
+  // command mode (text-only until the enable switch re-arms), never a
+  // prompt for the brain. The bare-stop escape hatch (acknowledged, window
+  // stays open) is the separate test below.
   const { page, calls } = await setup(t, async (n) => ({
     text: n <= 2 ? "Rocky! What time is it?" : "Rocky stop",
+  }));
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("disarming the voice command mode"),
+    null, { timeout: 20000 });
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  // The wake-word stop disarms: the pipeline returns to standby instead of
+  // the command window.
+  assert.equal(await page.textContent("#stageTitle"), "Stopped");
+});
+
+test("a bare stop word right after the spoken answer keeps the command window open", { timeout: 30000 }, async (t) => {
+  // The answer speaks and finishes on its own (25 ms mock), then the
+  // follow-up command window opens. The next burst is transcribed as a bare
+  // "stop" (no wake word): the post-speech escape hatch still applies — it
+  // is acknowledged and the window stays open, without a brain round trip
+  // and without disarming (that requires the wake word).
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : "stop",
   }));
   await page.waitForFunction(() => document.getElementById("log").textContent.includes("after the spoken answer"),
     null, { timeout: 20000 });
   assert.deepEqual(calls.prompts, ["What time is it?"]);
-  // The acknowledged stop keeps the command window open, not wake listening.
+  // The acknowledged bare stop keeps the command window open, not wake listening.
   assert.equal(await page.textContent("#stageTitle"), "Waiting for command");
   await page.click("#stopButton");
 });

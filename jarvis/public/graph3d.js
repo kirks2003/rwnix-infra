@@ -34,7 +34,7 @@ const ALPHA_DECAY_PER_FRAME = 0.008;
 const ALPHA_FLOOR = 0.02;
 const AUTO_ROTATE_AFTER_MS = 5000;
 
-export function createGraph3D(stage, { userName = null, onNodeClick, onFallback, nodeScale = 1 } = {}) {
+export function createGraph3D(stage, { userName = null, onNodeClick, onFallback, nodeScale = 1, autoFit = false } = {}) {
   const canvas = document.createElement("canvas");
   canvas.setAttribute("aria-label", "Knowledge graph visualization (3D)");
   const labelLayer = document.createElement("div");
@@ -57,7 +57,10 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   }
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(BACKGROUND, 280, 560);
+  // The full-page view (autoFit) re-pins this fog band to the framed
+  // distance; the 280/560 values here are the panel defaults.
+  const fog = new THREE.Fog(BACKGROUND, 280, 560);
+  scene.fog = fog;
   const camera = new THREE.PerspectiveCamera(50, 1, 1, 2000);
   scene.add(new THREE.AmbientLight(0x88aacc, 0.9));
   // decay 0: constant falloff, so the light behaves the same across three.js
@@ -96,6 +99,13 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     center: new THREE.Vector3(),
     centerTarget: new THREE.Vector3(),
   };
+  // autoFit (full-page view): frame the drawn world's bounding sphere
+  // instead of the fixed default radius above, so a 200-node world does not
+  // surround the camera. The fit is scheduled on every node-set change and
+  // applied once the layout has settled (alpha decayed) and the user has not
+  // interacted recently, so polls never fight an in-progress zoom.
+  let fitScheduled = false;
+  let fittedNodeIds = null;
   // The node the camera follows (search narrowed to exactly one), or null.
   let focusId = null;
 
@@ -137,6 +147,22 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   // Diff the subgraph against the scene: keep positions of surviving nodes so
   // the view does not jump on every poll, spawn new ones near an existing
   // neighbour when there is one, and rebuild the line buffer.
+  function fitCamera() {
+    let radius = 0;
+    for (const entry of nodeState.values()) radius = Math.max(radius, entry.pos.length());
+    if (!radius) return;
+    // Distance for the bounding sphere's silhouette to fit the vertical
+    // field of view, with headroom for node sizes and the last settling
+    // frames, clamped to the same 70..420 range the wheel zoom uses.
+    const fov = (camera.fov * Math.PI) / 180;
+    const distance = Math.min(420, Math.max(70, ((radius + 25) / Math.tan(fov / 2)) * 1.1));
+    orbit.target.radius = distance;
+    // Pin the fog band to the framed distance so the far side of a large
+    // world stays readable (the panel keeps its fixed 280/560 band).
+    fog.near = distance * 1.15;
+    fog.far = distance * 2.6;
+  }
+
   function update(subgraph) {
     if (disposed) return;
     const incoming = (subgraph.nodes || []).slice(0, MAX_NODES);
@@ -229,6 +255,15 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     // Nodes and labels may have been created just now: re-apply the current
     // search highlight so a poll does not undim what the query filtered out.
     applyHighlight();
+    if (autoFit && nodeState.size) {
+      const changed = !fittedNodeIds
+        || fittedNodeIds.size !== nodeState.size
+        || [...nodeState.keys()].some((id) => !fittedNodeIds.has(id));
+      if (changed) {
+        fittedNodeIds = new Set(nodeState.keys());
+        fitScheduled = true;
+      }
+    }
   }
 
   // The panel's "Entities" slider: rescale every sphere in place (the
@@ -470,6 +505,13 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     if (nodeState.size) {
       stepPhysics();
       for (const entry of nodeState.values()) entry.mesh.position.copy(entry.pos);
+    }
+    // autoFit: apply the scheduled framing once the layout has settled
+    // (alpha decayed below 0.2). If the user interacted meanwhile, drop the
+    // fit instead of overriding their camera.
+    if (fitScheduled) {
+      fitScheduled = false;
+      if (alpha < 0.2 && now - orbit.lastInteraction > 10000) fitCamera();
     }
     updateEdgePositions();
     updateCamera(deltaMs);

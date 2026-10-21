@@ -76,6 +76,7 @@ function setGraphView(view) {
     graph3d = createGraph3D(el.graph3dStage, {
       userName: config?.user || null,
       nodeScale: graphScales.node,
+      autoFit: true,
       onNodeClick: (nodeId) => loadGraph(nodeId),
       onFallback: () => {
         graph3dFailed = true;

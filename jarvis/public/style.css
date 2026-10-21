@@ -311,6 +311,27 @@ body:not(.authenticated) .app-ui {
   text-transform: uppercase;
 }
 
+/* Small "about JARVIS" link under the eyebrow: a quiet pill pointing at the
+   Wikipedia J.A.R.V.I.S. article. Theme variables only, so the a1 skin's
+   light surfaces and accent color pick it up without a separate rule. */
+.about-link {
+  display: inline-block;
+  margin: 0 0 12px;
+  padding: 2px 10px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-decoration: none;
+  border: 1px solid var(--muted);
+  border-radius: 999px;
+}
+
+.about-link:hover,
+.about-link:focus-visible {
+  color: var(--cyan);
+  border-color: var(--cyan);
+}
+
 h1 {
   margin: 0;
   /* 30% smaller than the base headline scale, on top of the global root
