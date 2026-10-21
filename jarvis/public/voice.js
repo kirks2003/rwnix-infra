@@ -24,6 +24,11 @@ export const voiceProfiles = {
     gender: "male",
     neural: true,
     ttsVoice: "bm_george",
+    // "soft" selects the gentler mainframe chain in buildChain: the owner found
+    // the full 1960s-speaker shaping too machine-like for bm_george, so HAL keeps
+    // its band-limit/chest/compression identity at a lower intensity (the other
+    // neural profiles keep the full chain).
+    chain: "soft",
     // speechSynthesis fallback: slow and flat, the only HAL traits it can reproduce.
     rate: 0.88,
     pitch: 0.5,
@@ -579,14 +584,20 @@ export class NeuralVoice {
 
   // 1960s mainframe speaker: band-limited, chest-heavy, evenly compressed, with a
   // small amount of room tail so the delivery sounds like it comes from a bulkhead.
+  // Profiles with chain: "soft" (hal9000) run the same identity at a gentler
+  // intensity — wider band, lighter chest boost and scoop, looser compression and
+  // a shorter room tail — so the neural voice underneath stays recognizable.
   buildChain(context) {
-    const highpass = new BiquadFilterNode(context, { type: "highpass", frequency: 95 });
-    const lowpass = new BiquadFilterNode(context, { type: "lowpass", frequency: 3800, Q: 0.7 });
-    const chest = new BiquadFilterNode(context, { type: "peaking", frequency: 220, Q: 0.8, gain: 4.5 });
-    const presence = new BiquadFilterNode(context, { type: "peaking", frequency: 1800, Q: 1.1, gain: -2.5 });
-    const compressor = new DynamicsCompressorNode(context, { threshold: -26, knee: 12, ratio: 7, attack: 0.004, release: 0.26 });
-    const reverb = new ConvolverNode(context, { buffer: impulseResponse(context, 1.1) });
-    const wet = new GainNode(context, { gain: 0.16 });
+    const soft = this.profile.chain === "soft";
+    const highpass = new BiquadFilterNode(context, { type: "highpass", frequency: soft ? 80 : 95 });
+    const lowpass = new BiquadFilterNode(context, { type: "lowpass", frequency: soft ? 5200 : 3800, Q: 0.7 });
+    const chest = new BiquadFilterNode(context, { type: "peaking", frequency: 220, Q: 0.8, gain: soft ? 2.5 : 4.5 });
+    const presence = new BiquadFilterNode(context, { type: "peaking", frequency: 1800, Q: 1.1, gain: soft ? -1.5 : -2.5 });
+    const compressor = new DynamicsCompressorNode(context, soft
+      ? { threshold: -24, knee: 16, ratio: 4, attack: 0.006, release: 0.22 }
+      : { threshold: -26, knee: 12, ratio: 7, attack: 0.004, release: 0.26 });
+    const reverb = new ConvolverNode(context, { buffer: impulseResponse(context, soft ? 0.7 : 1.1) });
+    const wet = new GainNode(context, { gain: soft ? 0.1 : 0.16 });
     const dry = new GainNode(context, { gain: 0.9 });
     const output = new GainNode(context, { gain: 1 });
     // Parallel tap on the shaped output: the waveform ring sees the agent's

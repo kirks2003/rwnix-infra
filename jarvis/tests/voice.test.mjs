@@ -355,3 +355,50 @@ test("the butler closing matches the language and kind and stays in its list", (
     }
   }
 });
+
+test("hal9000 runs the softened mainframe chain, the other neural profiles keep the full one", () => {
+  const recorded = [];
+  const rec = (kind) => class {
+    constructor(context, options) { recorded.push({ kind, options }); }
+    connect(target) { return target; }
+    disconnect() {}
+  };
+  globalThis.BiquadFilterNode = rec("biquad");
+  globalThis.DynamicsCompressorNode = rec("compressor");
+  globalThis.ConvolverNode = rec("convolver");
+  globalThis.GainNode = rec("gain");
+  globalThis.AnalyserNode = rec("analyser");
+  globalThis.AudioBufferSourceNode = rec("source");
+  const dest = rec("dest");
+  globalThis.AudioContext = class {
+    constructor() { this.sampleRate = 48000; this.state = "running"; this.destination = new dest(); }
+    createBuffer() { return { getChannelData: () => new Float32Array(16) }; }
+    async resume() {}
+    async close() { this.state = "closed"; }
+  };
+  const chainOf = (profile) => {
+    const before = recorded.length;
+    const voice = new NeuralVoice(new AbortController().signal, profile);
+    voice.close();
+    return recorded.slice(before);
+  };
+  const biquads = (chain) => chain.filter((node) => node.kind === "biquad").map((node) => node.options);
+  const compressor = (chain) => chain.find((node) => node.kind === "compressor").options;
+  const gains = (chain) => chain.filter((node) => node.kind === "gain").map((node) => node.options.gain);
+  const hal = chainOf(voiceProfiles.hal9000);
+  const commander = chainOf(voiceProfiles.commander);
+  // hal9000 keeps the chain shape (4 biquads, compressor, convolver, wet/dry)
+  // at the owner-requested softened intensity.
+  assert.deepEqual(biquads(hal).map((o) => o.frequency), [80, 5200, 220, 1800]);
+  assert.equal(biquads(hal)[2].gain, 2.5, "chest boost softened");
+  assert.equal(biquads(hal)[3].gain, -1.5, "presence dip softened");
+  assert.equal(compressor(hal).ratio, 4);
+  assert.equal(compressor(hal).knee, 16);
+  assert.deepEqual(gains(hal), [0.1, 0.9, 1], "shorter, drier room tail (wet, dry, output)");
+  // The other neural profiles keep the full 1960s-speaker shaping.
+  assert.deepEqual(biquads(commander).map((o) => o.frequency), [95, 3800, 220, 1800]);
+  assert.equal(biquads(commander)[2].gain, 4.5);
+  assert.equal(biquads(commander)[3].gain, -2.5);
+  assert.equal(compressor(commander).ratio, 7);
+  assert.deepEqual(gains(commander), [0.16, 0.9, 1], "full chain (wet, dry, output)");
+});
