@@ -1574,6 +1574,12 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
       // A scrollbar that takes layout width, not a 0-width overlay bar that
       // fades out at rest: the bar is how you know you can scroll back.
       scrollbarGutter: list.offsetWidth - list.clientWidth,
+      // The 2026-10-21 (later) owner pass: the history/answer field carries
+      // the same mouse resize grip as the prompt field, and the old 352px
+      // cap became a floor for the cap (max(352px, 70vh)), so the grip can
+      // actually enlarge the field.
+      listResize: getComputedStyle(list).resize,
+      listMaxHeightPx: parseFloat(getComputedStyle(list).maxHeight),
     };
   });
   assert.ok(layout.stripHeight < 150,
@@ -1598,6 +1604,10 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     `Send must be at the +20% scale (0.744rem), got font-size ${layout.sendFontSize}`);
   assert.ok(layout.scrollbarGutter > 0,
     `the history list needs a laid-out scrollbar, got ${layout.scrollbarGutter}px`);
+  assert.equal(layout.listResize, "vertical",
+    `the history/answer field must carry the same mouse resize grip as the prompt field, got "${layout.listResize}"`);
+  assert.ok(layout.listMaxHeightPx > 352,
+    `the history/answer field cap must sit above the old 352px wall so the grip can enlarge it, got ${layout.listMaxHeightPx}px`);
   assert.equal(await page.inputValue("#historyDays"), "24");
   assert.equal(await page.textContent("#historyDaysValue"), "24 days");
   await page.evaluate(() => {

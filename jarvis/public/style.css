@@ -757,12 +757,19 @@ progress {
       2026-10-21 follow-up pass makes the history area >= 15% taller
       (77/306 -> 89/352). */
   min-height: 89px;
-  max-height: 352px;
+  /* 2026-10-21 (later) owner request: the history/answer field carries the
+     same mouse resize grip as the prompt textarea (resize: vertical below).
+     The old 352px cap became a floor for the cap instead of a wall:
+     max(352px, 70vh) keeps the old value on short windows and lets the
+     field grow to 70vh of the viewport on normal ones, so dragging the
+     grip actually enlarges the field. min-height is the shrink floor. */
+  max-height: max(352px, 70vh);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   align-content: start;
   overflow-y: auto;
+  resize: vertical;
   overflow-wrap: anywhere;
   padding: 2px;
   /* Always-visible scrollbar: the history can run to days of entries, so the
@@ -811,7 +818,10 @@ body.panels-off .transcript-panel {
 
 body.panels-off .transcript-list {
   min-height: 178px;
-  max-height: 704px;
+  /* Same 2026-10-21 (later) resize pass: the old 704px cap becomes a floor
+     for the cap (max(704px, 85vh)) so the grip can enlarge the field on
+     taller screens while short windows keep the old value. */
+  max-height: max(704px, 85vh);
 }
 
 /* Prompts ("You") sit on the right in the standard --text color; answers
