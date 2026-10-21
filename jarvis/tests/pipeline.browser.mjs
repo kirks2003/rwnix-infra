@@ -1627,6 +1627,41 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     2, "the re-rendered window keeps the stored entries");
 });
 
+test("the answer panel opens half size by default and both resize grips are remembered", { timeout: 30000 }, async (t) => {
+  // 2026-10-21 (later still) owner pass: the answer panel's CSS default is
+  // HALF its cap, and the native resize grips of BOTH fields (history/answer
+  // list + prompt textarea) persist their position per browser.
+  const { page } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  const def = await page.evaluate(() => {
+    const list = document.getElementById("conversationText");
+    const cap = parseFloat(getComputedStyle(list).maxHeight);
+    return { height: parseFloat(getComputedStyle(list).height), cap };
+  });
+  assert.ok(Math.abs(def.height - def.cap / 2) < 1,
+    `the answer panel must open at half its cap by default, got ${def.height}px of a ${def.cap}px cap`);
+  // The native grip writes the chosen size to the element's inline style; the
+  // app mirrors it into localStorage. Simulate the grip by setting the same
+  // inline style on both fields and wait for the observer to persist.
+  await page.evaluate(() => {
+    document.getElementById("conversationText").style.height = "300px";
+    document.getElementById("manualPrompt").style.height = "140px";
+  });
+  await page.waitForFunction(() =>
+    localStorage.getItem("jarvis.transcriptListHeight") === "300" &&
+    localStorage.getItem("jarvis.promptHeight") === "140");
+  // After a reload both grip positions come back.
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  const restored = await page.evaluate(() => ({
+    list: parseFloat(getComputedStyle(document.getElementById("conversationText")).height),
+    prompt: parseFloat(getComputedStyle(document.getElementById("manualPrompt")).height),
+  }));
+  assert.ok(Math.abs(restored.list - 300) < 1,
+    `the history/answer grip position must survive a reload, got ${restored.list}px`);
+  assert.ok(Math.abs(restored.prompt - 140) < 1,
+    `the prompt grip position must survive a reload, got ${restored.prompt}px`);
+});
+
 test("conversation entries are aligned per role and offer a markdown Copy button", { timeout: 30000 }, async (t) => {
   // A fresh context with clipboard access (the 127.0.0.1 origin is a secure
   // context, so navigator.clipboard works natively); the history comes from

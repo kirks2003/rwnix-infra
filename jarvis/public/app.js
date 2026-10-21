@@ -55,6 +55,11 @@ const historyDaysStorageKey = "jarvis.historyDays";
 const historySearchStorageKey = "jarvis.historySearch";
 const aiProfileStorageKey = "jarvis.aiProfile";
 const whisperProfileStorageKey = "jarvis.whisperProfile";
+// 2026-10-21 (later still) owner request: the two mouse-resize fields (the
+// history/answer list and the prompt textarea) remember their grip position
+// per browser.
+const transcriptListHeightKey = "jarvis.transcriptListHeight";
+const promptHeightKey = "jarvis.promptHeight";
 let config;
 let authedUser = null;
 let voiceId = "browser";
@@ -817,6 +822,31 @@ function setPanelsVisible(value, persist) {
   }
 }
 el.panelsToggle.addEventListener("click", () => setPanelsVisible(!panelsVisible, true));
+
+// The native `resize: vertical` grip writes the chosen size to the element's
+// inline `style.height` — so a present inline height is the signal that a
+// user (or this restore) has picked a size, while CSS-driven size changes
+// (content growth, panels on/off) leave it empty and are never persisted.
+// rememberResizeHeight() restores a saved size on load and mirrors the
+// rendered height back to storage on every resize while an inline height is
+// present (global box-sizing is border-box, so the rendered outer height IS
+// the value to store back as style.height).
+function rememberResizeHeight(element, key) {
+  try {
+    const saved = Number(localStorage.getItem(key));
+    if (Number.isFinite(saved) && saved > 0) element.style.height = `${saved}px`;
+  } catch (error) {
+    log("settings", "Could not load the saved field size", { message: error.message });
+  }
+  new ResizeObserver(() => {
+    if (!element.style.height) return;
+    try {
+      localStorage.setItem(key, String(Math.round(element.getBoundingClientRect().height)));
+    } catch (error) {
+      log("settings", "Could not save the field size", { message: error.message });
+    }
+  }).observe(element);
+}
 
 // --- Knowledge graph panel ---------------------------------------------------
 // Third panel inside #panelsBelow, right under the mic level panel (pipeline,
@@ -2864,6 +2894,11 @@ async function loadConfig(userFromLogin) {
       log("settings", "Could not load panels setting");
     }
     setPanelsVisible(savedPanels === null ? true : savedPanels === "true", false);
+    // Restore the saved grip positions AFTER the panels mode is set, so the
+    // inline heights are clamped by the right min/max (and the half-cap CSS
+    // default applies to a browser with no saved size yet).
+    rememberResizeHeight(el.conversationText, transcriptListHeightKey);
+    rememberResizeHeight(el.manualPrompt, promptHeightKey);
     log("stt", `Configured STT profiles: ${config.whisperProfiles.map((profile) => `${profile.label} ${profile.endpoints.join(", ")}`).join(" | ")} (no request yet)`);
     el.armButton.disabled = el.sendManualButton.disabled = false;
     el.enableSwitch.disabled = false;
