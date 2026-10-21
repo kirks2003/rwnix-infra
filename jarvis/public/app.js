@@ -19,7 +19,7 @@ const el = Object.fromEntries([
   "manualPromptForm", "manualPrompt", "sendManualButton",
   "wakeWordForm", "wakeWordInput", "saveWakeWordButton", "wakeWordStatus",
   "voiceForm", "voiceSelect", "saveVoiceButton", "voiceStatus", "voiceSpeed", "voiceSpeedValue",
-  "languageSwitch", "languageStatus",
+  "languageSwitch", "languageStatus", "mcpMasterSwitch", "mcpMasterStatus",
   "aiProfileSelect", "aiProfileStatus", "aiProfileLed", "whisperProfileSelect", "whisperProfileStatus", "whisperProfileLed",
   "mcpSwitches",
   "websearchSourceList", "websearchAddForm", "websearchAddSource", "websearchAddUrl", "websearchAddButton", "websearchStatus",
@@ -546,7 +546,7 @@ function buildMcpSwitches() {
     wrap.className = "language-control";
     const button = document.createElement("button");
     button.id = `mcpSwitch-${server.id}`;
-    button.className = "lang-switch";
+    button.className = "lang-switch lang-switch-compact";
     button.type = "button";
     button.setAttribute("role", "switch");
     button.setAttribute("aria-checked", "false");
@@ -596,7 +596,24 @@ function setMcpFlag(id, value, persist) {
     status.textContent = `Active: ${server.label} ${state}.`;
   }
   log("settings", `${server.label} (MCP): ${state}`);
+  updateMcpMaster();
 }
+
+// MCP master switch in the conversation panel: one click turns every MCP
+// integration on or off (the per-server switches follow). Each flag is still
+// saved per server, exactly like clicking the individual switches.
+function updateMcpMaster() {
+  const anyOn = Object.keys(mcpFlags).some((id) => mcpFlags[id]);
+  el.mcpMasterSwitch.setAttribute("aria-checked", String(anyOn));
+  el.mcpMasterSwitch.setAttribute("aria-label", `MCP: ${anyOn ? "on" : "off"}`);
+  el.mcpMasterStatus.textContent = anyOn ? "MCP on." : "MCP off.";
+}
+el.mcpMasterSwitch.addEventListener("click", () => {
+  if (el.mcpMasterSwitch.disabled || !mcpServers.length) return;
+  const target = !Object.keys(mcpFlags).some((id) => mcpFlags[id]);
+  for (const server of mcpServers) setMcpFlag(server.id, target, true);
+  log("settings", `MCP: ${target ? "all on" : "all off"}`);
+});
 
 // The Websearch sources panel: this account's list of search engines, news
 // sources and feeds (the /api/websearch/sources endpoints). The server seeds
@@ -1190,6 +1207,7 @@ function stop(message = "Jarvis is disarmed.") {
   speechSynthesis.cancel();
   el.armButton.disabled = !config;
   el.sendManualButton.disabled = !config;
+  el.mcpMasterSwitch.disabled = !config;
   el.stopButton.disabled = true;
   syncEnableSwitch();
   for (const button of previewButtons) button.disabled = !config;
@@ -1214,6 +1232,7 @@ function newSession() {
   pipelineStatusOverride = null;
   el.armButton.disabled = true;
   el.sendManualButton.disabled = true;
+  el.mcpMasterSwitch.disabled = true;
   el.stopButton.disabled = false;
   syncEnableSwitch();
   for (const button of previewButtons) button.disabled = true;
@@ -1840,6 +1859,9 @@ async function loadConversationHistory() {
     const data = await response.json();
     el.conversationText.replaceChildren();
     const entries = data.entries || [];
+    promptHistory.length = 0;
+    promptHistoryIndex = null;
+    for (const entry of entries) rememberPrompt(entry.prompt);
     for (const entry of entries) {
       const ts = Date.parse(entry.ts) || Date.now();
       el.conversationText.append(transcriptEntry(entry.prompt, ts, "prompt"));
@@ -2275,6 +2297,7 @@ el.manualPromptForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const prompt = el.manualPrompt.value.trim();
   if (!prompt || current) return;
+  rememberPrompt(prompt);
   el.manualPrompt.value = "";
   const session = newSession();
   for (const name of ["wake", "record", "vad", "whisper"]) mark(name, "skipped");
@@ -2306,6 +2329,49 @@ el.manualPrompt.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey) || event.isComposing) return;
   event.preventDefault();
   if (!el.sendManualButton.disabled) el.manualPromptForm.requestSubmit(el.sendManualButton);
+});
+// Prompt history for the manual prompt box: ArrowUp walks to older prompts,
+// ArrowDown back to the text that was in the box when the walk started. The
+// list is the conversation history (newest last, refreshed with the History
+// slider) plus anything sent from this box. The caret stays at the end of
+// the recalled text.
+const promptHistory = [];
+let promptHistoryIndex = null;
+let promptHistoryCurrent = "";
+function rememberPrompt(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return;
+  if (promptHistory[promptHistory.length - 1] === trimmed) return;
+  promptHistory.push(trimmed);
+  if (promptHistory.length > 100) promptHistory.shift();
+}
+function recallPromptHistory(value) {
+  if (el.manualPrompt.value !== value) {
+    el.manualPrompt.value = value;
+    el.manualPrompt.setSelectionRange(value.length, value.length);
+  }
+}
+el.manualPrompt.addEventListener("keydown", (event) => {
+  if (event.isComposing) return;
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  if (!promptHistory.length) return;
+  event.preventDefault();
+  if (promptHistoryIndex === null) {
+    if (event.key === "ArrowDown") return;
+    promptHistoryCurrent = el.manualPrompt.value;
+    promptHistoryIndex = promptHistory.length;
+  }
+  if (event.key === "ArrowUp") {
+    if (promptHistoryIndex > 0) promptHistoryIndex -= 1;
+  } else {
+    if (promptHistoryIndex < promptHistory.length) promptHistoryIndex += 1;
+    if (promptHistoryIndex >= promptHistory.length) {
+      promptHistoryIndex = null;
+      recallPromptHistory(promptHistoryCurrent);
+      return;
+    }
+  }
+  recallPromptHistory(promptHistory[promptHistoryIndex]);
 });
 el.clearLogButton.addEventListener("click", () => { el.log.textContent = ""; });
 el.voiceSpeed.addEventListener("input", () => {
@@ -2481,6 +2547,7 @@ el.armButton.disabled = el.sendManualButton.disabled = true;
 el.enableSwitch.disabled = true;
 for (const button of previewButtons) button.disabled = true;
 el.languageSwitch.disabled = true;
+el.mcpMasterSwitch.disabled = true;
 el.speakSwitch.disabled = true;
 el.aiProfileSelect.disabled = true;
 el.whisperProfileSelect.disabled = true;
@@ -2746,6 +2813,8 @@ async function loadConfig(userFromLogin) {
       setMcpFlag(server.id, saved === "true", false);
       document.getElementById(`mcpSwitch-${server.id}`).disabled = false;
     }
+    updateMcpMaster();
+    el.mcpMasterSwitch.disabled = false;
     // The Websearch sources panel is per-account on the server: load the
     // list (seeded with the built-in baseline on first use) and unlock the
     // add form.

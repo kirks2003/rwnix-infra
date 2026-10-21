@@ -853,6 +853,104 @@ function vikunjaRegionFor(host) {
 }
 if (vikunjaConfigured) mcpServers.push({ id: "vikunja", label: "Vikunja" });
 
+// Mesh-internal service MCPs (the vm104 "privat" deployment). Every entry is
+// env-gated: nothing starts unless the deployment sets the matching env, so
+// a deployment without these services simply never offers the switches. The
+// scope IS the transport — the shared kandev SSH key for the ssh entries,
+// the local/loopback MCP endpoint for the kandev entries, the Checkmk API
+// token for the checkmk entries — so each server id gets ONE shared child,
+// no per-user pinning like Vikunja's. Tool names are namespaced
+// `${id}_${tool}` (no id below contains an underscore, so the split is
+// unambiguous), and the prefix tells the brain which host a tool acts on.
+const MCP_SSH_USER = process.env.MCP_SSH_USER || "ubuntu";
+const MCP_SSH_KEY = process.env.MCP_SSH_KEY || "/data/home/.ssh/kandev";
+const mcpSshArgs = (host, remoteCommand) =>
+  [
+    "-T",
+    "-i", MCP_SSH_KEY,
+    "-o", "BatchMode=yes",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "StrictHostKeyChecking=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
+    `${MCP_SSH_USER}@${host}`,
+    remoteCommand,
+  ];
+const externalMcpServers = [];
+function externalSshMcp(id, label, hostEnv, remoteCommand, note) {
+  const host = process.env[hostEnv];
+  if (!host) return;
+  externalMcpServers.push({ id, label, command: "ssh", args: mcpSshArgs(host, remoteCommand), note });
+}
+function externalLocalMcp(id, label, args, extraEnv = {}, note) {
+  externalMcpServers.push({ id, label, command: process.execPath, args, extraEnv, note });
+}
+// The ssh remote command starts in the user's home dir, so the mcp CLI needs
+// an explicit cd: `mcp run server.py:mcp` resolves server.py against the CWD
+// and exits with "File not found: /home/ubuntu/server.py" without it.
+const MCP_BASH_COMMAND = "cd /home/ubuntu/mcp-bash && exec /home/ubuntu/mcp-bash/.venv/bin/mcp run server.py:mcp";
+externalSshMcp(
+  "ssh-nbg", "SSH nbg-1", "MCP_SSH_NBG_HOST", MCP_BASH_COMMAND,
+  "A shell on nbg-1, the German WireGuard mesh hub (Ubuntu server: Docker host, ufw, the wg-easy hub and the monitoring stack). Tools: execute_bash (one bash command at a time, stdout+stderr back) and set_cwd. This is a LIVE PRODUCTION host: run only what the user explicitly asks for, never run destructive commands, and after any change say what you changed and how you verified it.",
+);
+externalSshMcp(
+  "ssh-vie1", "SSH vie-1", "MCP_SSH_VIE1_HOST", MCP_BASH_COMMAND,
+  "A shell on vie-1, the Austrian WireGuard mesh hub (Ubuntu server: Docker host, ufw, the wg-easy hub and the monitoring stack). Tools: execute_bash (one bash command at a time, stdout+stderr back) and set_cwd. This is a LIVE PRODUCTION host: run only what the user explicitly asks for, never run destructive commands, and after any change say what you changed and how you verified it.",
+);
+externalSshMcp(
+  "sem-nbg", "Semaphore nbg-1", "MCP_SEM_NBG_HOST",
+  "docker exec -i semaphore-mcp semaphore-mcp --transport stdio",
+  "Semaphore (the Ansible runbook UI) on nbg-1: list and read its projects, playbooks, inventory and runs. Starting or stopping a run changes real systems: do it only when the user explicitly asked for that run, and confirm exactly which run you started or stopped.",
+);
+externalSshMcp(
+  "sem-vie1", "Semaphore vie-1", "MCP_SEM_VIE1_HOST",
+  "docker exec -i semaphore-mcp semaphore-mcp --transport stdio",
+  "Semaphore (the Ansible runbook UI) on vie-1: list and read its projects, playbooks, inventory and runs. Starting or stopping a run changes real systems: do it only when the user explicitly asked for that run, and confirm exactly which run you started or stopped.",
+);
+const mcpKandevBridgeCommand = (port) => `node /home/ubuntu/mcp-stdio-bridge.mjs http://127.0.0.1:${port}/mcp`;
+externalSshMcp(
+  "kandev-nbg", "Kandev nbg-1", "MCP_KANDEV_NBG_HOST", mcpKandevBridgeCommand(38429),
+  "The Kandev task manager on nbg-1: list, read, create and update its tasks, workspaces, workflows and agent sessions. Use it when the user asks what tasks or agents exist there or wants one created or updated; confirm what you created or changed.",
+);
+externalSshMcp(
+  "kandev-vie1", "Kandev vie-1", "MCP_KANDEV_VIE1_HOST", mcpKandevBridgeCommand(38429),
+  "The Kandev task manager on vie-1: list, read, create and update its tasks, workspaces, workflows and agent sessions. Use it when the user asks what tasks or agents exist there or wants one created or updated; confirm what you created or changed.",
+);
+if (process.env.MCP_KANDEV_VM104_URL) {
+  externalLocalMcp(
+    "kandev-vm104", "Kandev vm104",
+    [path.join(__dirname, "mcp", "remote-http.mjs"), process.env.MCP_KANDEV_VM104_URL],
+    { KANDEV_HTTP_TIMEOUT_MS: String(process.env.MCP_KANDEV_VM104_TIMEOUT_MS || 30000) },
+    "The Kandev task manager on vm104 — the machine this assistant runs on: list, read, create and update its tasks, workspaces, workflows and agent sessions. Use it when the user asks what tasks or agents exist here or wants one created or updated; confirm what you created or changed.",
+  );
+}
+if (process.env.CHECKMK_NBG_URL && process.env.CHECKMK_NBG_TOKEN) {
+  externalLocalMcp(
+    "checkmk-nbg", "Checkmk nbg-1",
+    [path.join(__dirname, "mcp", "checkmk.mjs")],
+    {
+      CHECKMK_BASE_URL: process.env.CHECKMK_NBG_URL,
+      CHECKMK_TOKEN: process.env.CHECKMK_NBG_TOKEN,
+      CHECKMK_INSECURE: process.env.CHECKMK_NBG_INSECURE || "0",
+    },
+    "The Checkmk monitoring instance for the nbg-1 side of the mesh: query hosts, services and their states (OK/WARNING/CRITICAL/UNKNOWN). Use cmk_hosts to find a host and cmk_services to see what fails on it.",
+  );
+}
+if (process.env.CHECKMK_VIE1_URL && process.env.CHECKMK_VIE1_TOKEN) {
+  externalLocalMcp(
+    "checkmk-vie1", "Checkmk vie-1",
+    [path.join(__dirname, "mcp", "checkmk.mjs")],
+    {
+      CHECKMK_BASE_URL: process.env.CHECKMK_VIE1_URL,
+      CHECKMK_TOKEN: process.env.CHECKMK_VIE1_TOKEN,
+      CHECKMK_INSECURE: process.env.CHECKMK_VIE1_INSECURE || "0",
+    },
+    "The Checkmk monitoring instance for the vie-1 side of the mesh: query hosts, services and their states (OK/WARNING/CRITICAL/UNKNOWN). Use cmk_hosts to find a host and cmk_services to see what fails on it.",
+  );
+}
+for (const entry of externalMcpServers) mcpServers.push({ id: entry.id, label: entry.label });
+
 function normalizeSelectorId(value) {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -1916,6 +2014,47 @@ const mcpGraph = new McpClient(
   },
 );
 
+// The external (mesh-internal) service MCP clients, one shared child per
+// server id (see the registry above). Tool lists are cached after the first
+// successful listing; if the child later dies (ssh drop, container restart),
+// McpClient.start() respawns and re-initializes it on the next call, so the
+// cached schema stays valid.
+const EXTERNAL_TOOL_TIMEOUT_MS = Number(process.env.MCP_EXTERNAL_TOOL_TIMEOUT_MS || 30000);
+const externalMcpClients = new Map();
+const externalMcpToolCaches = new Map(); // id -> { openai: [...], lookup: Map<namespaced, {client, tool, entry}> }
+function externalMcpClientFor(entry) {
+  let client = externalMcpClients.get(entry.id);
+  if (!client) {
+    client = new McpClient(entry.command, entry.args, entry.extraEnv || {});
+    externalMcpClients.set(entry.id, client);
+  }
+  return client;
+}
+async function externalMcpToolsFor(entry, signal) {
+  const cached = externalMcpToolCaches.get(entry.id);
+  if (cached) return cached;
+  const client = externalMcpClientFor(entry);
+  const listed = await withAbort(client.listTools(20000), signal);
+  const openai = [];
+  const lookup = new Map();
+  for (const tool of listed.tools || []) {
+    const name = `${entry.id}_${tool.name}`;
+    if (!name) continue;
+    lookup.set(name, { client, tool: tool.name, entry });
+    openai.push({
+      type: "function",
+      function: {
+        name,
+        description: `[${entry.label}] ${tool.description || tool.name}`.slice(0, 500),
+        parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} },
+      },
+    });
+  }
+  const result = { openai, lookup };
+  externalMcpToolCaches.set(entry.id, result);
+  return result;
+}
+
 // Vikunja MCP servers (@eargollo/vikunja-mcp, stdio): one child per
 // (region, user), each pinned to that user's own API token for that region's
 // instance — there is no per-call user injection to get wrong, the token IS
@@ -2106,6 +2245,23 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
       mcpStates.push("Vikunja (the task manager) is OFF in the user's browser for this request: you cannot see or change their tasks, projects or lists. If the user asks about their tasks or asks you to manage them, say the MCP Vikunja toggle in the UI is off for now and they can switch it on.");
     }
   }
+  const externalMcpEntries = [];
+  for (const entry of externalMcpServers) {
+    if (!mcpFlags[entry.id]) {
+      mcpStates.push(`${entry.label} is OFF in the user's browser for this request: do not claim access to it and do not act on it.`);
+      continue;
+    }
+    try {
+      const { openai, lookup } = await externalMcpToolsFor(entry, signal);
+      if (!openai.length) throw new Error("the MCP server offered no tools");
+      externalMcpEntries.push({ ...entry, openai, lookup });
+      mcpStates.push(`${entry.label} is ON: ${entry.note} Its tools are namespaced ${entry.id}_<tool> (for example ${openai[0].function.name}).`);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      console.log(JSON.stringify({ level: "warn", requestId, msg: "external_mcp_tools_failed", server: entry.id, error: error.message }));
+      mcpStates.push(`${entry.label} is ON, but the service is currently unreachable; answer from your own knowledge and do not claim access to it.`);
+    }
+  }
   // The whole leading block - persona, MCP state, web-search results and
   // graph context - is ONE system message: strict OpenAI-compatible
   // endpoints (OVH AI Endpoints) reject a second leading system message
@@ -2126,7 +2282,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults, webSources, graphUsed, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), webSourcesList, vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
+  const { data, webResults, webSources, graphUsed, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), webSourcesList, vikunjaTools, vikunjaClient, vikunjaToolNames, externalMcp: externalMcpEntries, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -2529,7 +2685,7 @@ function graphToolDetail(name, args) {
   return parts.length ? `${name}: ${parts.join(", ")}` : name;
 }
 
-async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, webSourcesList = null, vikunjaTools = null, vikunjaClient = null, vikunjaToolNames = null, admin = false, lang = "de", historySettings = normalizeHistorySettings(), requestId, signal, headers, deadlineMs }) {
+async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, webSourcesList = null, vikunjaTools = null, vikunjaClient = null, vikunjaToolNames = null, externalMcp = [], admin = false, lang = "de", historySettings = normalizeHistorySettings(), requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
   const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
   // Web tool results collected for post-turn ingestion (the extractor reads
@@ -2544,6 +2700,8 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
   // conversation and has no browser toggle, so the brain can always reach
   // back past its in-context window.
   const hasTools = true;
+  const externalLookup = new Map();
+  for (const entry of externalMcp) for (const [name, target] of entry.lookup) externalLookup.set(name, target);
   for (let round = 0; ; round += 1) {
     const body = {
       model: brainProfile.model,
@@ -2555,7 +2713,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
       // budget at the measured ~150 tok/s while staying inside the timeout.
       max_tokens: 4096,
     };
-    if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : []), ...(vikunjaTools || []), ...historyTools()];
+    if (hasTools) body.tools = [...(useTools ? graphTools(admin) : []), ...(webToolsOn ? webTools() : []), ...(vikunjaTools || []), ...externalMcp.flatMap((entry) => entry.openai), ...historyTools()];
     let data;
     try {
       const response = await fetch(`${brainProfile.baseUrl}/chat/completions`, {
@@ -2695,6 +2853,21 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
           console.log(JSON.stringify({ level: "warn", requestId, msg: "vikunja_tool", tool: name, ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started }));
           local.push({ role: "tool", tool_call_id: call.id, content: `Vikunja lookup failed: ${error.message}. Answer from what you know.` });
         }
+      } else if (externalLookup.has(name)) {
+        // Mesh-internal service tools (namespaced <id>_<tool>): one shared
+        // child per service, so the call itself carries no user context —
+        // the transport (ssh key / API token / loopback endpoint) IS the scope.
+        const { client, tool, entry } = externalLookup.get(name);
+        try {
+          const result = await withAbort(client.call(tool, args, EXTERNAL_TOOL_TIMEOUT_MS), totalSignal);
+          const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
+          console.log(JSON.stringify({ level: "info", requestId, msg: "external_mcp_tool", server: entry.id, tool: name, ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));
+          local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
+        } catch (error) {
+          if (totalSignal.aborted) throw error;
+          console.log(JSON.stringify({ level: "warn", requestId, msg: "external_mcp_tool", server: entry.id, tool: name, ok: false, error: String(error.message || error).slice(0, 200), ms: Date.now() - started }));
+          local.push({ role: "tool", tool_call_id: call.id, content: `${entry.label} lookup failed: ${error.message}. Answer from what you know.` });
+        }
       } else {
         // A write-tool name from a non-admin brain (or a typo) is still an
         // attempted write: audit it as one, even though nothing ran.
@@ -2705,6 +2878,7 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
           ...(useTools ? ["get-schema", "get-entity", "list-my-knowledge", "list-my-facts", "store-entity", "store-fact", "rename-entity", "delete-entity"] : []),
           ...(webToolsOn ? ["web_search", "web_news", "web_fetch"] : []),
           ...(vikunjaToolNames ? [...vikunjaToolNames] : []),
+          ...externalLookup.keys(),
         ];
         local.push({ role: "tool", tool_call_id: call.id, content: `Unknown tool. Use: ${available.join(", ")}.` });
       }

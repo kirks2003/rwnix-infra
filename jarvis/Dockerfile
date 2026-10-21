@@ -14,8 +14,11 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # binary for node 20 (node:20-slim), so its native module compiles at build
 # time; python3/make/g++ exist only for that compile step and are removed
 # again afterwards to keep the image small.
+# openssh-client stays installed: the mesh-internal MCP servers (ssh-nbg,
+# ssh-vie1, sem-*, kandev-*) run `ssh` from inside the container against the
+# shared key mounted at /root/.ssh/kandev (see docker-compose.yml).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 make g++ \
+    && apt-get install -y --no-install-recommends python3 make g++ openssh-client \
     && npm install --omit=dev \
     && apt-get purge -y --auto-remove python3 make g++ \
     && rm -rf /var/lib/apt/lists/*

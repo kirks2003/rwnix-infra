@@ -76,8 +76,11 @@
           <h2>Conversation</h2>
           <div id="conversationText" class="transcript-list" aria-live="polite"></div>
           <form id="manualPromptForm" class="manual-prompt">
-            <textarea id="manualPrompt" rows="2" aria-keyshortcuts="Control+Enter"
-                      placeholder="Type a prompt here (when disarmed) and press Send or Ctrl+Enter..."></textarea>
+            <div class="prompt-field">
+              <textarea id="manualPrompt" rows="2" aria-keyshortcuts="Control+Enter"
+                        placeholder="Type a prompt here (when disarmed) and press Send or Ctrl+Enter..."></textarea>
+              <button id="sendManualButton" type="submit" title="Send (Ctrl+Enter)" disabled>Send</button>
+            </div>
            <div id="pipelineMini" class="pipeline-mini" aria-label="Pipeline stages">
               <span class="pipeline-mini-stage" data-step="wake" data-state="idle">Wake word</span>
               <span class="pipeline-mini-stage" data-step="record" data-state="idle">Record</span>
@@ -85,15 +88,38 @@
               <span class="pipeline-mini-stage" data-step="whisper" data-state="idle">Whisper</span>
               <span class="pipeline-mini-stage" data-step="brain" data-state="idle">Brain</span>
               <span class="pipeline-mini-stage" data-step="tts" data-state="idle">Speech</span>
-            </div>
-            <button id="sendManualButton" type="submit" title="Send (Ctrl+Enter)" disabled>Send</button>
-            <div class="transcript-controls">
-              <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>
-              <input id="historyDays" type="range" min="1" max="31" step="1" value="24"
-                     aria-describedby="historyDaysStatus" disabled>
-              <p id="historyDaysStatus" role="status">Loading history settings.</p>
-            </div>
-          </form>
+             </div>
+             <div id="promptMcpRow" class="prompt-mcp-row">
+               <div class="language-control">
+                 <button id="mcpMasterSwitch" class="lang-switch lang-switch-compact" type="button" role="switch" aria-checked="false"
+                         title="Turns every MCP integration on or off for this session (websearch, knowledge graph, task manager and the service servers)."
+                         disabled>
+                   <span class="lang-option">MCP off</span>
+                   <span class="lang-option">MCP on</span>
+                   <span class="lang-knob" aria-hidden="true"></span>
+                 </button>
+                 <p id="mcpMasterStatus" role="status">MCP off.</p>
+               </div>
+               <div class="language-control">
+                 <button id="languageSwitch" class="lang-switch lang-switch-compact" type="button" role="switch" aria-checked="false"
+                         title="Switches Whisper, brain and spoken output between English and German, live.
+                                German answers are spoken with the browser voice (the self-hosted TTS engine is English-only)."
+                         disabled>
+                   <span class="lang-option">English</span>
+                   <span class="lang-option">Deutsch</span>
+                   <span class="lang-knob" aria-hidden="true"></span>
+                 </button>
+                 <p id="languageStatus" role="status">Loading language settings.</p>
+               </div>
+               <div class="mcp-switches" id="mcpSwitches"></div>
+             </div>
+             <div class="transcript-controls">
+               <label for="historyDays">History <output id="historyDaysValue">24 days</output></label>
+               <input id="historyDays" type="range" min="1" max="31" step="1" value="24"
+                      aria-describedby="historyDaysStatus" disabled>
+               <p id="historyDaysStatus" role="status">Loading history settings.</p>
+             </div>
+            </form>
         </div>
       </section>
 
@@ -222,18 +248,6 @@
           <button id="armButton" type="button"
                   title="Unlocks audio and starts wake listening. An armed session keeps listening when you minimize the window or switch tab; only Stop, an error or leaving the page releases the microphone.">Arm Jarvis</button>
           <button id="stopButton" type="button" disabled>Stop</button>
-          <div class="language-control">
-            <button id="languageSwitch" class="lang-switch" type="button" role="switch" aria-checked="false"
-                    title="Switches Whisper, brain and spoken output between English and German, live.
-                           German answers are spoken with the browser voice (the self-hosted TTS engine is English-only)."
-                    disabled>
-              <span class="lang-option">English</span>
-              <span class="lang-option">Deutsch</span>
-              <span class="lang-knob" aria-hidden="true"></span>
-            </button>
-            <p id="languageStatus" role="status">Loading language settings.</p>
-          </div>
-          <div class="mcp-switches" id="mcpSwitches"></div>
         </section>
 
         <section class="panel websearch-panel" id="websearchPanel">

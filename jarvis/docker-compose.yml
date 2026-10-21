@@ -35,6 +35,14 @@ services:
       # The SQLite conversation database (CONVERSATION_DB_PATH points here):
       # the Prompt/Answer panels' history must survive container rebuilds.
       - jarvis_data:/data
+      # Mesh-internal MCP scope (2026-10-21): the shared kandev SSH key and
+      # the host known_hosts, read-only, under /root/.ssh — the container
+      # runs as root, so this is ssh's default known_hosts location, and
+      # .env points MCP_SSH_KEY at the key. The key IS the scope of the
+      # ssh-* / sem-* / kandev-* MCP servers; without these mounts they
+      # cannot authenticate.
+      - /home/ubuntu/.ssh/kandev:/root/.ssh/kandev:ro
+      - /home/ubuntu/.ssh/known_hosts:/root/.ssh/known_hosts:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

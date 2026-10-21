@@ -920,6 +920,68 @@ test("MCP web-search toggle is saved, restored and sent with brain requests", { 
   assert.deepEqual(calls.mcp, { websearch: true, vikunja: false });
 });
 
+test("MCP master switch flips every server flag and tracks any-on state", { timeout: 30000 }, async (t) => {
+  const { page } = await setup(t, async () => ({ text: "", noSpeech: true }), {
+    silent: true,
+    config: { mcpServers: [{ id: "websearch", label: "Web search" }, { id: "vikunja", label: "Vikunja" }] },
+  });
+  await page.click("#stopButton");
+  // Both off at first: the master reports off.
+  assert.equal(await page.getAttribute("#mcpMasterSwitch", "aria-checked"), "false");
+  await page.click("#mcpMasterSwitch");
+  assert.equal(await page.getAttribute("#mcpMasterSwitch", "aria-checked"), "true");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.mcp.websearch")), "true");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.mcp.vikunja")), "true");
+  // One per-server switch off: the master stays on (Vikunja is still on).
+  await page.click("#mcpSwitch-websearch");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.mcp.websearch")), "false");
+  assert.equal(await page.getAttribute("#mcpMasterSwitch", "aria-checked"), "true",
+    "the master tracks any-on, so it stays on while one server remains on");
+  // Master click again: everything off.
+  await page.click("#mcpMasterSwitch");
+  assert.equal(await page.getAttribute("#mcpMasterSwitch", "aria-checked"), "false");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.mcp.websearch")), "false");
+  assert.equal(await page.evaluate(() => localStorage.getItem("jarvis.mcp.vikunja")), "false");
+  await page.reload();
+  await page.waitForFunction(() => !document.getElementById("armButton").disabled);
+  assert.equal(await page.getAttribute("#mcpSwitch-vikunja", "aria-checked"), "false");
+  assert.equal(await page.getAttribute("#mcpMasterSwitch", "aria-checked"), "false");
+});
+
+test("ArrowUp and ArrowDown recall prompt history in the manual prompt box", { timeout: 30000 }, async (t) => {
+  const { page } = await setup(t, async () => ({ text: "", noSpeech: true }), { silent: true });
+  await page.click("#stopButton");
+  const setPrompt = (value) => page.evaluate((v) => {
+    const input = document.getElementById("manualPrompt");
+    input.value = v;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, value);
+  const stopped = () => page.waitForFunction(
+    () => document.getElementById("stageTitle").textContent === "Stopped", null, { timeout: 15000 });
+  // Two sent prompts fill the box history (newest last).
+  await setPrompt("First question?");
+  await page.click("#sendManualButton");
+  await stopped();
+  await setPrompt("Second question?");
+  await page.click("#sendManualButton");
+  await page.waitForFunction(() => window.savedUtterances.length >= 2, null, { timeout: 15000 });
+  // ArrowUp recalls the newest prompt, then the older one, then holds.
+  await page.focus("#manualPrompt");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await page.inputValue("#manualPrompt"), "Second question?");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await page.inputValue("#manualPrompt"), "First question?");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await page.inputValue("#manualPrompt"), "First question?", "the oldest prompt holds");
+  // ArrowDown walks back to the text that was in the box when the walk
+  // started (the box was empty after the send).
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await page.inputValue("#manualPrompt"), "Second question?");
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await page.inputValue("#manualPrompt"), "",
+    "ArrowDown at the newest prompt restores the pre-recall text");
+});
+
 test("chat requests carry the active wake phrase so the brain answers as its name", { timeout: 20000 }, async (t) => {
   // The brain's name is the wake word's name, and personal wake words are
   // per-browser: the /api/chat body must carry the active phrase (server
@@ -1480,22 +1542,35 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
     const slider = document.getElementById("historyDays");
     return { min: slider.min, max: slider.max, step: slider.step };
   }), { min: "1", max: "31", step: "1" }, "the day window is a 1..31 slider");
-  // The slider's own controls must stay compact, on their own row below
-  // Send. It used to be styled by `.transcript > div`, which matched the conversation controls
-  // and gave them the panel's min-height — a near-empty box that pushed
-  // the conversation off the first screen. Pin it short, and pin that the
-  // panel keeps the tall styling.
+  // The slider's own controls must stay compact, on their own row directly
+  // under the mini pipeline + the compact MCP/language row. The Send button
+  // (2026-10-21 owner pass) sits inside the prompt field, bottom-right, at
+  // +20% of the compact scale. Pin the strip short and the panel tall.
   const layout = await page.evaluate(() => {
     const strip = document.querySelector(".transcript-controls");
     const panel = document.getElementById("conversationText").closest(".transcript-panel");
     const list = document.getElementById("conversationText");
     const button = document.getElementById("sendManualButton");
+    const field = document.querySelector(".prompt-field");
+    const mini = document.getElementById("pipelineMini");
+    const mcpRow = document.getElementById("promptMcpRow");
     return {
       stripHeight: strip.getBoundingClientRect().height,
       panelHeight: panel.getBoundingClientRect().height,
       panelTop: panel.getBoundingClientRect().top + window.scrollY,
       historyTop: strip.getBoundingClientRect().top,
+      miniBottom: mini.getBoundingClientRect().bottom,
+      mcpRowBottom: mcpRow.getBoundingClientRect().bottom,
+      fieldTop: field.getBoundingClientRect().top,
+      fieldRight: field.getBoundingClientRect().right,
+      fieldBottom: field.getBoundingClientRect().bottom,
+      sendTop: button.getBoundingClientRect().top,
+      sendRight: button.getBoundingClientRect().right,
       sendBottom: button.getBoundingClientRect().bottom,
+      // The root font-size is scaled (html { font-size: 82.944% }), so
+      // resolve the expected 0.744rem against the live root, not 16px.
+      sendFontSize: getComputedStyle(button).fontSize,
+      rootFontSize: getComputedStyle(document.documentElement).fontSize,
       // A scrollbar that takes layout width, not a 0-width overlay bar that
       // fades out at rest: the bar is how you know you can scroll back.
       scrollbarGutter: list.offsetWidth - list.clientWidth,
@@ -1504,11 +1579,23 @@ test("the hero switches sit left of Sign out, and the panels keep the conversati
   assert.ok(layout.stripHeight < 150,
     `the History strip must stay compact, got ${layout.stripHeight}px`);
   assert.ok(layout.panelHeight >= 300,
-    `the conversation panels stay tall (358px min-height), got ${layout.panelHeight}px`);
+    `the conversation panel stays tall (296px min-height), got ${layout.panelHeight}px`);
   assert.ok(layout.panelTop < 500,
     `the conversation panel must start on the first screen, got top ${layout.panelTop}px`);
-  assert.ok(layout.historyTop >= layout.sendBottom,
-    `the History slider must sit below Send, got top ${layout.historyTop}px < Send bottom ${layout.sendBottom}px`);
+  assert.ok(layout.mcpRowBottom >= layout.miniBottom,
+    `the MCP/language row must sit below the mini pipeline, got ${layout.mcpRowBottom}px < ${layout.miniBottom}px`);
+  assert.ok(layout.historyTop >= layout.mcpRowBottom,
+    `the History slider must sit below the MCP/language row, got top ${layout.historyTop}px < row bottom ${layout.mcpRowBottom}px`);
+  assert.ok(layout.sendTop >= layout.fieldTop,
+    `Send must sit inside the prompt field, got top ${layout.sendTop}px < field top ${layout.fieldTop}px`);
+  assert.ok(layout.sendBottom <= layout.fieldBottom,
+    `Send must sit inside the prompt field, got bottom ${layout.sendBottom}px > field bottom ${layout.fieldBottom}px`);
+  assert.ok(layout.fieldRight - layout.sendRight < 20,
+    `Send must hug the right edge inside the prompt field, got ${layout.fieldRight - layout.sendRight}px of room`);
+  assert.ok(layout.fieldBottom - layout.sendBottom < 20,
+    `Send must hug the bottom edge inside the prompt field, got ${layout.fieldBottom - layout.sendBottom}px of room`);
+  assert.ok(Math.abs(parseFloat(layout.sendFontSize) - parseFloat(layout.rootFontSize) * 0.744) < 0.5,
+    `Send must be at the +20% scale (0.744rem), got font-size ${layout.sendFontSize}`);
   assert.ok(layout.scrollbarGutter > 0,
     `the history list needs a laid-out scrollbar, got ${layout.scrollbarGutter}px`);
   assert.equal(await page.inputValue("#historyDays"), "24");

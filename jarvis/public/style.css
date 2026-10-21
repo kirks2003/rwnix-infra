@@ -357,8 +357,10 @@ h2 {
 /* One button scale for every pill button: a shared font-size (without it the
    UA button font applies) and one padding, so no button may be taller or
    narrower than another. Deliberate exceptions: the `.lang-switch` toggles
-   (a different control type, fixed 148x32) and `.transcript-copy` (70%
-   scale, a compact per-entry action). */
+   (a different control type, fixed 148x32; `.lang-switch-compact` is the
+   104x23 variant for the conversation-panel row), `.transcript-copy` (70%
+   scale, a compact per-entry action) and `.prompt-field button` (the Send
+   button, compact scale +20%, inside the prompt field bottom-right). */
 button {
   border: 1px solid rgba(66, 217, 255, 0.4);
   border-radius: 999px;
@@ -556,6 +558,25 @@ button:disabled {
   font-weight: 600;
 }
 
+/* Compact switch for the conversation-panel MCP/language row (2026-10-21):
+   104x23 instead of 148x32 so the row stays a single slim line. */
+.lang-switch-compact {
+  width: 104px;
+  height: 23px;
+  padding: 2px;
+}
+
+.lang-switch-compact .lang-option {
+  font-size: 0.62rem;
+}
+
+.lang-switch-compact .lang-knob {
+  top: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  height: calc(100% - 4px);
+}
+
 .wake-settings {
   margin: 11px 0;
   padding: 11px;
@@ -690,8 +711,9 @@ progress {
   gap: 10px;
   align-content: start;
   /* 560 * 0.8 * 0.8 * 0.75 — the 2026-10-19 owner pass scales the panel to
-     75% of its previous vertical size; font sizes are unchanged. */
-  min-height: 269px;
+      75% of its previous vertical size; font sizes are unchanged. The
+      2026-10-21 owner pass makes the panel ~10% taller (269px -> 296px). */
+  min-height: 296px;
   padding: 11px;
   border: 1px solid rgba(66, 217, 255, 0.18);
   border-radius: 11px;
@@ -1393,12 +1415,20 @@ html.graph-full {
   gap: 8px;
 }
 
-.manual-prompt textarea {
+/* The prompt field wraps the textarea and the Send button: the button sits
+   inside the input box, bottom-right (2026-10-21 owner pass). */
+.prompt-field {
   grid-column: 1 / -1;
+  position: relative;
+}
+
+.manual-prompt textarea {
   width: 100%;
   border: 1px solid rgba(66, 217, 255, 0.35);
   border-radius: 12px;
-  padding: 10px 12px;
+  /* Extra right/bottom padding keeps typed text clear of the in-field Send
+     button in the bottom-right corner. */
+  padding: 10px 74px 42px 12px;
   color: var(--text);
   /* Theme variable instead of a hardcoded near-black: the a1 white-label
      theme's generic `textarea` rule loses this specificity fight, so the
@@ -1409,14 +1439,43 @@ html.graph-full {
   resize: vertical;
 }
 
-.manual-prompt button {
-  grid-column: 2;
-  justify-self: end;
+/* The Send button sits inside the prompt field, bottom-right, at +20% of
+   the 2026-10-21 compact scale (font 0.62rem -> 0.744rem, padding
+   5px 12px -> 6px 14.4px). Scoped to .prompt-field (the only button there
+   is Send) — a `.manual-prompt button` selector would also hit the MCP and
+   language switches further down the form. */
+.prompt-field button {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 6px 14.4px;
+  font-size: 0.744rem;
 }
 
-/* The History day slider sits on its own row below Send. */
+/* The History day slider sits on its own row below the compact MCP/language
+   row, directly under the mini pipeline (2026-10-21: the old empty Send row
+   between the two is gone). */
 .manual-prompt .transcript-controls {
   grid-column: 1 / -1;
+}
+
+/* The compact MCP/language row: MCP master switch, the language switch and
+   one compact switch per MCP server, wrapping as needed. */
+.prompt-mcp-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px 14px;
+}
+
+#mcpMasterStatus {
+  margin: 0;
+  max-width: 160px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
 }
 
 /* The mini pipeline spans the composer row above the History slider:
@@ -1688,10 +1747,6 @@ menu {
 
   .manual-prompt {
     grid-template-columns: 1fr;
-  }
-
-  .manual-prompt button {
-    grid-column: 1;
   }
 
   .graph-body {
