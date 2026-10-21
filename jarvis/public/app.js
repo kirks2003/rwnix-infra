@@ -90,13 +90,16 @@ const stageCaptions = {
   command: "Waiting for your command. 3 s of silence returns to wake listening.",
   recording: "Recording your command.",
   transcribing: "Transcribing your words.",
-  thinking: "The brain is working on an answer.",
+  thinking: "The brain is working on an answer. Wake word + new command corrects it; a stop word cancels it.",
   speaking: "Speaking.",
   error: "Something went wrong. See the Live log for details.",
 };
 
 // While an answer is being spoken, a parallel watch listens for the wake
 // phrase; saying wake word + "stop" (or another command) cuts the speech.
+// The same watch guards the in-flight brain request (see answer()): nothing
+// is spoken then, but a stop word still cancels the request before the
+// answer arrives and wake word + new command replaces the pending turn.
 // Like the wake probes it fires on the trailing edge of mic voice (350 ms
 // settle) and on the 3 s forced speech cap, so a stop command does not wait
 // longer than 3 s even when the speaker echo keeps the microphone active.
@@ -1888,7 +1891,25 @@ async function answer(session, prompt) {
   check(session);
   const pending = beginTurn(prompt);
   let answerShown = false;
+  let brainSpeech = null;
+  let brainWatch = null;
   stage("thinking", "Thinking", "Waiting for the configured self-hosted brain.", "brain");
+  // A voice cut aborts the in-flight brain call (reason speechStopped), so
+  // it reaches us as an AbortError — or as a response that lost the race
+  // against the cut. Stop-button clicks abort session.signal instead, so a
+  // cut here is always the user's voice.
+  const handleBrainCut = async () => {
+    const followUp = brainWatch.command;
+    mark("brain", "skipped");
+    pending.remove();
+    if (isStopCommand(followUp)) {
+      log("tts", `Brain stopped by voice command "${followUp}" before the answer arrived.`);
+      session.mic.beep();
+      return;
+    }
+    log("tts", `Brain interrupted by voice command: ${JSON.stringify(followUp)}`);
+    await answer(session, followUp);
+  };
   try {
     // true = the thinking line was cut by voice (stop or replacement command)
     // or the turn was already answered in its place: skip the brain request
@@ -1897,16 +1918,35 @@ async function answer(session, prompt) {
       pending.remove();
       return;
     }
-    const result = await withStepRetries(session, "brain", async () => {
-      const data = await request(session, "/api/chat", {
-        method: "POST", headers: { "content-type": "application/json" },
-        // The brain answers as the wake word's name, so the active phrase
-        // (server default or personal override) travels with every request.
-        body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase, brainProfile: aiProfileId, historySearch: historySearchSettings }),
+    // Nothing is spoken while the brain works, but the same voice watch that
+    // guards the utterance guards the in-flight request: a stop word cancels
+    // it before the answer arrives, and wake word + new command replaces the
+    // pending turn. The mic keeps capturing, so the watch has audio and
+    // paces itself exactly like the wake loop.
+    brainSpeech = new AbortController();
+    brainWatch = watchForVoiceCommand(session, AbortSignal.any([session.signal, brainSpeech.signal]), brainSpeech, "brain");
+    let result;
+    try {
+      result = await withStepRetries(session, "brain", async () => {
+        const data = await request(session, "/api/chat", {
+          method: "POST", headers: { "content-type": "application/json" },
+          // The brain answers as the wake word's name, so the active phrase
+          // (server default or personal override) travels with every request.
+          body: JSON.stringify({ prompt, sessionId, language, mcp: mcpFlags, wakePhrase: config.wakePhrase, brainProfile: aiProfileId, historySearch: historySearchSettings }),
+          signal: brainSpeech.signal,
+        });
+        if (!data.answer) throw new Error("Brain returned no answer");
+        return data;
       });
-      if (!data.answer) throw new Error("Brain returned no answer");
-      return data;
-    });
+    } finally {
+      brainWatch.stop();
+    }
+    if (brainSpeech.signal.aborted) {
+      // The cut won the race against an already-arrived response: honour it
+      // and discard the answer instead of speaking it.
+      await handleBrainCut();
+      return;
+    }
     log("brain", `Request ${result.requestId} completed`);
     mark("brain", "done");
     completeTurn(pending, result.answer, result.sources);
@@ -1917,6 +1957,10 @@ async function answer(session, prompt) {
     if (mcpFlags.graph) setTimeout(() => loadGraph(), 4000);
     await speakAnswer(session, result.answer);
   } catch (error) {
+    if (brainSpeech?.signal.aborted) {
+      await handleBrainCut();
+      return;
+    }
     if (!answerShown) failTurn(pending, error.message);
     throw error;
   }
@@ -2051,7 +2095,13 @@ async function speakText(session, text, signal, watch = null) {
 // log, so a stop that does not trigger is debuggable from the page alone.
 // `speech` is the per-answer AbortController (answer()), so the watch can
 // abort it with the speechStopped reason; its signal feeds the composite.
-function watchForVoiceCommand(session, signal, speech) {
+// `phase` only shapes the log wording: "speaking" (the default, the answer's
+// utterance) or "brain" (the in-flight, silent brain request that answer()
+// guards with the same watch so a command can still be corrected or cancelled
+// before the answer arrives).
+function watchForVoiceCommand(session, signal, speech, phase = "speaking") {
+  const whilePhase = phase === "brain" ? "while the brain is working" : "while speaking";
+  const probeLabel = phase === "brain" ? "Brain watch probe" : "Speech watch probe";
   let command = null;
   let watching = true;
   // The manual-prompt flow has no microphone, so the watch is a no-op there.
@@ -2089,7 +2139,7 @@ function watchForVoiceCommand(session, signal, speech) {
         // command after it; only a non-empty command interrupts the speech.
         if (detected && detected.trim()) {
           command = detected;
-          log("wake", `Wake phrase heard while speaking: ${JSON.stringify(text)}`);
+          log("wake", `Wake phrase heard ${whilePhase}: ${JSON.stringify(text)}`);
           speech.abort(speechStopped);
           return;
         }
@@ -2104,11 +2154,11 @@ function watchForVoiceCommand(session, signal, speech) {
         const stopText = isStopCommand(text) ? text.trim() : userBurst ? stopCommandIn(text) : null;
         if (stopText) {
           command = stopText;
-          log("wake", `Stop word heard while speaking: ${JSON.stringify(text)}`);
+          log("wake", `Stop word heard ${whilePhase}: ${JSON.stringify(text)}`);
           speech.abort(speechStopped);
           return;
         }
-        log("wake", `Speech watch probe: ${JSON.stringify(text)}`);
+        log("wake", `${probeLabel}: ${JSON.stringify(text)}`);
       } catch (error) {
         if (error === speechStopped || signal.aborted) return;
       }

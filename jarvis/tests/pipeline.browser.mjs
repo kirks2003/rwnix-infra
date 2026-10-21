@@ -351,6 +351,67 @@ test("a bare stop word without the wake phrase cuts a speaking answer", { timeou
   await page.click("#stopButton");
 });
 
+test("a bare stop word while the brain is running cancels the in-flight brain call", { timeout: 30000 }, async (t) => {
+  // The brain is left in flight (options.chat delays the response) while the
+  // fixture tone keeps playing: the brain wake-watch probes the mic, hears
+  // the stop word and must abort the request before the answer arrives — no
+  // second brain round trip, and the brain step ends skipped, not done.
+  let brainRunning = false;
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?" : brainRunning ? "stop" : "",
+  }), {
+    chat: async (n) => {
+      brainRunning = true;
+      await new Promise((resolve) => setTimeout(resolve, 7000));
+      return { answer: "It is noon.", requestId: `brain-${n}` };
+    },
+  });
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Brain stopped by voice command"),
+    null, { timeout: 25000 });
+  assert.deepEqual(calls.prompts, ["What time is it?"]);
+  assert.equal(await page.$eval("#steps [data-step=\"brain\"]", (step) => step.className), "skipped");
+  // After a stop the follow-up command window opens, not wake listening.
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command",
+    null, { timeout: 10000 });
+  await page.click("#stopButton");
+});
+
+test("a wake word plus a new command while the brain is running replaces the pending turn", { timeout: 30000 }, async (t) => {
+  // The brain is left in flight (options.chat delays the first response only)
+  // while the fixture tone keeps playing: the brain wake-watch probes the
+  // mic, hears wake word + a new command and must abort the in-flight
+  // request, then start a fresh brain turn for the correction — the
+  // original prompt never gets a second chance and no answer was spoken
+  // for it.
+  let brainRunning = false;
+  let correctionGiven = false;
+  const { page, calls } = await setup(t, async (n) => ({
+    text: n <= 2 ? "Rocky! What time is it?"
+      : brainRunning && !correctionGiven ? "Rocky check the weather instead"
+      : "",
+  }), {
+    chat: async (n) => {
+      if (n === 1) {
+        brainRunning = true;
+        await new Promise((resolve) => setTimeout(resolve, 7000));
+      }
+      return { answer: n === 1 ? "It is noon." : "The weather is dry.", requestId: `brain-${n}` };
+    },
+  });
+  await page.waitForFunction(() => document.getElementById("log").textContent.includes("Brain interrupted by voice command"),
+    null, { timeout: 25000 });
+  // The follow-up window only opens after the replacement turn fully
+  // completed (thinking line, brain round trip, spoken answer), so waiting
+  // for it also orders the assertions below.
+  await page.waitForFunction(() => document.getElementById("stageTitle").textContent === "Waiting for command",
+    null, { timeout: 10000 });
+  assert.deepEqual(calls.prompts, ["What time is it?", "check the weather instead"]);
+  // The correction turn finished as a normal brain answer, so the brain step
+  // is done (the cut turn's skipped mark was reset by the new turn).
+  assert.equal(await page.$eval("#steps [data-step=\"brain\"]", (step) => step.className), "done");
+  await page.click("#stopButton");
+});
+
 test("a stop word inside the echoed window cuts a speaking answer on a loud user burst", { timeout: 45000 }, async (t) => {
   // The speaker echo puts the answer's own words into the probe window, so the
   // transcript is the echo plus the stop word, never a bare "stop". The
