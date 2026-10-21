@@ -236,6 +236,26 @@
           <div class="mcp-switches" id="mcpSwitches"></div>
         </section>
 
+        <section class="panel websearch-panel" id="websearchPanel">
+          <h2>Websearch sources</h2>
+          <p class="websearch-intro">
+            The search engines, news sources and feeds your web answers draw from — this account only,
+            saved on the server. Built-in sources can be switched off but not removed; add your own feed
+            below (public http/https URL, default port).
+          </p>
+          <ul id="websearchSourceList" class="websearch-source-list" aria-label="Your websearch sources"></ul>
+          <form id="websearchAddForm" class="websearch-add" autocomplete="off">
+            <div class="websearch-add-fields">
+              <label for="websearchAddSource">Name</label>
+              <input id="websearchAddSource" type="text" maxlength="64" placeholder="My feed" disabled>
+              <label for="websearchAddUrl">Feed URL</label>
+              <input id="websearchAddUrl" type="url" placeholder="https://example.com/feed.xml" disabled>
+            </div>
+            <button id="websearchAddButton" type="submit" disabled>Add source</button>
+            <p id="websearchStatus" role="status">Loading your websearch sources.</p>
+          </form>
+        </section>
+
         <section class="wake-settings endpoint-settings">
           <h2>Endpoint selectors</h2>
           <div class="endpoint-grid">

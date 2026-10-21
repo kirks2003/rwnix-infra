@@ -1852,3 +1852,106 @@ menu {
   color: var(--muted);
   background: rgba(2, 5, 11, 0.4);
 }
+
+/* Websearch sources panel: the account's list of search engines, news
+   sources and feeds. Row toggles reuse the lang-switch pill, narrower. */
+.websearch-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.websearch-intro {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.websearch-source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+  max-height: 264px;
+  overflow-y: auto;
+}
+
+.websearch-source {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 10px;
+  background: rgba(66, 217, 255, 0.06);
+}
+
+.websearch-source-kind {
+  flex: none;
+  width: 52px;
+  text-align: center;
+  padding: 2px 0;
+  font-size: 0.6rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid rgba(66, 217, 255, 0.25);
+  border-radius: 999px;
+}
+
+.websearch-source-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.websearch-source-toggle {
+  width: 92px;
+  height: 26px;
+}
+
+.websearch-source-toggle .lang-option {
+  font-size: 0.72rem;
+}
+
+.websearch-source-remove {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 0.7rem;
+  color: #ff8f8f;
+  border: 1px solid rgba(255, 92, 92, 0.45);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.websearch-source-remove:hover {
+  background: rgba(255, 92, 92, 0.12);
+}
+
+.websearch-add {
+  display: grid;
+  gap: 8px;
+}
+
+.websearch-add-fields {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 8px 14px;
+  align-items: end;
+}
+
+.websearch-add label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+#websearchStatus {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}

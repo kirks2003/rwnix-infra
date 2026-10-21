@@ -21,6 +21,10 @@
 //     topics — the "AI answer" layer, separate from the result list)
 // Each engine degrades to zero results on a bot wall (403/429/captcha/202
 // challenge from datacenter IPs) without failing the whole search.
+// Both tools also accept an optional `webSources` argument injected by the
+// backend (never by the brain): the signed-in user's enabled source list
+// from the Websearch sources panel (built-in ids in `engines`/`news`, the
+// user's own feeds in `feeds`). Absent means every built-in source runs.
 //
 // web_news queries, also in parallel (each source degrades to zero items):
 //   - Bing News RSS (https://www.bing.com/news/search?q=…&format=rss) — the
@@ -51,7 +55,8 @@ import {
   normalizeUrlForDedupe, browserHeaders, INTEREST_FEEDS, normalizeTopic, parseFeedItems, formatNewsItems,
    sourceHost, searchSourceNames, newsSourceNames,
    isSafeFetchUrl, isBlockedIp, htmlToText,
- } from "./engines.mjs";
+   BUILTIN_WEB_SOURCES, feedSourceId,
+} from "./engines.mjs";
 
 const TOOL = {
   name: "web_search",
@@ -142,7 +147,7 @@ async function handleMessage(message) {
       const maxResults = Math.min(10, Math.max(1, Number(params.arguments?.max_results) || 5));
       const lang = params.arguments?.lang === "en" ? "en" : "de";
       try {
-        const { merged, instant } = await searchWeb(query, maxResults, lang);
+        const { merged, instant } = await searchWeb(query, maxResults, lang, params.arguments?.webSources);
         if (!merged.length && !instant) return respond(id, { content: [{ type: "text", text: "No results found." }] });
         return respond(id, {
           content: [{ type: "text", text: formatSearchResults(merged, instant) }],
@@ -166,6 +171,22 @@ function respond(id, result, error) {
 // HTML search engines get the full browser header set via browserHeaders).
 const BOT_UA = "Jarvis/1.0 (self-hosted voice assistant)";
 
+// The per-user source list the backend injects per call (the Websearch
+// sources panel; the rows are seeded with BUILTIN_WEB_SOURCES in server.js):
+//   { engines: [ids], news: [ids], feeds: [{ source, url }] }
+// `engines` + `news` hold the enabled built-in source ids. Absent
+// (undefined/null) means "everything enabled" — the pre-panel behaviour the
+// unit tests and old backends rely on. Present with empty lists is an
+// explicit "nothing enabled": the tool then answers "No results found."
+function enabledSourceSet(webSources) {
+  if (!webSources) return null;
+  const ids = [
+    ...(Array.isArray(webSources.engines) ? webSources.engines : []),
+    ...(Array.isArray(webSources.news) ? webSources.news : []),
+  ];
+  return new Set(ids.map((id) => String(id || "")));
+}
+
 async function fetchText(url, options = {}) {
   const response = await fetch(url, { signal: AbortSignal.timeout(12000), ...options });
   if (!response.ok) throw new Error(`HTTP ${response.status} from ${new URL(url).host}`);
@@ -180,7 +201,7 @@ async function handleNews(id, arguments_) {
   const maxResults = Math.min(15, Math.max(1, Number(arguments_.max_results) || 8));
   const lang = arguments_.lang === "en" ? "en" : "de";
   try {
-    const items = await searchNews(topic, maxResults, lang);
+    const items = await searchNews(topic, maxResults, lang, arguments_.webSources);
     if (!items.length) return respond(id, { content: [{ type: "text", text: "No news found." }] });
     return respond(id, {
       content: [{ type: "text", text: formatNewsItems(items) }],
@@ -224,18 +245,36 @@ function bingNewsUrl(query) {
 // redirects to the real article (resolved below); Google News links are
 // JS-only wrappers (its 200 page is an app shell, no server-side redirect),
 // so Google News only fills slots the primary sources left empty.
-async function searchNews(topic, maxResults, lang) {
+async function searchNews(topic, maxResults, lang, webSources) {
   const area = normalizeTopic(topic);
+  const enabled = enabledSourceSet(webSources);
   const primary = [];
   const backup = [];
   if (area) {
     for (const feed of INTEREST_FEEDS[area]) {
+      if (enabled && !enabled.has(feedSourceId(feed))) continue;
       primary.push({ source: feed.source, url: feed.url, browser: false });
     }
-    primary.push({ source: "Bing News", url: bingNewsUrl(AREA_QUERY[area][lang]), browser: true });
+    if (!enabled || enabled.has("bing-news")) {
+      primary.push({ source: "Bing News", url: bingNewsUrl(AREA_QUERY[area][lang]), browser: true });
+    }
   } else {
-    primary.push({ source: "Bing News", url: bingNewsUrl(topic), browser: true });
-    backup.push({ source: "Google News", url: googleNewsUrl(topic, lang), browser: true });
+    if (!enabled || enabled.has("bing-news")) {
+      primary.push({ source: "Bing News", url: bingNewsUrl(topic), browser: true });
+    }
+    if (!enabled || enabled.has("google-news")) {
+      backup.push({ source: "Google News", url: googleNewsUrl(topic, lang), browser: true });
+    }
+  }
+  // User-added feeds ride along on every news call: they are the user's own
+  // sources, curated for no particular area. Unsafe (private/internal) URLs
+  // are dropped here as the second line — the backend already validates on
+  // add in the sources API.
+  for (const feed of (webSources?.feeds || [])) {
+    const url = String(feed?.url || "").trim();
+    const source = String(feed?.source || "").trim();
+    if (!url || !source || isSafeFetchUrl(url)) continue;
+    primary.push({ source, url, browser: false });
   }
   const fetchSource = (item) => fetchText(item.url, {
     headers: item.browser ? browserHeaders(lang, false) : { "user-agent": BOT_UA },
@@ -418,13 +457,19 @@ async function fetchWithBrowser(url, maxChars, lang) {
 // Queries every engine in parallel; a walled or down engine degrades to zero
 // results. The instant-answer API runs alongside and is independent: the
 // merged list stands on its own when it is empty.
-async function searchWeb(query, maxResults, lang) {
+async function searchWeb(query, maxResults, lang, webSources) {
+  // The per-user enabled source list (see enabledSourceSet): each entry is
+  // gated by its built-in id, so a user who switched an engine off only pays
+  // for the engines they left on.
+  const enabled = enabledSourceSet(webSources);
   const engines = [
-    { engine: "duckduckgo", run: () => searchDuckDuckGo(query, maxResults, lang) },
-    { engine: "bing", run: () => searchBing(query, maxResults, lang) },
-    { engine: "wikipedia", run: () => searchWikipedia(query, maxResults) },
-  ];
-  const instantPromise = searchDuckDuckGoInstant(query).catch(() => null);
+    { id: "duckduckgo", engine: "duckduckgo", run: () => searchDuckDuckGo(query, maxResults, lang) },
+    { id: "bing", engine: "bing", run: () => searchBing(query, maxResults, lang) },
+    { id: "wikipedia", engine: "wikipedia", run: () => searchWikipedia(query, maxResults) },
+  ].filter((entry) => !enabled || enabled.has(entry.id));
+  const instantPromise = (!enabled || enabled.has("duckduckgo-instant"))
+    ? searchDuckDuckGoInstant(query).catch(() => null)
+    : Promise.resolve(null);
   const settled = await Promise.allSettled(engines.map((entry) => entry.run()));
   const sets = engines.map((entry, index) => ({
     engine: entry.engine,

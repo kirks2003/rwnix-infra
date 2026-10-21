@@ -179,6 +179,57 @@ export const INTEREST_FEEDS = {
   ],
 };
 
+// --- The built-in websearch source list (the Websearch sources panel) --------
+//
+// The baseline every user's per-user source list is seeded with: one entry
+// per built-in source of the web_search and web_news tools, derived from the
+// code above (the engine endpoints, the two news-search sources and the
+// INTEREST_FEEDS curated feeds). `id` is the stable row key the backend
+// stores per user, `source` the display name the panel — and the brain's
+// attribution line — uses, `kind` is engine / news / feed and `tool` the MCP
+// tool the source feeds. A feed is one row per feed URL, carrying every
+// interest area it is curated for (Hacker News and Lobsters are curated for
+// two areas each, so they are one row with both areas, not a duplicate).
+function sourceSlug(name) {
+  return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+export function feedSourceId(feed) {
+  return `feed:${sourceSlug(feed.source)}`;
+}
+
+export const BUILTIN_WEB_SOURCES = [
+  { id: "duckduckgo", source: "DuckDuckGo", kind: "engine", tool: "web_search", url: "https://html.duckduckgo.com/html/" },
+  { id: "bing", source: "Bing", kind: "engine", tool: "web_search", url: "https://www.bing.com/search" },
+  { id: "wikipedia", source: "Wikipedia", kind: "engine", tool: "web_search", url: "https://en.wikipedia.org" },
+  { id: "duckduckgo-instant", source: "DuckDuckGo instant answer", kind: "engine", tool: "web_search", url: "https://api.duckduckgo.com/" },
+  { id: "bing-news", source: "Bing News", kind: "news", tool: "web_news", url: "https://www.bing.com/news/search" },
+  { id: "google-news", source: "Google News", kind: "news", tool: "web_news", url: "https://news.google.com/rss" },
+  ...(() => {
+    const byUrl = new Map();
+    for (const [area, feeds] of Object.entries(INTEREST_FEEDS)) {
+      for (const feed of feeds) {
+        const key = normalizeUrlForDedupe(feed.url);
+        const entry = byUrl.get(key);
+        if (entry) {
+          if (!entry.areas.includes(area)) entry.areas.push(area);
+          continue;
+        }
+        const item = {
+          id: feedSourceId(feed),
+          source: feed.source,
+          kind: "feed",
+          tool: "web_news",
+          areas: [area],
+          url: feed.url,
+        };
+        byUrl.set(key, item);
+      }
+    }
+    return [...byUrl.values()];
+  })(),
+];
+
 // Interest-area spellings the user (or the brain) is likely to use.
 const TOPIC_ALIASES = {
   technik: "technik", technologie: "technik", "tech news": "technik",

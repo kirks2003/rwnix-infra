@@ -238,6 +238,30 @@ before(async () => {
         }
         return res.end(JSON.stringify({ choices: [{ message: { content: "Fetched the quote page." } }] }));
       }
+      if (mode === "web-attribution") {
+        // Like web-tools, the mock brain calls web_news on the first round,
+        // then answers with the "[sources: …]" line it was instructed to
+        // append: one name the search really reported ("news.example", from
+        // the mock's structuredContent), one built-in display name the
+        // backend knows ("Bing News") and one the brain hallucinated
+        // ("Bogus Source") that must be dropped by validation.
+        const body = JSON.parse(received.toString("utf8") || "{}");
+        const hasToolResult = (body.messages || []).some((message) => message.role === "tool");
+        if (body.tools && !hasToolResult) {
+          return res.end(JSON.stringify({
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{ id: "call_news", type: "function", function: { name: "web_news", arguments: JSON.stringify({ topic: "technik" }) } }],
+              },
+            }],
+          }));
+        }
+        return res.end(JSON.stringify({
+          choices: [{ message: { content: "Fresh news delivered.\n[sources: news.example, Bing News, Bogus Source]" } }],
+        }));
+      }
       if (mode === "history-tool") {
         // The mock brain asks for search_history on the first round and
         // answers from the hit once the result arrives — exercising the
@@ -696,10 +720,10 @@ test("the brain system prompt reports the MCP web-search state per request", asy
   // Toggle on: a working search tells the brain it is on and delivers results;
   // a failed search tells it the feature is on but this search had no results.
   const cases = [
-    [okScript, /Web search \(MCP web-search server\) is ON: the web was just searched/, /Mock web search result/, ["mock.example"]],
-    [failScript, /is ON, but the search for this prompt returned no results/, null, []],
+    [okScript, /Web search \(MCP web-search server\) is ON: the web was just searched/, /Mock web search result/],
+    [failScript, /is ON, but the search for this prompt returned no results/, null],
   ];
-  for (const [script, promptPattern, searchPattern, expectedSources] of cases) {
+  for (const [script, promptPattern, searchPattern] of cases) {
     const { process: child, origin: mcpOrigin } = await startBackend({ MCP_SEARCH_SCRIPT: script });
     t.after(async () => { child.kill(); await once(child, "exit"); });
     mode = "success";
@@ -709,9 +733,11 @@ test("the brain system prompt reports the MCP web-search state per request", asy
     assert.match(body.messages[0].content, promptPattern);
     if (searchPattern) assert.match(body.messages[0].content, searchPattern);
     else assert.equal(body.messages.length, 2, "no search-results message");
-    // The source names behind the search ride back in the turn's attribution.
-    assert.equal(chat.sources.websearch, Boolean(searchPattern));
-    assert.deepEqual(chat.sources.websearchSources, expectedSources);
+    // Strict attribution: the mock brain never appends the "[sources: …]"
+    // line, so the tag stays off even though the search ran with results
+    // (the web-attribution tests cover the tag's positive path).
+    assert.equal(chat.sources.websearch, false);
+    assert.deepEqual(chat.sources.websearchSources, []);
   }
 });
 
@@ -747,9 +773,11 @@ test("the brain gets web_search and web_news tools and can fetch live news", asy
   });
   const result = await response.json();
   assert.equal(result.answer, "Fresh news delivered.");
-  // The tool result's source names ride back in the turn's attribution.
-  assert.equal(result.sources.websearch, true);
-  assert.deepEqual(result.sources.websearchSources, ["news.example"]);
+  // Strict attribution: the mock brain never appends the "[sources: …]"
+  // line, so the tag stays off even though the tool ran and reported a
+  // source name.
+  assert.equal(result.sources.websearch, false);
+  assert.deepEqual(result.sources.websearchSources, []);
   // The final request (after the tool round) still offers all three web
   // tools...
   const body = JSON.parse(received.toString("utf8"));
@@ -818,6 +846,201 @@ test("the brain gets the web_fetch tool and can open a page in the browser", asy
   assert.match(toolMessage.content, /Mock web_fetch result: 42/);
   assert.match(toolMessage.content, /"url":"https:\/\/www\.google\.com\/finance\/quote\/NVD:FRA"/);
   assert.match(toolMessage.content, /"lang":"de"/);
+  mode = "success";
+});
+
+test("web answer attribution: only the used, verifiable sources ride back and the line is stripped", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-attribution-mock-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // The mock MCP echoes the arguments (like the web-tools test) and reports
+  // a source name ("news.example") the backend can verify for this turn.
+  const script = join(dir, "mcp-attribution.mjs");
+  await writeFile(script, `
+    import readline from "node:readline";
+    readline.createInterface({ input: process.stdin }).on("line", (line) => {
+      const message = JSON.parse(line);
+      if (message.id === undefined) return;
+      let result;
+      if (message.method === "initialize") {
+        result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-websearch", version: "1.0.0" } };
+      } else if (message.method === "tools/call") {
+        result = { isError: false, content: [{ type: "text", text: "Mock " + message.params.name + " result: 42. args=" + JSON.stringify(message.params.arguments || {}) }], structuredContent: { sources: ["news.example"] } };
+      } else {
+        result = {};
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+    });
+  `);
+  const { process: child, origin: attrOrigin } = await startBackend({ MCP_SEARCH_SCRIPT: script });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  mode = "web-attribution";
+  const response = await auth(attrOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Give me the news.", sessionId: "attribution-loop", websearch: true }),
+  });
+  const result = await response.json();
+  // The "[sources: …]" line the brain appended never reaches the answer
+  // (display, TTS, history or graph) — only the validated names ride back
+  // as the turn's websearch tag.
+  assert.equal(result.answer, "Fresh news delivered.");
+  assert.equal(result.sources.websearch, true);
+  // "Bogus Source" never ran, so validation drops it; the rest keep the
+  // order the brain reported them in.
+  assert.deepEqual(result.sources.websearchSources, ["news.example", "Bing News"]);
+  // The brain was told the attribution contract in the system prompt…
+  const body = JSON.parse(received.toString("utf8"));
+  assert.match(body.messages[0].content, /\[sources: Name1, Name2\]/);
+  // …and the turn the client records (clean answer + validated names, as
+  // recordTurn sends it) comes back that way from the conversation log.
+  const post = await auth(attrOrigin, "/api/conversation", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Give me the news.", answer: result.answer, sources: result.sources.websearchSources }),
+  });
+  assert.equal(post.status, 200);
+  const entries = (await (await auth(attrOrigin, "/api/conversation")).json()).entries;
+  const stored = entries.find((entry) => entry.answer === "Fresh news delivered.");
+  assert.ok(stored, "the turn is in the conversation log");
+  assert.ok(!String(stored.answer).includes("[sources:"), "the stored answer carries no attribution line");
+  assert.deepEqual(stored.sources, ["news.example", "Bing News"]);
+  mode = "success";
+});
+
+test("websearch sources: per-user list seeded with the built-in baseline, toggleable, addable", async (t) => {
+  // Like the rest of /api, the panel endpoints are session-gated.
+  const anon = await fetch(`${origin}/api/websearch/sources`);
+  assert.equal(anon.status, 403);
+
+  const cookie = await login(origin, "Mila");
+  const api = (method, payload) => fetch(`${origin}/api/websearch/sources`, {
+    method,
+    headers: { cookie, "content-type": "application/json" },
+    ...(payload ? { body: JSON.stringify(payload) } : {}),
+  }).then(async (response) => ({ status: response.status, payload: await response.json() }));
+
+  // First use seeds the built-in baseline straight from the source code:
+  // 17 entries (4 engines incl. the instant-answer one, 2 news, 11 deduped
+  // interest feeds), all enabled, all builtin, ordered engine/news/feed.
+  const first = await api("GET");
+  assert.equal(first.status, 200);
+  const seeded = first.payload.sources;
+  assert.equal(seeded.length, 17);
+  assert.ok(seeded.every((row) => row.enabled === 1 && row.builtin === 1));
+  assert.ok(seeded.some((row) => row.id === "duckduckgo" && row.kind === "engine"));
+  assert.ok(seeded.some((row) => row.id === "bing-news" && row.kind === "news"));
+  assert.ok(seeded.some((row) => row.id === "feed:golem" && row.kind === "feed"));
+  assert.deepEqual(seeded.filter((row) => row.kind === "engine").map((row) => row.id),
+    ["bing", "duckduckgo", "duckduckgo-instant", "wikipedia"]);
+
+  // A personal feed gets a stable per-user id from its display name…
+  const added = await api("POST", { source: "My Feed", url: "https://example.com/feed.xml" });
+  assert.equal(added.status, 201);
+  assert.deepEqual(added.payload.source,
+    { id: "user:my-feed", source: "My Feed", url: "https://example.com/feed.xml", kind: "feed", builtin: 0, enabled: 1 });
+  // …and a collision-safe suffix when the name is taken.
+  const addedAgain = await api("POST", { source: "My Feed", url: "https://example.org/feed.xml" });
+  assert.equal(addedAgain.status, 201);
+  assert.equal(addedAgain.payload.source.id, "user:my-feed-2");
+
+  // Invalid URLs are rejected upfront with the engine's fetch-guard rules
+  // (http/https only, no embedded credentials, default ports only, no
+  // private/internal addresses).
+  for (const url of [
+    "ftp://example.com/feed.xml",
+    "https://user:pass@example.com/feed.xml",
+    "https://example.com:8080/feed.xml",
+    "https://192.168.1.10/feed.xml",
+    "https://[::1]/feed.xml",
+    "not a url",
+  ]) {
+    const rejected = await api("POST", { source: "Bad", url });
+    assert.equal(rejected.status, 400, url);
+    assert.equal(rejected.payload.error, "invalid_url", url);
+  }
+  const missing = await api("POST", { source: "No Url" });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.payload.error, "source_and_url_required");
+
+  // Built-in rows are toggleable but never deletable…
+  const off = await api("PATCH", { id: "wikipedia", enabled: false });
+  assert.equal(off.status, 200);
+  assert.equal(off.payload.source.enabled, 0);
+  const keep = await api("DELETE", { id: "wikipedia" });
+  assert.equal(keep.status, 400);
+  assert.equal(keep.payload.error, "builtin_source_not_deletable");
+  // …user rows can be removed again.
+  const gone = await api("DELETE", { id: "user:my-feed-2" });
+  assert.equal(gone.status, 200);
+  const after = await api("GET");
+  const rows = after.payload.sources;
+  assert.equal(rows.length, 18);
+  assert.ok(rows.some((row) => row.id === "wikipedia" && row.enabled === 0));
+  assert.ok(rows.some((row) => row.id === "user:my-feed" && row.enabled === 1));
+  assert.ok(!rows.some((row) => row.id === "user:my-feed-2"));
+  // Unknown ids 404.
+  assert.equal((await api("PATCH", { id: "nope", enabled: true })).status, 404);
+  assert.equal((await api("DELETE", { id: "nope" })).status, 404);
+
+  // Per-user isolation: Roman's list is still the untouched baseline.
+  const roman = await login(origin, "Roman");
+  const isolated = await fetch(`${origin}/api/websearch/sources`, { headers: { cookie: roman } }).then((response) => response.json());
+  assert.equal(isolated.sources.length, 17);
+  assert.ok(isolated.sources.every((row) => row.enabled === 1));
+  assert.ok(!isolated.sources.some((row) => row.id === "user:my-feed"));
+});
+
+test("the user's enabled websearch sources ride along on the MCP calls, not the tool schema", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-websearch-inject-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // The mock MCP echoes the full arguments it receives (like the web-tools
+  // test), so the per-call injection is pinned without any network.
+  const script = join(dir, "mcp-inject.mjs");
+  await writeFile(script, `
+    import readline from "node:readline";
+    readline.createInterface({ input: process.stdin }).on("line", (line) => {
+      const message = JSON.parse(line);
+      if (message.id === undefined) return;
+      let result;
+      if (message.method === "initialize") {
+        result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "mock-websearch", version: "1.0.0" } };
+      } else if (message.method === "tools/call") {
+        result = { isError: false, content: [{ type: "text", text: "Mock " + message.params.name + " result: 42. args=" + JSON.stringify(message.params.arguments || {}) }] };
+      } else {
+        result = {};
+      }
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+    });
+  `);
+  const { process: child, origin: injectOrigin } = await startBackend({ MCP_SEARCH_SCRIPT: script });
+  t.after(async () => { child.kill(); await once(child, "exit"); });
+  // Turn one built-in engine off for this account…
+  const cookie = await login(injectOrigin, "Mila");
+  const patch = await fetch(`${injectOrigin}/api/websearch/sources`, {
+    method: "PATCH", headers: { cookie, "content-type": "application/json" },
+    body: JSON.stringify({ id: "wikipedia", enabled: false }),
+  });
+  assert.equal(patch.status, 200);
+  mode = "web-tools";
+  const response = await auth(injectOrigin, "/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "Give me the news.", sessionId: "inject-loop", language: "de", websearch: true }),
+  });
+  const result = await response.json();
+  assert.equal(result.answer, "Fresh news delivered.");
+  const body = JSON.parse(received.toString("utf8"));
+  const toolMessage = body.messages.find((message) => message.role === "tool");
+  assert.ok(toolMessage, "the web_news tool round is in the final request");
+  // The backend injected the user's enabled list into the tool call…
+  const args = JSON.parse(toolMessage.content.match(/args=(\{[\s\S]*\})$/)[1]);
+  assert.ok(args.webSources, "webSources was injected into the tool call");
+  assert.ok(!args.webSources.engines.includes("wikipedia"), "the disabled engine is not injected");
+  assert.deepEqual(args.webSources.engines, ["bing", "duckduckgo", "duckduckgo-instant"]);
+  assert.deepEqual(args.webSources.news, ["bing-news", "google-news"]);
+  assert.equal(args.webSources.feeds.length, 11);
+  // …but the brain's tool schema never exposes it (nor the injected lang).
+  const webNewsTool = body.tools.find((tool) => tool.function.name === "web_news");
+  const schema = JSON.stringify(webNewsTool);
+  assert.ok(!schema.includes("webSources"), "webSources is not in the tool schema");
+  assert.ok(!schema.includes('"lang"'), "lang is not in the tool schema");
   mode = "success";
 });
 

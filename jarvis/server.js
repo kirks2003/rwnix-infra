@@ -274,6 +274,20 @@ function openConversationDb(dbPath) {
       dims INTEGER NOT NULL,
       vec BLOB NOT NULL
     );
+    -- The per-user websearch source list (the Websearch sources panel): the
+    -- built-in baseline (BUILTIN_WEB_SOURCES in mcp/engines.mjs) seeded per
+    -- user, plus the user's own feeds. Built-in rows are toggleable, never
+    -- deletable (builtin = 1); user rows are toggleable and deletable.
+    CREATE TABLE IF NOT EXISTS websearch_sources (
+      user TEXT NOT NULL,
+      id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      url TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL,
+      builtin INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (user, id)
+    );
   `);
   const hasSources = db.prepare("PRAGMA table_info(conversations)").all().some((column) => column.name === "sources");
   if (!hasSources) db.exec("ALTER TABLE conversations ADD COLUMN sources TEXT");
@@ -305,16 +319,26 @@ function openConversationDb(dbPath) {
     // `user = @user` is prepended here rather than supplied by the caller, so
     // no query can reach another user's conversation.
     search(terms, { user, floor, limit }) {
-      const conditions = terms.map((_, index) =>
-        `(prompt LIKE @term${index} ESCAPE '\\' OR answer LIKE @term${index} ESCAPE '\\')`).join(" AND ");
-      const params = { user, floor, limit };
-      terms.forEach((term, index) => { params[`term${index}`] = `%${escapeLike(term)}%`; });
-      return db.prepare(`SELECT id, ts, prompt, answer FROM conversations
-        WHERE user = @user AND ts >= @floor AND ${conditions}
-        ORDER BY ts DESC, id DESC LIMIT @limit`).all(params);
-    },
-  };
-}
+       const conditions = terms.map((_, index) =>
+         `(prompt LIKE @term${index} ESCAPE '\\' OR answer LIKE @term${index} ESCAPE '\\')`).join(" AND ");
+       const params = { user, floor, limit };
+       terms.forEach((term, index) => { params[`term${index}`] = `%${escapeLike(term)}%`; });
+       return db.prepare(`SELECT id, ts, prompt, answer FROM conversations
+         WHERE user = @user AND ts >= @floor AND ${conditions}
+         ORDER BY ts DESC, id DESC LIMIT @limit`).all(params);
+     },
+     countWebsearchSources: db.prepare("SELECT COUNT(*) AS n FROM websearch_sources WHERE user = @user"),
+     selectWebsearchSources: db.prepare(`SELECT id, source, url, kind, builtin, enabled FROM websearch_sources
+       WHERE user = @user ORDER BY CASE kind WHEN 'engine' THEN 0 WHEN 'news' THEN 1 ELSE 2 END, id`),
+     websearchSource: db.prepare("SELECT id, source, url, kind, builtin, enabled FROM websearch_sources WHERE user = @user AND id = @id"),
+     seedWebsearchSource: db.prepare(`INSERT OR IGNORE INTO websearch_sources (user, id, source, url, kind, builtin, enabled)
+       VALUES (@user, @id, @source, @url, @kind, 1, 1)`),
+     addWebsearchSource: db.prepare(`INSERT INTO websearch_sources (user, id, source, url, kind, builtin, enabled)
+       VALUES (@user, @id, @source, @url, 'feed', 0, 1)`),
+     setWebsearchSourceEnabled: db.prepare("UPDATE websearch_sources SET enabled = @enabled WHERE user = @user AND id = @id"),
+     deleteWebsearchSource: db.prepare("DELETE FROM websearch_sources WHERE user = @user AND id = @id AND builtin = 0"),
+   };
+ }
 
 // `%`, `_` and the escape character itself are literals in a user's search
 // term, not wildcards: a search for "100%" must not match everything.
@@ -345,6 +369,141 @@ function conversationStoredSources(value) {
 }
 
 const conversationStore = openConversationDb(CONVERSATION_DB_PATH);
+
+// --- Per-user websearch source list (the Websearch sources panel) ----------
+//
+// Every user's web_search/web_news calls run against their own list of
+// sources, seeded with the built-in baseline from mcp/engines.mjs
+// (BUILTIN_WEB_SOURCES: the search engines, the news-search sources and the
+// curated interest feeds). Built-in rows can be switched off but never
+// deleted; a user may add their own feed URLs (toggleable, deletable). The
+// enabled rows are injected into every MCP call as `webSources` — the tool
+// schema never exposes it, so the brain (or a prompt injection) cannot read
+// or change the user's list. engines.mjs is ESM and this file is CJS on the
+// node:20 runtime, so the baseline is loaded lazily through dynamic
+// import() and cached in the promise.
+let websearchBuiltinPromise = null;
+function builtinWebSources() {
+  if (!websearchBuiltinPromise) {
+    websearchBuiltinPromise = import("./mcp/engines.mjs").then((module) => module.BUILTIN_WEB_SOURCES);
+  }
+  return websearchBuiltinPromise;
+}
+
+// Seed this user's list with the full built-in baseline on first use.
+// Idempotent: a user whose rows already exist (even partially toggled) is
+// left exactly as-is.
+async function ensureWebsearchSourcesSeeded(user) {
+  if (conversationStore.countWebsearchSources.get({ user }).n > 0) return;
+  const builtin = await builtinWebSources();
+  const insert = conversationStore.seedWebsearchSource;
+  for (const entry of builtin) {
+    insert.run({ user, id: entry.id, source: entry.source, url: entry.url || "", kind: entry.kind });
+  }
+}
+
+// The signed-in user's enabled sources in the per-call shape the websearch
+// MCP understands: built-in ids split by their tool (`engines` for
+// web_search, `news` for web_news) plus the user's own feeds. An empty
+// result is a real "nothing enabled" list — the tool answers
+// "No results found." for it — never undefined.
+async function websearchSourcesForUser(user) {
+  await ensureWebsearchSourcesSeeded(user);
+  const rows = conversationStore.selectWebsearchSources.all({ user });
+  const list = { engines: [], news: [], feeds: [] };
+  for (const row of rows) {
+    if (!row.enabled) continue;
+    if (row.kind === "engine") list.engines.push(row.id);
+    else if (row.kind === "news") list.news.push(row.id);
+    else list.feeds.push({ source: row.source, url: row.url });
+  }
+  return list;
+}
+
+// The user's full source list (enabled and disabled) for the panel.
+async function websearchSourceRowsForUser(user) {
+  await ensureWebsearchSourcesSeeded(user);
+  return conversationStore.selectWebsearchSources.all({ user });
+}
+
+// --- Websearch source attribution ------------------------------------------
+//
+// The brain is instructed (see the websearch mcpStates entries below) to end
+// an answer with a final "[sources: Name1, Name2]" line naming ONLY the
+// sources whose information it actually used. The server parses that line
+// after extractAnswer, validates every name against the sources that really
+// ran (the pre-search result hosts, the tool results' source names and the
+// user's source display names), drops anything the brain hallucinated, and
+// strips the line from the answer before it is spoken, displayed, stored or
+// graph-ingested. No line, or no valid name, means no websearch tag at all.
+const WEB_ATTRIBUTION_INSTRUCTION = [
+  "When you answer with information you got from the web_search or web_news tools, finish your",
+  "answer with one final line: [sources: Name1, Name2] — a comma-separated list of the source",
+  "names (as given in the tool results) whose information you actually used in your answer.",
+  "List only the sources that are relevant to what you answered, and omit the line entirely when",
+  "you did not use any web information.",
+].join(" ");
+
+// Case/whitespace/`www.`-insensitive name match for the attribution line.
+function normalizeSourceName(name) {
+  let value = String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+  value = value.replace(/^www\./, "").replace(/\.+$/, "");
+  return value;
+}
+
+// Split a trailing "[sources: ...]" line off the answer. Returns
+// { answer, names }: the answer without the line (whitespace-trimmed) and
+// the raw comma-separated names (empty array when there is no line).
+function splitAttribution(answer) {
+  const match = /\r?\n*\[sources:\s*([^\]\r\n]+)\]\s*$/i.exec(String(answer || ""));
+  if (!match) return { answer: String(answer || ""), names: [] };
+  const clean = answer.slice(0, match.index).replace(/\s+$/, "");
+  const names = match[1].split(",").map((name) => name.trim()).filter(Boolean);
+  return { answer: clean, names };
+}
+
+// Upfront validation for user-added feeds, mirroring isSafeFetchUrl in
+// mcp/engines.mjs (the second line, checked again at fetch time): http/https,
+// no embedded credentials, default ports only, no private/internal IP
+// literals. The engine module is ESM and node:20's CJS cannot require it, so
+// the rules are duplicated here instead of imported.
+function unsafeWebsearchSourceUrl(rawUrl) {
+  let parsed;
+  try { parsed = new URL(String(rawUrl || "")); } catch { return "not a valid URL"; }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "only http/https URLs are allowed";
+  if (parsed.username || parsed.password) return "URLs with embedded credentials are not allowed";
+  if (parsed.port && parsed.port !== "80" && parsed.port !== "443") return "only default ports 80/443 are allowed";
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if ((/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":")) && blockedWebsearchSourceIp(host)) {
+    return "that address is on a private/internal network";
+  }
+  return null;
+}
+
+// The private/internal ranges of isBlockedIp in mcp/engines.mjs (IPv4
+// literals and IPv6 literals; hostnames are DNS-resolved by the engine's
+// fetch guard, not here).
+function blockedWebsearchSourceIp(ip) {
+  if (typeof ip !== "string" || !ip) return true;
+  if (ip.includes(":")) {
+    const v6 = ip.toLowerCase();
+    const mapped = v6.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (mapped) return blockedWebsearchSourceIp(mapped[1]);
+    if (v6 === "::" || v6 === "::1") return true;
+    if (v6.startsWith("fc") || v6.startsWith("fd")) return true; // unique-local
+    if (v6.startsWith("fe8") || v6.startsWith("fe9") || v6.startsWith("fea") || v6.startsWith("feb")) return true; // link-local
+    return false;
+  }
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return true;
+  const [a, b] = parts;
+  return a === 0 || a === 10 || a === 127
+    || (a === 100 && b >= 64 && b <= 127)
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 198 && (b === 18 || b === 19));
+}
 
 // --- Semantic search over the stored conversation -------------------------
 //
@@ -1076,6 +1235,62 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { requestId, entry: { ...entry, sources: conversationStoredSources(entry.sources) } });
     }
 
+    // The per-user websearch source list (the Websearch sources panel). This
+    // backend is the only writer of the list: the brain neither reads nor
+    // changes it (it is injected per MCP call and absent from the tool
+    // schema), and the client only ever sees its own user's rows.
+    if (req.method === "GET" && pathname === "/api/websearch/sources") {
+      const rows = await websearchSourceRowsForUser(req.user);
+      return json(res, 200, { requestId, sources: rows });
+    }
+
+    if (req.method === "POST" && pathname === "/api/websearch/sources") {
+      const payload = JSON.parse((await readBody(req, 4096)).toString("utf8") || "{}");
+      const source = String(payload.source || "").trim().slice(0, 64);
+      const rawUrl = String(payload.url || "").trim();
+      if (!source || !rawUrl) return json(res, 400, { error: "source_and_url_required", requestId });
+      const unsafe = unsafeWebsearchSourceUrl(rawUrl);
+      if (unsafe) return json(res, 400, { error: "invalid_url", message: unsafe, requestId });
+      const existing = await websearchSourceRowsForUser(req.user);
+      if (existing.filter((row) => row.kind === "feed" && !row.builtin).length >= 20) {
+        return json(res, 400, { error: "too_many_sources", requestId });
+      }
+      // Stable per-user id from the display name ("My Feed" -> user:my-feed),
+      // with a numeric suffix on collision so two feeds may share a name.
+      const baseId = `user:${source.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "feed"}`;
+      const taken = new Set(existing.map((row) => row.id));
+      let id = baseId;
+      for (let n = 2; taken.has(id); n += 1) id = `${baseId}-${n}`;
+      conversationStore.addWebsearchSource.run({ user: req.user, id, source, url: rawUrl });
+      return json(res, 201, { requestId, source: conversationStore.websearchSource.get({ user: req.user, id }) });
+    }
+
+    if (req.method === "PATCH" && pathname === "/api/websearch/sources") {
+      await ensureWebsearchSourcesSeeded(req.user);
+      const payload = JSON.parse((await readBody(req, 4096)).toString("utf8") || "{}");
+      const id = String(payload.id || "").trim();
+      if (!id) return json(res, 400, { error: "id_required", requestId });
+      const row = conversationStore.websearchSource.get({ user: req.user, id });
+      if (!row) return json(res, 404, { error: "source_not_found", requestId });
+      const enabled = payload.enabled === true ? 1 : 0;
+      conversationStore.setWebsearchSourceEnabled.run({ user: req.user, id, enabled });
+      return json(res, 200, { requestId, source: { ...row, enabled } });
+    }
+
+    if (req.method === "DELETE" && pathname === "/api/websearch/sources") {
+      await ensureWebsearchSourcesSeeded(req.user);
+      const payload = JSON.parse((await readBody(req, 4096)).toString("utf8") || "{}");
+      const id = String(payload.id || "").trim();
+      if (!id) return json(res, 400, { error: "id_required", requestId });
+      const row = conversationStore.websearchSource.get({ user: req.user, id });
+      if (!row) return json(res, 404, { error: "source_not_found", requestId });
+      // Built-in baseline rows are toggleable, never deletable — the panel
+      // offers Remove on the user's own feeds only.
+      if (row.builtin) return json(res, 400, { error: "builtin_source_not_deletable", requestId });
+      conversationStore.deleteWebsearchSource.run({ user: req.user, id });
+      return json(res, 200, { requestId });
+    }
+
     // Per-user isolation: every graph endpoint is scoped to the signed-in
     // user's world (their node, the entities they own, and the fact edges
     // between them — ownership bounds the world, there is no shared tier).
@@ -1758,10 +1973,10 @@ function mergeSourceNames(...lists) {
 // Runs the web_search tool of the MCP server and resolves with the result
 // text plus the source names behind it; the caller treats a failure as
 // "answer without search results".
-async function webSearch(query, requestId, signal) {
+async function webSearch(query, language, requestId, signal, webSources) {
   const started = Date.now();
   try {
-    const result = await withAbort(mcpWebSearch.call("web_search", { query, max_results: 5 }, 20000), signal);
+    const result = await withAbort(mcpWebSearch.call("web_search", { query, max_results: 5, lang: language === "de" ? "de" : "en", ...(webSources ? { webSources } : {}) }, 20000), signal);
     const text = (result.content || []).map((item) => item.text || "").join("\n").trim();
     if (result.isError || !text) throw new Error(text || "web search returned no results");
     console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_success", ms: Date.now() - started, chars: text.length }));
@@ -1810,10 +2025,15 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
   // it does not deny an enabled feature or claim results for a disabled one.
   let searchMessage = null;
   let searchSources = [];
+  let webSourcesList = null;
   const mcpStates = [];
   if (mcpFlags.websearch) {
     try {
-      const { text: results, sources: sourcesFromSearch } = await webSearch(prompt, requestId, signal);
+      // The user's own source list for this turn: injected into the pre-search
+      // and into every web tool call the brain makes. It is per-account data,
+      // resolved here server-side — the client never sends (or sees) it.
+      webSourcesList = await websearchSourcesForUser(user);
+      const { text: results, sources: sourcesFromSearch } = await webSearch(prompt, language, requestId, signal, webSourcesList);
       searchSources = sourcesFromSearch;
       searchMessage = {
         role: "system",
@@ -1825,6 +2045,10 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
       console.log(JSON.stringify({ level: "warn", requestId, msg: "websearch_skipped", error: error.message }));
       mcpStates.push("Web search (MCP web-search server) is ON, but the search for this prompt returned no results; answer from your own knowledge and do not mention the search.");
     }
+    // The attribution contract for web-based answers: a trailing "[sources: …]"
+    // line naming only the sources actually used, which this server then
+    // validates and strips (see splitAttribution below).
+    mcpStates.push(WEB_ATTRIBUTION_INSTRUCTION);
   } else {
     mcpStates.push("Web search (MCP web-search server) is OFF in the user's browser for this request, so no web results are available. For questions that need live or current data (the weather now, news, prices, sports scores, today's events), say you cannot check it while web search is off and that the user can enable it with the MCP web search toggle in the UI to let you look it up. If the user asks about web search or MCP, say it is switched off and can be enabled with the MCP search toggle in the UI.");
   }
@@ -1902,7 +2126,7 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
 
   // One overall deadline, comfortably inside the browser's 60 s request
   // timeout: the brain may spend it on at most a few tool round-trips.
-  const { data, webResults, webSources, graphUsed, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
+  const { data, webResults, webSources, graphUsed, graphWriteSucceeded } = await runBrain({ messages, brainProfile, user, useTools: Boolean(mcpFlags.graph && graphStore), webTools: Boolean(mcpFlags.websearch), webSourcesList, vikunjaTools, vikunjaClient, vikunjaToolNames, admin: isAdmin(user), lang: language === "de" ? "de" : "en", historySettings, requestId, signal, headers,
     deadlineMs: 50000 });
   const answer = extractAnswer(data);
   if (!answer) {
@@ -1913,7 +2137,37 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
       : "Brain returned no answer text");
   }
 
-  const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: answer })
+  // The "[sources: …]" line the brain is instructed to append to web-based
+  // answers: validate every name against the sources that actually ran for
+  // this turn (the pre-search result hosts, the web tool results' source
+  // names, the user's own feeds and the built-in source display names), drop
+  // hallucinated names, and strip the line from the answer. The validated
+  // names are the turn's websearch attribution — nothing else reaches the
+  // tag, the history, the stored turn or the graph.
+  const { answer: finalAnswer, names: reportedNames } = splitAttribution(answer);
+  const knownSourceNames = new Set();
+  for (const name of [...searchSources, ...webSources, ...(webSourcesList?.feeds || []).map((feed) => feed.source)]) {
+    const normalized = normalizeSourceName(name);
+    if (normalized) knownSourceNames.add(normalized);
+  }
+  if (webSourcesList) {
+    for (const entry of await builtinWebSources()) {
+      const normalized = normalizeSourceName(entry.source);
+      if (normalized) knownSourceNames.add(normalized);
+    }
+  }
+  const reportedSources = [];
+  const seenReported = new Set();
+  for (const name of reportedNames) {
+    const normalized = normalizeSourceName(name);
+    if (!normalized || !knownSourceNames.has(normalized) || seenReported.has(normalized)) continue;
+    seenReported.add(normalized);
+    reportedSources.push(name);
+    if (reportedSources.length >= 8) break;
+  }
+  const cleanAnswer = finalAnswer || answer;
+
+  const nextHistory = history.concat({ role: "user", content: prompt }, { role: "assistant", content: cleanAnswer })
     .slice(-Math.max(BRAIN_HISTORY_MESSAGES, historySettings.memoryTurns * 2));
   conversations.set(user, nextHistory);
   // Store ordinary turns in the knowledge graph after the answer is handed
@@ -1932,9 +2186,13 @@ async function chat(prompt, user, language, brainProfile, requestId, signal, mcp
     // the graph only through its explicit write tools.
     // The extractor reads what the turn actually used: the up-front search
     // results plus any web tool results the brain gathered itself.
-    ingestTurn({ user, prompt, searchResults: [searchMessage?.content, ...webResults].filter(Boolean).join("\n\n") || null, answer, brainProfile, requestId }).catch(() => {});
+    ingestTurn({ user, prompt, searchResults: [searchMessage?.content, ...webResults].filter(Boolean).join("\n\n") || null, answer: cleanAnswer, brainProfile, requestId }).catch(() => {});
   }
-  return { requestId, answer, configured: true, model: brainProfile.model, brainProfile: brainProfile.id, brainProfileLabel: brainProfile.label, sources: { websearch: webResults.length > 0 || searchSources.length > 0, graph: Boolean(graphUsed), websearchSources: mergeSourceNames(searchSources, webSources) } };
+  // Strict attribution: the tag appears only when the brain named at least
+  // one source that actually ran for this turn — a search that ran but was
+  // not used in the answer (or an unverifiable "[sources: …]" line) leaves
+  // the tag off.
+  return { requestId, answer: cleanAnswer, configured: true, model: brainProfile.model, brainProfile: brainProfile.id, brainProfileLabel: brainProfile.label, sources: { websearch: reportedSources.length > 0, graph: Boolean(graphUsed), websearchSources: reportedSources } };
 }
 
 // The graph tools offered to the brain when the knowledge graph toggle is on.
@@ -2271,7 +2529,7 @@ function graphToolDetail(name, args) {
   return parts.length ? `${name}: ${parts.join(", ")}` : name;
 }
 
-async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, vikunjaTools = null, vikunjaClient = null, vikunjaToolNames = null, admin = false, lang = "de", historySettings = normalizeHistorySettings(), requestId, signal, headers, deadlineMs }) {
+async function runBrain({ messages, brainProfile, user, useTools, webTools: webToolsOn = false, webSourcesList = null, vikunjaTools = null, vikunjaClient = null, vikunjaToolNames = null, admin = false, lang = "de", historySettings = normalizeHistorySettings(), requestId, signal, headers, deadlineMs }) {
   const local = [...messages];
   const totalSignal = AbortSignal.any([signal, AbortSignal.timeout(deadlineMs)]);
   // Web tool results collected for post-turn ingestion (the extractor reads
@@ -2399,9 +2657,14 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         }
       } else if (webToolsOn && WEB_TOOL_NAMES.has(name)) {
         // The answer language is injected HERE (like the graph user): the
-        // brain's web tool schema has no lang parameter.
+        // brain's web tool schema has no lang parameter. The signed-in
+        // user's enabled source list goes in the same way (web_search /
+        // web_news only — web_fetch takes an explicit URL and is
+        // unaffected by which sources are switched on). The brain never sees
+        // either: they are absent from the tool schema.
+        const webSourcesArg = webSourcesList && name !== "web_fetch" ? { webSources: webSourcesList } : {};
         try {
-          const result = await withAbort(mcpWebSearch.call(name, { ...args, lang }, WEB_TOOL_TIMEOUT_MS), totalSignal);
+          const result = await withAbort(mcpWebSearch.call(name, { ...args, lang, ...webSourcesArg }, WEB_TOOL_TIMEOUT_MS), totalSignal);
           const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
           const detail = (name === "web_news" ? args.topic : name === "web_fetch" ? args.url : args.query) || "";
           console.log(JSON.stringify({ level: "info", requestId, msg: "websearch_tool", tool: name, detail: String(detail).slice(0, 300), ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));

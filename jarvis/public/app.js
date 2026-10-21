@@ -22,6 +22,7 @@ const el = Object.fromEntries([
   "languageSwitch", "languageStatus",
   "aiProfileSelect", "aiProfileStatus", "aiProfileLed", "whisperProfileSelect", "whisperProfileStatus", "whisperProfileLed",
   "mcpSwitches",
+  "websearchSourceList", "websearchAddForm", "websearchAddSource", "websearchAddUrl", "websearchAddButton", "websearchStatus",
   "speakSwitch", "speakStatus",
   "graphPanel", "graphStatus", "graphRefreshButton", "graphRemoveButton", "graphCanvas", "graph3dStage",
   "graphView2dButton", "graphView3dButton", "graphRelevance", "graphSchema", "graphActivity",
@@ -593,6 +594,146 @@ function setMcpFlag(id, value, persist) {
   }
   log("settings", `${server.label} (MCP): ${state}`);
 }
+
+// The Websearch sources panel: this account's list of search engines, news
+// sources and feeds (the /api/websearch/sources endpoints). The server seeds
+// the list with the built-in baseline on first use; built-in rows can be
+// toggled but not removed, the user's own feeds can be removed. The list is
+// injected into the websearch MCP calls per prompt — the brain neither reads
+// nor changes it, and answers attribute only sources that actually ran.
+let websearchSources = [];
+let websearchBusy = false;
+
+async function websearchApi(method, body) {
+  const response = await fetch("/api/websearch/sources", {
+    method, cache: "no-store",
+    ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(10000),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+function renderWebsearchSources() {
+  el.websearchSourceList.replaceChildren(...websearchSources.map((row) => {
+    const item = document.createElement("li");
+    item.className = "websearch-source";
+    item.dataset.id = row.id;
+    const kind = document.createElement("span");
+    kind.className = "websearch-source-kind";
+    kind.textContent = row.kind;
+    const name = document.createElement("span");
+    name.className = "websearch-source-name";
+    name.textContent = row.source;
+    name.title = row.url;
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "lang-switch websearch-source-toggle";
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", String(Boolean(row.enabled)));
+    toggle.setAttribute("aria-label", `${row.source}: ${row.enabled ? "enabled" : "disabled"}`);
+    toggle.title = row.builtin
+      ? "Built-in source: switch it on or off for this account. It cannot be removed."
+      : "Switch this feed on or off for this account.";
+    const off = document.createElement("span");
+    off.className = "lang-option";
+    off.textContent = "off";
+    const on = document.createElement("span");
+    on.className = "lang-option";
+    on.textContent = "on";
+    const knob = document.createElement("span");
+    knob.className = "lang-knob";
+    knob.setAttribute("aria-hidden", "true");
+    toggle.append(off, on, knob);
+    toggle.addEventListener("click", () => setWebsearchSourceEnabled(row, !row.enabled));
+    item.append(kind, name, toggle);
+    if (!row.builtin) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "websearch-source-remove";
+      remove.textContent = "Remove";
+      remove.title = "Remove this feed from your list.";
+      remove.addEventListener("click", () => removeWebsearchSource(row));
+      item.append(remove);
+    }
+    return item;
+  }));
+}
+
+async function loadWebsearchSources() {
+  if (websearchBusy) return;
+  websearchBusy = true;
+  el.websearchStatus.textContent = "Loading your websearch sources.";
+  try {
+    const payload = await websearchApi("GET");
+    websearchSources = payload.sources || [];
+    renderWebsearchSources();
+    el.websearchStatus.textContent = `${websearchSources.filter((row) => row.enabled).length} of ${websearchSources.length} sources active.`;
+  } catch (error) {
+    el.websearchStatus.textContent = `Could not load your websearch sources: ${error.message}`;
+    log("settings", "Could not load websearch sources", { message: error.message });
+  } finally {
+    websearchBusy = false;
+  }
+}
+
+async function setWebsearchSourceEnabled(row, enabled) {
+  const toggle = el.websearchSourceList.querySelector(`.websearch-source[data-id="${CSS.escape(row.id)}"] .websearch-source-toggle`);
+  if (toggle) toggle.disabled = true;
+  el.websearchStatus.textContent = enabled ? `Enabling ${row.source}…` : `Disabling ${row.source}…`;
+  try {
+    const payload = await websearchApi("PATCH", { id: row.id, enabled });
+    row.enabled = payload.source.enabled;
+    renderWebsearchSources();
+    el.websearchStatus.textContent = `${row.source} ${row.enabled ? "enabled" : "disabled"} for this account.`;
+    log("settings", `Websearch source ${row.source}: ${row.enabled ? "on" : "off"}`);
+  } catch (error) {
+    el.websearchStatus.textContent = `Could not change ${row.source}: ${error.message}`;
+    renderWebsearchSources();
+  }
+}
+
+async function removeWebsearchSource(row) {
+  if (!window.confirm(`Remove "${row.source}" from your websearch sources?`)) return;
+  el.websearchStatus.textContent = `Removing ${row.source}…`;
+  try {
+    await websearchApi("DELETE", { id: row.id });
+    websearchSources = websearchSources.filter((entry) => entry.id !== row.id);
+    renderWebsearchSources();
+    el.websearchStatus.textContent = `Removed ${row.source}.`;
+    log("settings", `Websearch source ${row.source} removed`);
+  } catch (error) {
+    el.websearchStatus.textContent = `Could not remove ${row.source}: ${error.message}`;
+  }
+}
+
+el.websearchAddForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const source = el.websearchAddSource.value.trim();
+  const url = el.websearchAddUrl.value.trim();
+  if (!source || !url) {
+    el.websearchStatus.textContent = "A name and a feed URL are both required.";
+    return;
+  }
+  el.websearchAddButton.disabled = true;
+  el.websearchStatus.textContent = "Adding source…";
+  try {
+    const payload = await websearchApi("POST", { source, url });
+    websearchSources.push(payload.source);
+    renderWebsearchSources();
+    el.websearchAddSource.value = "";
+    el.websearchAddUrl.value = "";
+    el.websearchStatus.textContent = `Added ${payload.source.source} — active for this account from the next search on.`;
+    log("settings", `Websearch source added: ${payload.source.source}`);
+  } catch (error) {
+    el.websearchStatus.textContent = `Could not add the source: ${error.message}`;
+  } finally {
+    el.websearchAddButton.disabled = false;
+  }
+});
 
 // Speak answers on/off. Off means the answer is written to the Conversation panel
 // as text only; the wake pipeline itself keeps running.
@@ -2555,6 +2696,13 @@ async function loadConfig(userFromLogin) {
       setMcpFlag(server.id, saved === "true", false);
       document.getElementById(`mcpSwitch-${server.id}`).disabled = false;
     }
+    // The Websearch sources panel is per-account on the server: load the
+    // list (seeded with the built-in baseline on first use) and unlock the
+    // add form.
+    el.websearchAddSource.disabled = false;
+    el.websearchAddUrl.disabled = false;
+    el.websearchAddButton.disabled = false;
+    loadWebsearchSources();
     // The graph size sliders: restore the persisted values (50–200) before
     // the 3D view is created, so the first render already uses them.
     let savedGraphSizes = null;
