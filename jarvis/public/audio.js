@@ -256,11 +256,14 @@ export function normalizeWakePhrase(value) {
 // True when the window holds a contiguous run of at least minBurstMs whose
 // per-100 ms block RMS is at least burstGain times the median of the window's
 // voice blocks and at least absoluteFloor: the user's own voice standing out
-// against a quieter speaker echo. A uniform recording (pure echo, or the user
-// speaking the whole window at one level) has no such run, so neither can
-// self-trigger a voice command.
+// against a quieter speaker echo. The gain stays deliberately low (1.2): a
+// bare "stop" over loud TTS echo often reaches the mic at only ~1.3× the echo
+// level, and the looser gate cannot self-fire — a burst alone never triggers
+// a command, the transcript must still carry the stop word. A uniform
+// recording (pure echo, or the user speaking the whole window at one level)
+// has no such run, so neither can self-trigger a voice command.
 export function hasLoudBurst(samples, start, end, sampleRate, options = {}) {
-  const { voiceThreshold = 0.012, burstGain = 1.5, minBurstMs = 200, absoluteFloor = 0.02 } = options;
+  const { voiceThreshold = 0.012, burstGain = 1.2, minBurstMs = 200, absoluteFloor = 0.02 } = options;
   const wrap = samples.length;
   const block = Math.max(1, Math.floor(sampleRate * 0.1));
   start = Math.max(0, Math.floor(start));

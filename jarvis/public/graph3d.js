@@ -33,6 +33,9 @@ const CENTERING = 0.015;
 const ALPHA_DECAY_PER_FRAME = 0.008;
 const ALPHA_FLOOR = 0.02;
 const AUTO_ROTATE_AFTER_MS = 5000;
+// autoFit: how long the user must have been idle before the auto-fit may
+// re-frame the view (a fresh node-set change re-arms the fit).
+const AUTO_FIT_IDLE_MS = 2500;
 
 export function createGraph3D(stage, { userName = null, onNodeClick, onFallback, nodeScale = 1, autoFit = false } = {}) {
   const canvas = document.createElement("canvas");
@@ -101,10 +104,15 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   };
   // autoFit (full-page view): frame the drawn world's bounding sphere
   // instead of the fixed default radius above, so a 200-node world does not
-  // surround the camera. The fit is scheduled on every node-set change and
-  // applied once the layout has settled (alpha decayed) and the user has not
-  // interacted recently, so polls never fight an in-progress zoom.
+  // surround the camera. The fit is armed on every node-set change and
+  // applied once the layout has settled (alpha decayed) and the user has
+  // been idle. The arm survives the alpha re-heat that update() does when
+  // arming it (the old one-shot cleared the flag before the settled check
+  // could ever run, so the fit was discarded and the view started inside
+  // the cloud), and a pointer drag or wheel disarms it until the next
+  // node-set change, so polls never fight an in-progress zoom.
   let fitScheduled = false;
+  let fitDisabled = false;
   let fittedNodeIds = null;
   // The node the camera follows (search narrowed to exactly one), or null.
   let focusId = null;
@@ -262,6 +270,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
       if (changed) {
         fittedNodeIds = new Set(nodeState.keys());
         fitScheduled = true;
+        fitDisabled = false; // a new world re-arms the framing
       }
     }
   }
@@ -439,6 +448,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   let dragState = null;
   canvas.addEventListener("pointerdown", (event) => {
     orbit.lastInteraction = performance.now();
+    fitDisabled = true; // a drag takes the camera over from the auto-fit
     dragState = { x: event.clientX, y: event.clientY, moved: false };
     canvas.setPointerCapture(event.pointerId);
   });
@@ -471,6 +481,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
     orbit.lastInteraction = performance.now();
+    fitDisabled = true; // a manual zoom outlives the next auto-fit
     orbit.target.radius = Math.min(420, Math.max(70, orbit.target.radius * (1 + event.deltaY * 0.001)));
   }, { passive: false });
 
@@ -506,12 +517,18 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
       stepPhysics();
       for (const entry of nodeState.values()) entry.mesh.position.copy(entry.pos);
     }
-    // autoFit: apply the scheduled framing once the layout has settled
-    // (alpha decayed below 0.2). If the user interacted meanwhile, drop the
-    // fit instead of overriding their camera.
-    if (fitScheduled) {
+    // autoFit: apply the armed framing once the layout has settled (alpha
+    // decayed below 0.2) and the user has been idle. The arm survives the
+    // alpha re-heat that update() does when arming it, so a fresh world is
+    // actually framed instead of dropped; a drag or wheel disarms it until
+    // the next node-set change.
+    if (fitScheduled
+      && !fitDisabled
+      && !focusId
+      && alpha < 0.2
+      && now - orbit.lastInteraction > AUTO_FIT_IDLE_MS) {
       fitScheduled = false;
-      if (alpha < 0.2 && now - orbit.lastInteraction > 10000) fitCamera();
+      fitCamera();
     }
     updateEdgePositions();
     updateCamera(deltaMs);

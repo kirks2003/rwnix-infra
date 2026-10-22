@@ -1274,7 +1274,7 @@ Fix (all browser-side):
 
 - `hasLoudBurst(samples, start, end, sampleRate)` in `public/audio.js`:
   true when the window holds a contiguous ≥200 ms run of 100 ms blocks at
-  least 1.5× the window's voice-block median RMS (and ≥0.02 absolute) —
+  least 1.2× the window's voice-block median RMS (and ≥0.02 absolute) —
   the user's own voice standing out against a quieter speaker echo. A
   uniform window (pure echo, or one loud voice level) never matches, so it
   cannot self-trigger.

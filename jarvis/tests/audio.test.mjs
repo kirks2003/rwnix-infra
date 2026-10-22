@@ -110,6 +110,17 @@ test("a loud user burst is found against a quieter echo, uniform windows are not
   assert.equal(hasLoudBurst(mixed.samples, 0, rate * 0.3, rate), false);
 });
 
+test("a user only clearly louder than the echo is still a burst at the 1.2x gate", () => {
+  const rate = 16000;
+  // The real-TTS case the old 1.5x gate missed: the user's "stopp" reaches
+  // the mic at only ~1.3x the echo level.
+  const soft = new AudioBufferWindow(rate, 10);
+  soft.push(tone(rate, 3, 0.035));
+  soft.push(tone(rate, 0.5, 0.0455));
+  soft.push(tone(rate, 2, 0.035));
+  assert.equal(hasLoudBurst(soft.samples, 0, soft.end, rate), true);
+});
+
 // The greeting's echo as the command window sees it: a short full-level head
 // (speaker-to-mic latency) plus a reverb decay with a 1 s RT60.
 function echoTail(rate, seconds) {
