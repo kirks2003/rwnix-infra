@@ -1,13 +1,16 @@
 #!/usr/bin/env node
-// Checkmk REST API as a stdio MCP server: wraps the Checkmk 2.x /api/1.0
-// HTTP API in a handful of monitoring tools, so the brain can query hosts,
-// services and states the same way it queries the graph or the web.
+// Checkmk REST API as a stdio MCP server: wraps the Checkmk 2.4/2.5
+// /api/1.0 robjects API (/domain-types + /objects) in a handful of monitoring
+// tools, so the brain can query hosts, services and states the same way it
+// queries the graph or the web.
 //
 // Env (the deployment sets both; without them the server lists no tools and
 // every call answers "not configured", so the UI switch can exist without a
 // working instance behind it):
-//   CHECKMK_BASE_URL   e.g. https://host/checkmk/api/1.0
-//   CHECKMK_TOKEN      API token (sent as Bearer)
+//   CHECKMK_BASE_URL   e.g. http://host:5000/cmk/check_mk/api/1.0
+//   CHECKMK_TOKEN      auth token. A value containing ":" is treated as
+//                      "user:password" and sent as HTTP Basic; any other
+//                      value is sent as a Bearer token.
 //   CHECKMK_INSECURE   "1" = skip TLS verification (self-signed internal cert)
 //   CHECKMK_TIMEOUT_MS per-request timeout, default 15000
 import readline from "node:readline";
@@ -21,6 +24,13 @@ const timeoutMs = Number(process.env.CHECKMK_TIMEOUT_MS || 15000);
 const configured = Boolean(baseUrl && token);
 
 const STATES = { 0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN" };
+const STATE_RANK = { CRITICAL: 0, WARNING: 1, UNKNOWN: 2, OK: 3 };
+
+function authHeader() {
+  if (!token) return "";
+  if (token.includes(":")) return `Basic ${Buffer.from(token, "utf8").toString("base64")}`;
+  return `Bearer ${token}`;
+}
 
 function request(pathname, params = {}) {
   if (!configured) {
@@ -28,14 +38,24 @@ function request(pathname, params = {}) {
   }
   const target = new URL(baseUrl.replace(/\/$/, "") + pathname);
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && value !== "") target.searchParams.set(key, String(value));
+    if (value === undefined || value === null || value === "") continue;
+    // Checkmk's robjects API takes repeated ?columns=name&columns=address, so a
+    // param value may be an array (appended once per item) or a scalar.
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item === undefined || item === null || item === "") continue;
+        target.searchParams.append(key, String(item));
+      }
+    } else {
+      target.searchParams.set(key, String(value));
+    }
   }
   const lib = target.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
     const req = lib.get(
       target,
       {
-        headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+        headers: { authorization: authHeader(), accept: "application/json" },
         rejectUnauthorized: !insecure,
         timeout: timeoutMs,
       },
@@ -61,32 +81,70 @@ function request(pathname, params = {}) {
   });
 }
 
-function hostLine(item) {
-  const name = item.host_name || "(unnamed)";
-  const address = item.address ? ` ${item.address}` : "";
-  const site = item.site ? ` [${item.site}]` : "";
-  const active = item.is_active === false ? " (inactive)" : "";
-  return `${name}${address}${site}${active}`;
+// A robjects collection keeps its rows in `value`; each row carries its
+// attributes under `extensions`.
+function collectionRows(data) {
+  return Array.isArray(data && data.value) ? data.value : [];
 }
 
-function hostsText(data) {
-  const rows = data.data || [];
-  const more = data.is_truncated
-    ? `\n… ${data.total} hosts total, first ${rows.length} shown — narrow the search or raise the limit.`
-    : "";
-  return `${rows.length} host(s)${data.total != null ? ` of ${data.total}` : ""}.\n${rows.map(hostLine).join("\n")}${more}`;
+function hostLine(ext) {
+  const name = (ext && ext.name) || "(unnamed)";
+  const address = ext && ext.address ? ` ${ext.address}` : "";
+  return `${name}${address}`;
 }
 
-function servicesText(data, host) {
-  const rows = data.data || [];
-  const lines = rows.map((item) => {
-    const state = STATES[item.state] ?? `state ${item.state}`;
-    const soft = item.state_type === "soft" ? " (soft)" : "";
-    const plugin = item.plugin_name ? ` [${item.plugin_name}]` : "";
-    return `${item.service_description || "(unnamed)"}: ${state}${soft}${plugin}`;
-  });
-  const more = data.is_truncated ? ` of ${data.total}` : "";
-  return `${host}: ${rows.length} service(s) shown${more}.\n${lines.join("\n")}`;
+function clampLimit(value, fallback = 50) {
+  const limit = Math.trunc(Number(value));
+  return Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : fallback;
+}
+
+async function callTool(name, args = {}) {
+  switch (name) {
+    case "cmk_status": {
+      const data = await request("/version");
+      const version = (data.versions && data.versions.checkmk) || "unknown";
+      const edition = data.edition || "unknown";
+      return `Checkmk ${version} (${edition}) is up and answering its API.`;
+    }
+    case "cmk_hosts": {
+      const limit = clampLimit(args.limit);
+      const data = await request("/domain-types/host/collections/all", { columns: ["name", "address"] });
+      let rows = collectionRows(data).map((item) => item.extensions || {});
+      const total = rows.length;
+      const needle = (args.search || "").trim().toLowerCase();
+      if (needle) rows = rows.filter((ext) => String(ext.name || "").toLowerCase().includes(needle));
+      const shown = rows.slice(0, limit);
+      const head = needle
+        ? `${shown.length} host(s) matching "${needle}" (of ${total} total).`
+        : (total > shown.length ? `${shown.length} of ${total} host(s).` : `${shown.length} host(s).`);
+      return `${head}\n${shown.map(hostLine).join("\n")}`;
+    }
+    case "cmk_host": {
+      if (!args.host_name) return "Missing host_name.";
+      const data = await request(`/objects/host/${encodeURIComponent(args.host_name)}`, { columns: ["name", "address"] });
+      const ext = data.extensions || {};
+      return `Host: ${hostLine(ext)}`;
+    }
+    case "cmk_services": {
+      if (!args.host_name) return "Missing host_name.";
+      const limit = clampLimit(args.limit);
+      const data = await request(
+        `/objects/host/${encodeURIComponent(args.host_name)}/collections/services`,
+        { columns: ["description", "state"] },
+      );
+      const rows = collectionRows(data).map((item) => item.extensions || {});
+      const total = rows.length;
+      rows.sort((a, b) => (STATE_RANK[STATES[a.state]] ?? 9) - (STATE_RANK[STATES[b.state]] ?? 9));
+      const shown = rows.slice(0, limit);
+      const lines = shown.map((ext) => `${ext.description || "(unnamed)"}: ${STATES[ext.state] ?? `state ${ext.state}`}`);
+      const head = total > shown.length
+        ? `${args.host_name}: ${shown.length} of ${total} service(s) shown, non-OK first.`
+        : `${args.host_name}: ${shown.length} service(s), non-OK first.`;
+      return `${head}\n${lines.join("\n")}`;
+    }
+    default:
+      return `Unknown tool ${name}. Use: ${TOOLS.map((tool) => tool.name).join(", ")}.`;
+  }
 }
 
 const TOOLS = [
@@ -97,7 +155,7 @@ const TOOLS = [
   },
   {
     name: "cmk_hosts",
-    description: "List the hosts Checkmk monitors with address, site and active state. Use search to narrow by (part of) a host name; raise limit for more rows.",
+    description: "List the hosts Checkmk monitors with their address. Use search to narrow by (part of) a host name; raise limit for more rows.",
     inputSchema: {
       type: "object",
       properties: {
@@ -108,7 +166,7 @@ const TOOLS = [
   },
   {
     name: "cmk_host",
-    description: "Show the attributes of one monitored host by exact host name (address, site, active state, labels, contact groups).",
+    description: "Show the attributes of one monitored host by exact host name (name and address).",
     inputSchema: {
       type: "object",
       properties: { host_name: { type: "string" } },
@@ -117,7 +175,7 @@ const TOOLS = [
   },
   {
     name: "cmk_services",
-    description: "List the services of one host with their current state (OK/WARNING/CRITICAL/UNKNOWN). This is how you answer 'is X down' or 'what is failing on X'.",
+    description: "List the services of one host with their current state (OK/WARNING/CRITICAL/UNKNOWN), non-OK first. This is how you answer 'is X down' or 'what is failing on X'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -128,51 +186,6 @@ const TOOLS = [
     },
   },
 ];
-
-function clampLimit(value, fallback = 50) {
-  const limit = Math.trunc(Number(value));
-  return Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : fallback;
-}
-
-async function callTool(name, args = {}) {
-  switch (name) {
-    case "cmk_status": {
-      const data = await request("/status");
-      const info = data.data || {};
-      return `Checkmk ${info.version || "unknown"} (${info.edition || "unknown edition"}) is up and answering its API.`;
-    }
-    case "cmk_hosts": {
-      const data = await request("/hosts", {
-        columns: "host_name,address,site,is_active",
-        limit: clampLimit(args.limit),
-        search: args.search,
-      });
-      return hostsText(data);
-    }
-    case "cmk_host": {
-      if (!args.host_name) return "Missing host_name.";
-      const data = await request(`/hosts/${encodeURIComponent(args.host_name)}`, {
-        columns: "host_name,address,site,is_active,labels,contact_groups",
-      });
-      const info = data.data || {};
-      const lines = [`Host: ${hostLine(info)}`];
-      for (const key of ["labels", "contact_groups"]) {
-        if (Array.isArray(info[key]) && info[key].length) lines.push(`${key}: ${info[key].join(", ")}`);
-      }
-      return lines.join("\n");
-    }
-    case "cmk_services": {
-      if (!args.host_name) return "Missing host_name.";
-      const data = await request(`/hosts/${encodeURIComponent(args.host_name)}/services`, {
-        columns: "service_description,plugin_name,state,state_type",
-        limit: clampLimit(args.limit),
-      });
-      return servicesText(data, args.host_name);
-    }
-    default:
-      return `Unknown tool ${name}. Use: ${TOOLS.map((tool) => tool.name).join(", ")}.`;
-  }
-}
 
 const respond = (id, result) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
 
@@ -193,7 +206,7 @@ rl.on("line", async (line) => {
       respond(id, {
         protocolVersion: (params && params.protocolVersion) || "2025-06-18",
         capabilities: { tools: {} },
-        serverInfo: { name: "jarvis-checkmk", version: "1.0.0" },
+        serverInfo: { name: "jarvis-checkmk", version: "1.1.0" },
         instructions: configured
           ? "Checkmk monitoring tools: cmk_status, cmk_hosts, cmk_host, cmk_services. States are OK/WARNING/CRITICAL/UNKNOWN."
           : "Checkmk is not configured on this deployment; every tool call answers with the missing configuration.",
