@@ -1,6 +1,7 @@
 // Pure helpers for the web-search engines: markup parsing, redirect-URL
 // unwrapping and result merging. No network code here, so the unit tests run
 // without internet (the MCP server in websearch.mjs owns the fetches).
+import { BASELINE_FEEDS } from "./news-feeds.mjs";
 
 // A bare user-agent is the classic bot tell: real Chrome sends a full header
 // set, and a language-aware Accept-Language is what makes German queries
@@ -183,13 +184,14 @@ export const INTEREST_FEEDS = {
 //
 // The baseline every user's per-user source list is seeded with: one entry
 // per built-in source of the web_search and web_news tools, derived from the
-// code above (the engine endpoints, the two news-search sources and the
-// INTEREST_FEEDS curated feeds). `id` is the stable row key the backend
-// stores per user, `source` the display name the panel — and the brain's
-// attribution line — uses, `kind` is engine / news / feed and `tool` the MCP
-// tool the source feeds. A feed is one row per feed URL, carrying every
-// interest area it is curated for (Hacker News and Lobsters are curated for
-// two areas each, so they are one row with both areas, not a duplicate).
+// code above (the engine endpoints, the two news-search sources, the
+// INTEREST_FEEDS curated feeds and the topic-agnostic BASELINE_FEEDS). `id`
+// is the stable row key the backend stores per user, `source` the display
+// name the panel — and the brain's attribution line — uses, `kind` is
+// engine / news / feed and `tool` the MCP tool the source feeds. A feed is
+// one row per feed URL, carrying every interest area it is curated for
+// (Hacker News and Lobsters are curated for two areas each, so they are one
+// row with both areas, not a duplicate); baseline feeds carry no areas.
 function sourceSlug(name) {
   return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -207,6 +209,7 @@ export const BUILTIN_WEB_SOURCES = [
   { id: "google-news", source: "Google News", kind: "news", tool: "web_news", url: "https://news.google.com/rss" },
   ...(() => {
     const byUrl = new Map();
+    const byId = new Set();
     for (const [area, feeds] of Object.entries(INTEREST_FEEDS)) {
       for (const feed of feeds) {
         const key = normalizeUrlForDedupe(feed.url);
@@ -215,8 +218,9 @@ export const BUILTIN_WEB_SOURCES = [
           if (!entry.areas.includes(area)) entry.areas.push(area);
           continue;
         }
+        const id = feedSourceId(feed);
         const item = {
-          id: feedSourceId(feed),
+          id,
           source: feed.source,
           kind: "feed",
           tool: "web_news",
@@ -224,7 +228,23 @@ export const BUILTIN_WEB_SOURCES = [
           url: feed.url,
         };
         byUrl.set(key, item);
+        byId.add(id);
       }
+    }
+    for (const feed of BASELINE_FEEDS) {
+      const key = normalizeUrlForDedupe(feed.url);
+      const id = feedSourceId(feed);
+      if (byUrl.has(key) || byId.has(id)) continue;
+      const item = {
+        id,
+        source: feed.source,
+        kind: "feed",
+        tool: "web_news",
+        areas: [],
+        url: feed.url,
+      };
+      byUrl.set(key, item);
+      byId.add(id);
     }
     return [...byUrl.values()];
   })(),

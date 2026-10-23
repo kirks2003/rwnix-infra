@@ -390,14 +390,16 @@ function builtinWebSources() {
   return websearchBuiltinPromise;
 }
 
-// Seed this user's list with the full built-in baseline on first use.
-// Idempotent: a user whose rows already exist (even partially toggled) is
-// left exactly as-is.
+// Top up this user's list with built-in baseline rows that are missing,
+// while leaving existing rows exactly as-is (including their enabled state).
+// A fresh user gets the full baseline; a user whose baseline predates an
+// upgrade only receives the newly added built-in ids.
 async function ensureWebsearchSourcesSeeded(user) {
-  if (conversationStore.countWebsearchSources.get({ user }).n > 0) return;
   const builtin = await builtinWebSources();
+  const existing = new Set(conversationStore.selectWebsearchSources.all({ user }).map((row) => row.id));
   const insert = conversationStore.seedWebsearchSource;
   for (const entry of builtin) {
+    if (existing.has(entry.id)) continue;
     insert.run({ user, id: entry.id, source: entry.source, url: entry.url || "", kind: entry.kind });
   }
 }

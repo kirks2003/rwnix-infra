@@ -918,12 +918,13 @@ test("websearch sources: per-user list seeded with the built-in baseline, toggle
   }).then(async (response) => ({ status: response.status, payload: await response.json() }));
 
   // First use seeds the built-in baseline straight from the source code:
-  // 17 entries (4 engines incl. the instant-answer one, 2 news, 11 deduped
-  // interest feeds), all enabled, all builtin, ordered engine/news/feed.
+  // 140 entries (4 engines incl. the instant-answer one, 2 news, 11 curated
+  // interest feeds + 123 baseline feeds), all enabled, all builtin,
+  // ordered engine/news/feed.
   const first = await api("GET");
   assert.equal(first.status, 200);
   const seeded = first.payload.sources;
-  assert.equal(seeded.length, 17);
+  assert.equal(seeded.length, 140);
   assert.ok(seeded.every((row) => row.enabled === 1 && row.builtin === 1));
   assert.ok(seeded.some((row) => row.id === "duckduckgo" && row.kind === "engine"));
   assert.ok(seeded.some((row) => row.id === "bing-news" && row.kind === "news"));
@@ -972,7 +973,7 @@ test("websearch sources: per-user list seeded with the built-in baseline, toggle
   assert.equal(gone.status, 200);
   const after = await api("GET");
   const rows = after.payload.sources;
-  assert.equal(rows.length, 18);
+  assert.equal(rows.length, 141);
   assert.ok(rows.some((row) => row.id === "wikipedia" && row.enabled === 0));
   assert.ok(rows.some((row) => row.id === "user:my-feed" && row.enabled === 1));
   assert.ok(!rows.some((row) => row.id === "user:my-feed-2"));
@@ -983,7 +984,7 @@ test("websearch sources: per-user list seeded with the built-in baseline, toggle
   // Per-user isolation: Roman's list is still the untouched baseline.
   const roman = await login(origin, "Roman");
   const isolated = await fetch(`${origin}/api/websearch/sources`, { headers: { cookie: roman } }).then((response) => response.json());
-  assert.equal(isolated.sources.length, 17);
+  assert.equal(isolated.sources.length, 140);
   assert.ok(isolated.sources.every((row) => row.enabled === 1));
   assert.ok(!isolated.sources.some((row) => row.id === "user:my-feed"));
 });
@@ -1035,7 +1036,7 @@ test("the user's enabled websearch sources ride along on the MCP calls, not the 
   assert.ok(!args.webSources.engines.includes("wikipedia"), "the disabled engine is not injected");
   assert.deepEqual(args.webSources.engines, ["bing", "duckduckgo", "duckduckgo-instant"]);
   assert.deepEqual(args.webSources.news, ["bing-news", "google-news"]);
-  assert.equal(args.webSources.feeds.length, 11);
+  assert.equal(args.webSources.feeds.length, 134);
   // …but the brain's tool schema never exposes it (nor the injected lang).
   const webNewsTool = body.tools.find((tool) => tool.function.name === "web_news");
   const schema = JSON.stringify(webNewsTool);
