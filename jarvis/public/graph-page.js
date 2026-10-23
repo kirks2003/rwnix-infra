@@ -20,7 +20,7 @@ let config = null;
 let graphCenter = null;
 let graphView = "3d";
 let graph3d = null;
-let graph3dFailed = false;
+let graph3dUnavailable = false;
 let lastSubgraph = null;
 const graphScales = { node: 1.5, text: 1.5 };
 
@@ -61,35 +61,52 @@ function render2d(subgraph) {
   });
 }
 
+function failGraph3d(reason) {
+  if (graph3dUnavailable) return;
+  graph3dUnavailable = true;
+  if (graph3d) {
+    graph3d.dispose();
+    graph3d = null;
+  }
+  el.graphView3dButton.disabled = true;
+  el.graphView3dButton.title = reason;
+  el.graphStatus.textContent = `${reason} — showing 2D`;
+  setGraphView("2d");
+}
+
+function setGraphHint() {
+  el.graphHint.textContent = graphView === "3d"
+    ? "Drag to orbit, scroll to zoom, click an entity to centre on its neighbourhood. Sizes are saved for this view in this browser only."
+    : "Search the graph, scroll to zoom, and click an entity to centre on its neighbourhood. Sizes are saved for this view in this browser only.";
+}
+
 function setGraphView(view) {
   graphView = view;
-  const use3d = view === "3d" && !graph3dFailed && Boolean(config?.graphConfigured);
+  const use3d = view === "3d" && !graph3dUnavailable && Boolean(config?.graphConfigured);
   // toggleAttribute, not the .hidden property: on SVG elements the property
   // does not reflect the attribute, so the [hidden] CSS would never lift.
   el.graph3dStage.toggleAttribute("hidden", !use3d);
   el.graphCanvas.toggleAttribute("hidden", use3d);
   el.graphView3dButton.classList.toggle("active", use3d);
   el.graphView2dButton.classList.toggle("active", !use3d);
-  el.graphView3dButton.disabled = !config?.graphConfigured || graph3dFailed;
+  el.graphView3dButton.disabled = !config?.graphConfigured || graph3dUnavailable;
   el.graphView2dButton.disabled = !config?.graphConfigured;
+  setGraphHint();
   if (use3d && !graph3d) {
     graph3d = createGraph3D(el.graph3dStage, {
       userName: config?.user || null,
       nodeScale: graphScales.node,
       autoFit: true,
       onNodeClick: (nodeId) => loadGraph(nodeId),
-      onFallback: () => {
-        graph3dFailed = true;
-        if (graph3d) { graph3d.dispose(); graph3d = null; }
-        el.graphView3dButton.disabled = true;
-        el.graphView3dButton.title = "WebGL is not available in this browser";
-        setGraphView("2d");
-      },
+      onFallback: () => failGraph3d("WebGL is not available in this browser"),
     });
   }
   if (lastSubgraph) {
-    if (use3d && graph3d) graph3d.update(lastSubgraph);
-    else if (!use3d) render2d(lastSubgraph);
+    if (use3d && graph3d) {
+      graph3d.update(lastSubgraph);
+    } else if (!use3d) {
+      render2d(lastSubgraph);
+    }
   }
 }
 
@@ -107,8 +124,11 @@ async function loadGraph(center) {
     }
     el.graphStatus.textContent = `${status.nodes} nodes · ${status.edges} links${graphCenter ? " · neighbourhood" : ""}`;
     lastSubgraph = subgraph;
-    if (graphView === "3d" && graph3d) graph3d.update(subgraph);
-    else render2d(subgraph);
+    if (graphView === "3d" && graph3d) {
+      graph3d.update(subgraph);
+    } else {
+      render2d(subgraph);
+    }
   } catch (error) {
     el.graphStatus.textContent = `Unreachable: ${error.message}`;
   }

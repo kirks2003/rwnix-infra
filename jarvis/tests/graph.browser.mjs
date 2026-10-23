@@ -462,7 +462,7 @@ async function routeFullPageApi(page) {
 
 // `routes` may register extra API mocks after the page's (later-registered
 // routes win), so a test can shape the subgraph the page loads.
-async function openFullPage(t, { width = 1280, height = 800, routes = null } = {}) {
+async function openFullPage(t, { width = 1280, height = 800, routes = null, fallback = false } = {}) {
   const page = await browser.newPage({ viewport: { width, height } });
   t.after(() => page.close());
   const errors = [];
@@ -471,7 +471,7 @@ async function openFullPage(t, { width = 1280, height = 800, routes = null } = {
   await routeFullPageApi(page);
   if (routes) await routes(page);
   await page.goto(`${origin}/graph.html`);
-  await page.waitForSelector("#graph3dStage .graph-3d-labels span:not(.edge)");
+  await page.waitForSelector(fallback ? "#graphCanvas circle" : "#graph3dStage .graph-3d-labels span:not(.edge)");
   return page;
 }
 
@@ -502,6 +502,126 @@ test("the full-size graph page stacks head, search, stage and hint without overl
   assert.ok(boxes.stage.height > 100, `the stage keeps its share of the viewport (height ${boxes.stage.height})`);
   // The head shows which account this tab is signed in as.
   assert.equal((await page.textContent("#graphUser")).trim(), "Mila");
+});
+
+function ownershipGraph(count = 200) {
+  const nodes = Array.from({ length: count }, (_, i) => i
+    ? { id: `n${i}`, name: `Entity ${i}`, type: "topic", owner: "Mila" }
+    : { id: "n0", name: "Mila", owner: null });
+  const edges = nodes.slice(1).map((node) => ({ source: "n0", target: node.id, type: "OWNS" }));
+  for (let i = 1; edges.length < 320; i += 1) {
+    edges.push({ source: "n0", target: `n${i}`, type: "LIKES" });
+  }
+  return { nodes, edges };
+}
+
+async function observeScene(page) {
+  const source = await readFile(new URL("../public/graph3d.js", import.meta.url), "utf8");
+  await page.route("**/graph3d.js", (route) => route.fulfill({
+    contentType: "application/javascript",
+    body: source.replace("renderer.render(scene, camera);", "renderer.render(scene, camera); window.observeGraphScene(scene, camera, renderer);"),
+  }));
+  await page.addInitScript(() => {
+    window.observeGraphScene = (scene, camera, renderer) => {
+      const nodes = scene.children.filter((child) => child.isMesh);
+      const sample = document.createElement("canvas");
+      sample.width = 240;
+      sample.height = 160;
+      const ctx = sample.getContext("2d");
+      ctx.drawImage(renderer.domElement, 0, 0, 240, 160);
+      const pixels = ctx.getImageData(0, 0, 240, 160).data;
+      let lit = 0;
+      for (let i = 0; i < pixels.length; i += 4) {
+        if (pixels[i] + pixels[i + 1] + pixels[i + 2] > 80) lit += 1;
+      }
+      window.sceneSample = {
+        count: nodes.length,
+        finite: nodes.every((node) => node.position.toArray().every(Number.isFinite)),
+        extent: Math.max(...nodes.map((node) => node.position.length())),
+        distance: camera.position.length(),
+        inFrame: nodes.filter((node) => {
+          const p = node.position.clone().project(camera);
+          return Math.abs(p.x) <= 1 && Math.abs(p.y) <= 1 && p.z >= -1 && p.z <= 1;
+        }).length,
+        lit,
+      };
+    };
+  });
+}
+
+for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+  test(`full-page 3D keeps a 200-node ownership hub visible at ${viewport.width}px`, async (t) => {
+    const graph = ownershipGraph();
+    const page = await openFullPage(t, {
+      ...viewport,
+      routes: async (p) => {
+        await observeScene(p);
+        await p.addInitScript(() => {
+          let seed = 12345;
+          Math.random = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+        });
+        await p.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: graph }));
+      },
+    });
+    await page.waitForTimeout(4000);
+    const sample = await page.evaluate(() => window.sceneSample);
+    assert.equal(await page.locator("#graph3dStage").isHidden(), false, `a populated WebGL view must not switch itself to 2D: ${JSON.stringify(sample)}`);
+    assert.ok(sample.finite && sample.extent < 1000, `bounded layout: ${JSON.stringify(sample)}`);
+    assert.equal(sample.count, 200);
+    assert.equal(sample.inFrame, 200, `all nodes fit both viewport dimensions: ${JSON.stringify(sample)}`);
+    assert.ok(sample.lit > 30, `the canvas draws actual nodes/edges, not only DOM labels: ${JSON.stringify(sample)}`);
+    const distance = sample.distance;
+    await page.click("#graphRefreshButton");
+    await page.waitForTimeout(4000);
+    const refreshed = await page.evaluate(() => window.sceneSample);
+    assert.equal(await page.locator("#graph3dStage").isHidden(), false);
+    assert.ok(refreshed.finite && refreshed.extent < 1000);
+    assert.ok(Math.abs(refreshed.distance - distance) < 1, "unchanged polling must not reframe the camera");
+    await page.click("#graphView2dButton");
+    await page.click("#graphView3dButton");
+    await page.waitForTimeout(1000);
+    assert.equal((await page.evaluate(() => window.sceneSample)).inFrame, 200);
+    const stage = await page.locator("#graph3dStage").boundingBox();
+    await page.mouse.move(stage.x + 10, stage.y + 10);
+    await page.mouse.wheel(0, -200);
+    await page.waitForTimeout(1500);
+    const zoomed = await page.evaluate(() => window.sceneSample.distance);
+    assert.ok(zoomed < distance - 20, "manual zoom remains available");
+    await page.click("#graphRefreshButton");
+    await page.waitForTimeout(3000);
+    assert.ok(Math.abs((await page.evaluate(() => window.sceneSample.distance)) - zoomed) < 1, "polls preserve manual zoom");
+  });
+}
+
+test("full-page 3D fits again on a narrow resize and keeps a sparse graph in 3D", async (t) => {
+  const page = await openFullPage(t, { routes: async (p) => {
+    await observeScene(p);
+    await p.route("**/api/graph/subgraph*", (route) => route.fulfill({ json: {
+      nodes: [{ id: "n0", name: "Mila" }], edges: [],
+    } }));
+  } });
+  await page.waitForTimeout(4000);
+  assert.equal(await page.locator("#graph3dStage").isHidden(), false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(1500);
+  const sample = await page.evaluate(() => window.sceneSample);
+  assert.equal(sample.inFrame, 1);
+  assert.ok(sample.lit > 5, `sparse graph is actually rendered: ${JSON.stringify(sample)}`);
+});
+
+test("the full-page graph falls back explicitly only when WebGL is unavailable", async (t) => {
+  const page = await openFullPage(t, { fallback: true, routes: async (p) => {
+    await p.addInitScript(() => {
+      const getContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+        return type.startsWith("webgl") ? null : getContext.call(this, type, ...args);
+      };
+    });
+  } });
+  assert.equal(await page.locator("#graph3dStage").isHidden(), true);
+  assert.equal(await page.locator("#graphCanvas").isHidden(), false);
+  assert.equal(await page.locator("#graphView3dButton").isDisabled(), true);
+  assert.match(await page.locator("#graphView3dButton").getAttribute("title"), /WebGL is not available/);
 });
 
 test("a lone search hit stays highlighted and is centred in the live 3D view", async (t) => {

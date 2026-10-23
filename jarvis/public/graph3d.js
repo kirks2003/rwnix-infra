@@ -64,7 +64,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   // distance; the 280/560 values here are the panel defaults.
   const fog = new THREE.Fog(BACKGROUND, 280, 560);
   scene.fog = fog;
-  const camera = new THREE.PerspectiveCamera(50, 1, 1, 2000);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 6000);
   scene.add(new THREE.AmbientLight(0x88aacc, 0.9));
   // decay 0: constant falloff, so the light behaves the same across three.js
   // versions (physical light units would need a very high intensity).
@@ -102,18 +102,9 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     center: new THREE.Vector3(),
     centerTarget: new THREE.Vector3(),
   };
-  // autoFit (full-page view): frame the drawn world's bounding sphere
-  // instead of the fixed default radius above, so a 200-node world does not
-  // surround the camera. The fit is armed on every node-set change and
-  // applied once the layout has settled (alpha decayed) and the user has
-  // been idle. The arm survives the alpha re-heat that update() does when
-  // arming it (the old one-shot cleared the flag before the settled check
-  // could ever run, so the fit was discarded and the view started inside
-  // the cloud), and a pointer drag or wheel disarms it until the next
-  // node-set change, so polls never fight an in-progress zoom.
+  // Frame once per structural change; identical polls must not fight zoom.
   let fitScheduled = false;
   let fitDisabled = false;
-  let fittedNodeIds = null;
   // The node the camera follows (search narrowed to exactly one), or null.
   let focusId = null;
 
@@ -155,26 +146,31 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
   // Diff the subgraph against the scene: keep positions of surviving nodes so
   // the view does not jump on every poll, spawn new ones near an existing
   // neighbour when there is one, and rebuild the line buffer.
+  let zoomMax = 420;
+  let fitApplied = false;
+  let layoutRadius = 0;
   function fitCamera() {
     let radius = 0;
     for (const entry of nodeState.values()) radius = Math.max(radius, entry.pos.length());
-    if (!radius) return;
-    // Distance for the bounding sphere's silhouette to fit the vertical
-    // field of view, with headroom for node sizes and the last settling
-    // frames, clamped to the same 70..420 range the wheel zoom uses.
-    const fov = (camera.fov * Math.PI) / 180;
-    const distance = Math.min(420, Math.max(70, ((radius + 25) / Math.tan(fov / 2)) * 1.1));
+    if (!nodeState.size) return;
+    layoutRadius = radius;
+    const verticalHalfFov = (camera.fov * Math.PI) / 360;
+    const halfFov = Math.min(verticalHalfFov, Math.atan(Math.tan(verticalHalfFov) * camera.aspect));
+    const distance = Math.max(70, ((radius + 35) / Math.sin(halfFov)) * 1.1);
+    zoomMax = Math.max(420, distance * 1.25);
     orbit.target.radius = distance;
-    // Pin the fog band to the framed distance so the far side of a large
-    // world stays readable (the panel keeps its fixed 280/560 band).
-    fog.near = distance * 1.15;
-    fog.far = distance * 2.6;
+    camera.far = Math.max(6000, zoomMax + radius * 3 + 1000);
+    camera.updateProjectionMatrix();
+    if (!fitApplied) orbit.current.radius = distance;
+    fitApplied = true;
   }
 
   function update(subgraph) {
     if (disposed) return;
     const incoming = (subgraph.nodes || []).slice(0, MAX_NODES);
     const incomingIds = new Set(incoming.map((node) => node.id));
+    const nodesChanged = incomingIds.size !== nodeState.size
+      || [...incomingIds].some((id) => !nodeState.has(id));
     for (const id of [...nodeState.keys()]) {
       if (!incomingIds.has(id)) removeNode(id);
     }
@@ -209,9 +205,17 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
       entry.label.classList.toggle("isolated", Boolean(node.isolated));
     }
     const byId = nodeState;
+    const previousEdges = new Set(edges.map((edge) => `${edge.source}->${edge.target}:${edge.type}`));
     edges = (subgraph.edges || [])
       .filter((edge) => byId.has(edge.source) && byId.has(edge.target))
       .slice(0, MAX_EDGES);
+    const structureChanged = nodesChanged || edges.length !== previousEdges.size
+      || edges.some((edge) => !previousEdges.has(`${edge.source}->${edge.target}:${edge.type}`));
+    for (const entry of nodeState.values()) entry.degree = 0;
+    for (const edge of edges) {
+      byId.get(edge.source).degree += 1;
+      byId.get(edge.target).degree += 1;
+    }
     // Relation-type labels, diffed like the nodes so the view keeps them
     // between updates.
     // The id carries the relation type: a pair can carry several edges at
@@ -256,21 +260,25 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
       edgeLines = new THREE.LineSegments(geometry, edgeMaterial);
+      edgeLines.frustumCulled = false; // positions change every frame
       scene.add(edgeLines);
     }
     // New structure: let the layout re-settle, but gently.
-    alpha = Math.max(alpha, 1);
+    if (structureChanged) alpha = 1;
     // Nodes and labels may have been created just now: re-apply the current
     // search highlight so a poll does not undim what the query filtered out.
     applyHighlight();
-    if (autoFit && nodeState.size) {
-      const changed = !fittedNodeIds
-        || fittedNodeIds.size !== nodeState.size
-        || [...nodeState.keys()].some((id) => !fittedNodeIds.has(id));
-      if (changed) {
-        fittedNodeIds = new Set(nodeState.keys());
+    if (autoFit && nodeState.size && structureChanged) {
+      fitDisabled = false;
+      if (!fitApplied && !focusId) {
+        for (let step = 0; step < 320; step += 1) {
+          stepPhysics();
+          alpha = Math.max(ALPHA_FLOOR, alpha * (1 - ALPHA_DECAY_PER_FRAME));
+        }
+        fitCamera();
+        fitScheduled = false;
+      } else {
         fitScheduled = true;
-        fitDisabled = false; // a new world re-arms the framing
       }
     }
   }
@@ -355,9 +363,12 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
       entry.dx += -entry.pos.x * CENTERING;
       entry.dy += -entry.pos.y * CENTERING;
       entry.dz += -entry.pos.z * CENTERING;
-      entry.pos.x += entry.dx * alpha;
-      entry.pos.y += entry.dy * alpha;
-      entry.pos.z += entry.dz * alpha;
+      // Ownership hubs can have hundreds of springs. Bound the integration
+      // step by their stiffness so summed forces cannot overshoot/explode.
+      const step = alpha / Math.max(1, CENTERING + 2 * entry.degree * SPRING_STIFFNESS);
+      entry.pos.x += entry.dx * step;
+      entry.pos.y += entry.dy * step;
+      entry.pos.z += entry.dz * step;
     }
   }
 
@@ -426,6 +437,10 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     else orbit.centerTarget.set(0, 0, 0);
     orbit.center.lerp(orbit.centerTarget, 0.08);
     const { theta, phi, radius } = orbit.current;
+    if (autoFit) {
+      fog.near = radius + layoutRadius + 35;
+      fog.far = fog.near + Math.max(180, layoutRadius * 2);
+    }
     camera.position.set(
       orbit.center.x + radius * Math.sin(phi) * Math.sin(theta),
       orbit.center.y + radius * Math.cos(phi),
@@ -482,7 +497,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     event.preventDefault();
     orbit.lastInteraction = performance.now();
     fitDisabled = true; // a manual zoom outlives the next auto-fit
-    orbit.target.radius = Math.min(420, Math.max(70, orbit.target.radius * (1 + event.deltaY * 0.001)));
+    orbit.target.radius = Math.min(zoomMax, Math.max(70, orbit.target.radius * (1 + event.deltaY * 0.001)));
   }, { passive: false });
 
   // --- sizing / loop ----------------------------------------------------------
@@ -494,6 +509,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    if (autoFit && fitApplied && !fitDisabled && !focusId && !stage.hidden) fitCamera();
     return { width, height };
   }
   const observer = new ResizeObserver(() => resize());
@@ -522,10 +538,7 @@ export function createGraph3D(stage, { userName = null, onNodeClick, onFallback,
     // alpha re-heat that update() does when arming it, so a fresh world is
     // actually framed instead of dropped; a drag or wheel disarms it until
     // the next node-set change.
-    if (fitScheduled
-      && !fitDisabled
-      && !focusId
-      && alpha < 0.2
+    if (fitScheduled && !fitDisabled && !focusId && alpha < 0.2
       && now - orbit.lastInteraction > AUTO_FIT_IDLE_MS) {
       fitScheduled = false;
       fitCamera();
