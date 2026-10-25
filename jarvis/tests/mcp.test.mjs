@@ -8,6 +8,10 @@ import {
   isSafeFetchUrl, isBlockedIp, htmlToText,
   sourceHost, searchSourceNames, newsSourceNames,
 } from "../mcp/engines.mjs";
+import path from "node:path";
+import normalizeModule from "../mcp/normalize-external-args.cjs";
+
+const { normalizeExternalMcpArgs, normalizeCreateTaskKandev, inferLocalRepoPath } = normalizeModule;
 
 test("cleanHtml strips tags and named plus numeric entities", () => {
   assert.equal(cleanHtml("<b>Rocky</b> &amp; the <i>Rolling Stones</i>"), "Rocky & the Rolling Stones");
@@ -401,4 +405,261 @@ test("web_fetch rejects unsafe URLs over the protocol without touching the netwo
     assert.equal(result.isError, true, `web_fetch(${url}) is an error`);
     assert.match(result.content[0].text, pattern, `web_fetch(${url}) message matches`);
   }
+});
+
+function missingFs() {
+  const fail = () => {
+    throw new Error("fs disabled");
+  };
+  return { readdirSync: fail, statSync: fail };
+}
+
+function repoFs(base, workspace, repos) {
+  const root = path.join(base, workspace, "github");
+  const dirs = new Set([root]);
+  const entries = new Map();
+  for (const repo of repos) {
+    const [owner, repoName] = repo.split("/");
+    const ownerDir = path.join(root, owner);
+    const repoDir = path.join(root, owner, repoName);
+    dirs.add(ownerDir);
+    dirs.add(repoDir);
+    if (!entries.has(root)) entries.set(root, []);
+    if (!entries.has(ownerDir)) entries.set(ownerDir, []);
+    if (!entries.get(root).some((entry) => entry.name === owner)) {
+      entries.get(root).push({ name: owner, isDirectory: () => true });
+    }
+    if (!entries.get(ownerDir).some((entry) => entry.name === repoName)) {
+      entries.get(ownerDir).push({ name: repoName, isDirectory: () => true });
+    }
+  }
+  return {
+    readdirSync(target) {
+      return entries.get(path.normalize(target)) ?? [];
+    },
+    statSync(target) {
+      return { isDirectory: () => dirs.has(path.normalize(target)) };
+    },
+  };
+}
+
+const createTaskSchema = {
+  properties: {
+    workspace_id: { type: "string" },
+    title: { type: "string", maxLength: 60 },
+    prompt: { type: "string" },
+    local_path: { type: "string" },
+    repository_id: { type: "string" },
+    repository_url: { type: "string" },
+    parent_id: { type: "string" },
+    start_agent: { type: "boolean" },
+  },
+};
+
+test("normalizeExternalMcpArgs applies only to the base Kandev create_task tool", () => {
+  const args = { title: "Keep", description: "Old", priority: "high" };
+  assert.equal(normalizeExternalMcpArgs("other", args, createTaskSchema), args);
+  assert.equal(normalizeExternalMcpArgs("kandev-vm104_create_task_kandev", args, createTaskSchema), args);
+});
+
+test("normalizeCreateTaskKandev preserves non-plain arguments", () => {
+  const list = [];
+  assert.equal(normalizeCreateTaskKandev(null, createTaskSchema), null);
+  assert.equal(normalizeCreateTaskKandev(list, createTaskSchema), list);
+});
+
+test("normalizeCreateTaskKandev repairs the failing SVC Monitoring Prep call shape", () => {
+  const description = "Read kirks2003/cv, create MCQ Markdown files, commit and push.";
+  const input = {
+    workspace_id: "1f30614b-e0f6-4382-9bf2-89192b6140c8",
+    title: "SVC Monitoring Prep – Multiple-Choice-Fragen für alle Themenbereiche",
+    description,
+    priority: "high",
+    start_agent: false,
+  };
+  const out = normalizeCreateTaskKandev(input, createTaskSchema, {
+    localRepoBase: "/definitely-missing",
+    fsModule: missingFs(),
+  });
+
+  assert.equal(out.prompt, description);
+  assert.equal(out.description, undefined);
+  assert.equal(out.priority, undefined);
+  assert.ok(out.title.startsWith("SVC Monitoring Prep"));
+  assert.ok(out.title.length <= 60);
+  assert.equal(out.local_path, undefined);
+  assert.equal(out.start_agent, false);
+  assert.equal(input.prompt, undefined);
+  assert.equal(input.description, description);
+  assert.equal(input.priority, "high");
+});
+
+test("normalizeCreateTaskKandev keeps an existing prompt while removing unsupported fields", () => {
+  const out = normalizeCreateTaskKandev({
+    title: "Task",
+    prompt: "Keep this",
+    description: "Old",
+    priority: "high",
+  }, createTaskSchema, {
+    localRepoBase: "/definitely-missing",
+    fsModule: missingFs(),
+  });
+  assert.equal(out.prompt, "Keep this");
+  assert.equal(out.description, undefined);
+  assert.equal(out.priority, undefined);
+});
+
+test("normalizeCreateTaskKandev falls back to the known unsupported priority without a schema", () => {
+  const out = normalizeCreateTaskKandev({
+    workspace_id: "ws",
+    title: "Task",
+    description: "Body",
+    priority: "high",
+  }, undefined, {
+    localRepoBase: "/definitely-missing",
+    fsModule: missingFs(),
+  });
+  assert.equal(out.prompt, "Body");
+  assert.equal(out.description, undefined);
+  assert.equal(out.priority, undefined);
+  assert.equal(out.workspace_id, "ws");
+  assert.equal(out.local_path, undefined);
+});
+
+test("normalizeCreateTaskKandev does not delete fields when inputSchema.properties is empty", () => {
+  const out = normalizeCreateTaskKandev({
+    workspace_id: "ws",
+    title: "Task",
+    description: "Body",
+    priority: "high",
+  }, { properties: {} }, {
+    localRepoBase: "/definitely-missing",
+    fsModule: missingFs(),
+  });
+  assert.equal(out.prompt, "Body");
+  assert.equal(out.workspace_id, "ws");
+  assert.equal(out.title, "Task");
+  assert.equal(out.priority, undefined);
+});
+
+test("normalizeCreateTaskKandev removes unknown properties from a populated schema", () => {
+  const out = normalizeCreateTaskKandev({
+    title: "Task",
+    description: "Body",
+    priority: "high",
+    notes: "Drop",
+  }, createTaskSchema, {
+    localRepoBase: "/definitely-missing",
+    fsModule: missingFs(),
+  });
+  assert.equal(out.priority, undefined);
+  assert.equal(out.notes, undefined);
+  assert.equal(out.prompt, "Body");
+});
+
+test("normalizeCreateTaskKandev truncates title according to the live inputSchema maxLength", () => {
+  const out = normalizeCreateTaskKandev({
+    title: "abcdefghij",
+    description: "",
+  }, { properties: { title: { maxLength: 4 } } }, {
+    localRepoBase: "/definitely-missing",
+    fsModule: missingFs(),
+  });
+  assert.equal(out.title, "abcd");
+});
+
+test("normalizeCreateTaskKandev infers the single local repository from the prompt", () => {
+  const base = "/tmp/jarvis-normalize-test";
+  const workspace = "ws";
+  const fsModule = repoFs(base, workspace, ["kirks2003/cv"]);
+  const out = normalizeCreateTaskKandev({
+    workspace_id: workspace,
+    title: "Update cv",
+    description: "Please update kirks2003/cv",
+    priority: "high",
+  }, createTaskSchema, { localRepoBase: base, fsModule });
+
+  assert.equal(out.local_path, path.join(base, workspace, "github", "kirks2003", "cv"));
+  assert.equal(out.prompt, "Please update kirks2003/cv");
+});
+
+test("normalizeCreateTaskKandev does not infer when multiple local repositories match", () => {
+  const base = "/tmp/jarvis-normalize-test";
+  const workspace = "ws";
+  const fsModule = repoFs(base, workspace, ["kirks2003/cv", "kirks2003/rw_mesh"]);
+  const out = normalizeCreateTaskKandev({
+    workspace_id: workspace,
+    title: "Update",
+    description: "Compare kirks2003/cv with kirks2003/rw_mesh",
+    priority: "high",
+  }, createTaskSchema, { localRepoBase: base, fsModule });
+
+  assert.equal(out.local_path, undefined);
+});
+
+test("inferLocalRepoPath only returns one verifiable local owner/repo match", () => {
+  const base = "/tmp/jarvis-normalize-test";
+  const workspace = "ws";
+  const single = repoFs(base, workspace, ["kirks2003/cv"]);
+  assert.equal(
+    inferLocalRepoPath({ workspaceId: workspace, title: "Update kirks2003/cv", prompt: "", base, fsModule: single }),
+    path.join(base, workspace, "github", "kirks2003", "cv"),
+  );
+  assert.equal(inferLocalRepoPath({ workspaceId: "", title: "Update kirks2003/cv", prompt: "", base, fsModule: single }), "");
+  assert.equal(inferLocalRepoPath({ workspaceId: workspace, title: "Update kirks2003/cv", prompt: "", base, fsModule: missingFs() }), "");
+
+  const ambiguous = repoFs(base, workspace, ["kirks2003/cv", "kirks2003/rw_mesh"]);
+  assert.equal(
+    inferLocalRepoPath({ workspaceId: workspace, title: "Compare kirks2003/cv and kirks2003/rw_mesh", prompt: "", base, fsModule: ambiguous }),
+    "",
+  );
+
+  const numericOwner = repoFs(base, workspace, ["123/cv"]);
+  assert.equal(inferLocalRepoPath({ workspaceId: workspace, title: "Update 123/cv", prompt: "", base, fsModule: numericOwner }), "");
+});
+
+test("normalizeCreateTaskKandev does not infer when an explicit repository locator exists", () => {
+  const base = "/tmp/jarvis-normalize-test";
+  const workspace = "ws";
+  const fsModule = repoFs(base, workspace, ["kirks2003/cv"]);
+
+  const withLocalPath = normalizeCreateTaskKandev({
+    workspace_id: workspace,
+    title: "Update",
+    description: "kirks2003/cv",
+    local_path: "/explicit",
+    priority: "high",
+  }, createTaskSchema, { localRepoBase: base, fsModule });
+  assert.equal(withLocalPath.local_path, "/explicit");
+
+  for (const [key, value] of [
+    ["repository_id", "repo-id"],
+    ["repository_url", "https://github.com/kirks2003/cv"],
+    ["parent_id", "self"],
+  ]) {
+    const out = normalizeCreateTaskKandev({
+      workspace_id: workspace,
+      title: "Update",
+      description: "kirks2003/cv",
+      [key]: value,
+      priority: "high",
+    }, createTaskSchema, { localRepoBase: base, fsModule });
+    assert.equal(out[key], value, key);
+    assert.equal(out.local_path, undefined, `${key} local_path`);
+  }
+});
+
+test("normalizeCreateTaskKandev uses the pre-truncation title for repository inference", () => {
+  const base = "/tmp/jarvis-normalize-test";
+  const workspace = "ws";
+  const fsModule = repoFs(base, workspace, ["kirks2003/cv"]);
+  const longTitle = "SVC Monitoring Prep ".repeat(3) + "kirks2003/cv";
+  const out = normalizeCreateTaskKandev({
+    workspace_id: workspace,
+    title: longTitle,
+    description: "",
+  }, createTaskSchema, { localRepoBase: base, fsModule });
+
+  assert.ok(out.title.length <= 60);
+  assert.equal(out.local_path, path.join(base, workspace, "github", "kirks2003", "cv"));
 });

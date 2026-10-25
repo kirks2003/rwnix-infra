@@ -5,10 +5,12 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const Database = require("better-sqlite3");
 const graphdb = require("./graphdb");
+const normalizeExternalMcpArgs = require("./mcp/normalize-external-args.cjs");
 
 const root = __dirname;
 const publicDir = path.join(root, "public");
 const port = Number(process.env.PORT || 8094);
+const APP_RELEASE_VERSION = "2026.10.25-1";
 
 const parsedUsers = parseUsers(process.env.USERS || "Mila,Roman,admin");
 
@@ -1185,6 +1187,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && pathname === "/api/health") {
       return json(res, 200, {
         ok: true,
+        appVersion: APP_RELEASE_VERSION,
         requestId,
         uptimeSec: Math.round(process.uptime()),
         whisperEndpoints: config.whisperProfiles.reduce((count, profile) => count + profile.endpoints.length, 0),
@@ -1240,6 +1243,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && pathname === "/api/config") {
       return json(res, 200, {
         user: req.user,
+        appVersion: APP_RELEASE_VERSION,
         wakePhrase: config.wakePhrase,
         silenceMs: config.silenceMs,
         whisperEndpoints: config.whisperEndpoints.map(redactUrl),
@@ -2042,7 +2046,7 @@ async function externalMcpToolsFor(entry, signal) {
   for (const tool of listed.tools || []) {
     const name = `${entry.id}_${tool.name}`;
     if (!name) continue;
-    lookup.set(name, { client, tool: tool.name, entry });
+    lookup.set(name, { client, tool: tool.name, entry, inputSchema: tool.inputSchema });
     openai.push({
       type: "function",
       function: {
@@ -2859,9 +2863,15 @@ async function runBrain({ messages, brainProfile, user, useTools, webTools: webT
         // Mesh-internal service tools (namespaced <id>_<tool>): one shared
         // child per service, so the call itself carries no user context —
         // the transport (ssh key / API token / loopback endpoint) IS the scope.
-        const { client, tool, entry } = externalLookup.get(name);
+        const { client, tool, entry, inputSchema } = externalLookup.get(name);
+        let finalArgs = args;
         try {
-          const result = await withAbort(client.call(tool, args, EXTERNAL_TOOL_TIMEOUT_MS), totalSignal);
+          finalArgs = normalizeExternalMcpArgs(String(tool || ""), args, inputSchema) || args;
+        } catch {
+          finalArgs = args;
+        }
+        try {
+          const result = await withAbort(client.call(tool, finalArgs, EXTERNAL_TOOL_TIMEOUT_MS), totalSignal);
           const resultText = (result.content || []).map((item) => item.text || "").join("\n").trim();
           console.log(JSON.stringify({ level: "info", requestId, msg: "external_mcp_tool", server: entry.id, tool: name, ok: !result.isError, ms: Date.now() - started, chars: resultText.length }));
           local.push({ role: "tool", tool_call_id: call.id, content: resultText || "No result." });
