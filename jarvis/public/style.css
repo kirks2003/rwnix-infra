@@ -934,7 +934,24 @@ body.panels-off .transcript-list {
 }
 
 .transcript-body.pending {
+  min-height: 1.4em;
   color: var(--muted);
+}
+
+.transcript-body.pending::after {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  margin-left: 2px;
+  background: var(--muted);
+  transform: translateY(0.14em);
+  animation: transcript-caret-blink 1.1s steps(1, end) infinite;
+}
+
+@keyframes transcript-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
 }
 
 .transcript-empty {

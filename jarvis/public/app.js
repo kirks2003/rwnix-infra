@@ -1863,7 +1863,7 @@ function beginTurn(prompt) {
   for (const empty of el.conversationText.querySelectorAll(".transcript-empty")) empty.remove();
   const ts = Date.now();
   el.conversationText.append(transcriptEntry(prompt, ts, "prompt"));
-  const pending = transcriptEntry("…", ts, "answer");
+  const pending = transcriptEntry("", ts, "answer");
   pending.querySelector(".transcript-body").classList.add("pending");
   el.conversationText.append(pending);
   scrollTranscripts();
