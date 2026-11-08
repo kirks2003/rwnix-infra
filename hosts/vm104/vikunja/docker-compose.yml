@@ -29,7 +29,10 @@ services:
     volumes:
       - vikunja_files:/app/vikunja/files
     ports:
+      # 172.17.0.1 is the docker0 gateway Jarvis uses via host.docker.internal;
+      # the LAN IP is for the hub NPM external entry (Authelia + Basic).
       - "172.17.0.1:34563:3456"
+      - "192.168.54.111:34563:3456"
     depends_on: [vikunja-db]
     restart: unless-stopped
     networks:

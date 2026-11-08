@@ -4803,3 +4803,22 @@ the NPM access-list htpasswd and the host-local `.env` on gpu-2).
   `demo`/new → 200, `demo`/old → 401; login `Sarah`/new → 200, `Sarah`/old
   → 403; `admin` (unchanged) → 200; `/api/health` ok (`aiProfiles: 2`,
   whisper + tts endpoints intact).
+
+## 2026-11-08: local Vikunja instances exposed through NPM (external), Jarvis unchanged
+
+The per-host local Vikunja instance (vm104 / gra-1 / lim-1) is now reachable
+through the existing nbg-1 / vie-1 NPM + Authelia entrance: `vikunja.` (vm104),
+`vikunja-gra.` (gra-1), `vikunja-lim.` (lim-1), served from both hubs with
+Authelia two-factor + NPM Basic; `/api/` and `/dav/` are Basic-exempt so
+Vikunja's own Bearer auth and CalDAV clients keep working. NPM rows: nbg-1
+20/77/78, vie-1 32/89/90 (hosts 20/32 were the retired gateway instances,
+re-pointed to the local stack).
+
+The app-side change is confined to `/home/ubuntu/docker/vikunja` (vm104) and
+`/home/ubuntu/docker/jarvis-dr/vikunja` (gra-1, lim-1): the compose gained a
+second host port binding `<lan-ip>:34563:3456` beside the internal
+`172.17.0.1:34563:3456`, and `VIKUNJA_PUBLIC_URL` was set to the canonical
+nbg-1 name. **Jarvis is unaffected:** it still reaches its own local Vikunja
+over `host.docker.internal:34563` and its graph over `bolt://neo4j:7687`,
+both on the internal docker bridge. No Jarvis, Neo4j, MCP-token, firewall, or
+certificate change.
