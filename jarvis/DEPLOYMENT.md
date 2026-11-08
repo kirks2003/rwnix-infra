@@ -4809,8 +4809,8 @@ the NPM access-list htpasswd and the host-local `.env` on gpu-2).
 The per-host local Vikunja instance (vm104 / gra-1 / lim-1) is now reachable
 through the existing nbg-1 / vie-1 NPM + Authelia entrance: `vikunja.` (vm104),
 `vikunja-gra.` (gra-1), `vikunja-lim.` (lim-1), served from both hubs with
-Authelia two-factor + NPM Basic; `/api/` and `/dav/` are Basic-exempt so
-Vikunja's own Bearer auth and CalDAV clients keep working. NPM rows: nbg-1
+Authelia two-factor only (no NPM Basic), so Vikunja's own Bearer auth and
+CalDAV clients work unchanged. NPM rows: nbg-1
 20/77/78, vie-1 32/89/90 (hosts 20/32 were the retired gateway instances,
 re-pointed to the local stack).
 
