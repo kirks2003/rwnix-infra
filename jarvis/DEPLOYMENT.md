@@ -4822,3 +4822,13 @@ nbg-1 name. **Jarvis is unaffected:** it still reaches its own local Vikunja
 over `host.docker.internal:34563` and its graph over `bolt://neo4j:7687`,
 both on the internal docker bridge. No Jarvis, Neo4j, MCP-token, firewall, or
 certificate change.
+
+## 2026-11-08 (update): hub Kandev Vikunja MCP repointed; DR vikunja-mcp added
+
+- gra-1 / lim-1 regained a `vikunja-mcp` container (re-added to
+  `/home/ubuntu/docker/jarvis-dr/vikunja/docker-compose.yml`, built and
+  started); MCP `initialize` and the token (`GET /api/v1/user`) verified.
+- The nbg-1 / vie-1 Kandev Vikunja MCP was repointed to the checkmk-pipeline
+  paired DR host: nbg-1 -> lim-1 (`ubuntu@192.168.115.11`), vie-1 -> gra-1
+  (`ubuntu@192.168.116.11`); vm104 unchanged. Both hub Kandev containers were
+  restarted to apply. The hub Vikunja stacks stay stopped.
